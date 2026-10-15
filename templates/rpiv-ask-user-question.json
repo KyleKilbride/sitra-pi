@@ -1,0 +1,10 @@
+{
+	"guidance": {
+		"promptSnippet": "Ask {{name}} one question when you genuinely need their decision",
+		"promptGuidelines": [
+			"Ask exactly one question per ask_user_question call, and only for a decision that is genuinely {{name}}'s (product behaviour, priorities, anything that changes what was agreed). Decide everything else yourself.",
+			"{{name}} often sees only the dialog. Put the context inside the question itself: in plain words, what this is about, why it matters now, and what each option leads to.",
+			"Options are 2-4 real choices drawn from what {{name}} has asked for. Don't add recommendation labels. If you lean one way, say so in the question's text in one sentence."
+		]
+	}
+}

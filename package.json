@@ -1,0 +1,47 @@
+{
+	"name": "sitra",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "A visible, collaborative agent setup on Pi and herdr: a lead you talk to, teammates in panes you can watch, long runs that never block, and a per-repo knowledge base you approve.",
+	"keywords": [
+		"pi-package"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/KyleKilbride/sitra-pi.git"
+	},
+	"packageManager": "pnpm@11.5.2",
+	"engines": {
+		"node": ">=24.12"
+	},
+	"bin": {
+		"sitra": "./bin/sitra.ts"
+	},
+	"files": [
+		"bin",
+		"cli",
+		"extensions",
+		"templates"
+	],
+	"pi": {
+		"extensions": [
+			"./extensions/knowledge.ts",
+			"./extensions/lead.ts"
+		]
+	},
+	"scripts": {
+		"check": "pnpm typecheck && pnpm lint && pnpm test",
+		"typecheck": "tsc -p tsconfig.json",
+		"lint": "biome check .",
+		"format": "biome check --write .",
+		"test": "vitest run"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.5.15",
+		"@types/node": "24.19.0",
+		"typebox": "1.3.34",
+		"typescript": "7.0.2",
+		"vitest": "5.0.3"
+	}
+}
