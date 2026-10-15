@@ -22,6 +22,8 @@ export interface SessionRecord {
 	parentSessionFile?: string;
 	paneId?: string;
 	status: SessionStatus;
+	/** Found through herdr, not the sitra registry: an older or non-sitra Pi with no inbox. */
+	discovered?: boolean;
 	waitingFor?: string;
 	task?: string;
 	startedAt: string;
@@ -31,6 +33,8 @@ export interface SessionRecord {
 export interface TranscriptItem {
 	role: "user" | "assistant" | "tool" | "custom";
 	text: string;
+	/** Tool results only: whether the call failed. */
+	error?: boolean;
 }
 
 export interface InboxMessage {
@@ -47,6 +51,38 @@ export interface SessionAlert {
 	sessionId: string;
 	kind: "waiting_for_user" | "stopped" | "repeated_errors" | "stalled";
 	summary: string;
+}
+
+export interface FrictionReport {
+	totalSessions: number;
+	toolErrorCounts: Record<string, number>;
+	hotspots: string[];
+}
+
+export function auditSessionsFriction(
+	records: readonly SessionRecord[],
+	readTail: (sessionFile: string) => TranscriptItem[],
+): FrictionReport {
+	const workers = records.filter((r) => r.role !== "tower");
+	const toolErrorCounts: Record<string, number> = {};
+	const examples: Record<string, string> = {};
+	for (const r of workers) {
+		if (!r.sessionFile) continue;
+		for (const item of readTail(r.sessionFile)) {
+			if (item.role !== "tool" || !item.error) continue;
+			const match = /^([a-zA-Z0-9_-]+) error:\s*(.*)$/.exec(item.text);
+			const tool = match?.[1] ?? "tool";
+			toolErrorCounts[tool] = (toolErrorCounts[tool] ?? 0) + 1;
+			if (!examples[tool] && match?.[2]) examples[tool] = `${sessionLabel(r)}: ${match[2]}`;
+		}
+	}
+	const hotspots = Object.entries(toolErrorCounts)
+		.sort((a, b) => b[1] - a[1])
+		.map(
+			([tool, count]) =>
+				`${tool} (${count} error${count === 1 ? "" : "s"}${examples[tool] ? ` — e.g. ${examples[tool]}` : ""})`,
+		);
+	return { totalSessions: workers.length, toolErrorCounts, hotspots };
 }
 
 const STALL_MS = 10 * 60_000;
@@ -85,12 +121,17 @@ export function detectSessionAlerts(
 		}
 		if (r.sessionFile && readTail) {
 			const tail = readTail(r.sessionFile);
+			// Failed tool results in a row, newest first. A turn that only calls tools sits between retries and doesn't
+			// break the streak; a successful result, the person, or the agent saying something does.
 			let streak = 0;
 			let lastError = "";
 			for (let i = tail.length - 1; i >= 0; i--) {
-				if (tail[i]?.role === "tool") {
+				const item = tail[i];
+				if (item?.role === "tool" && item.error) {
 					streak++;
-					if (!lastError) lastError = tail[i]?.text ?? "";
+					if (!lastError) lastError = item.text;
+				} else if (item?.role === "assistant" && item.text.startsWith("[tool:")) {
+					// A tool-call-only turn.
 				} else {
 					break;
 				}
@@ -228,6 +269,12 @@ export function updateSession(
 	}
 }
 
+/** Moves every message waiting in one inbox into another, e.g. when a session's id changes. */
+export function moveInbox(profileDir: string, fromSessionId: string, toSessionId: string): void {
+	if (fromSessionId === toSessionId) return;
+	for (const msg of drainInbox(profileDir, fromSessionId)) sendInboxMessage(profileDir, { ...msg, toSessionId });
+}
+
 export function removeSession(profileDir: string, id: string): void {
 	rmSync(recordPath(profileDir, id), { force: true });
 }
@@ -261,16 +308,18 @@ export function groupWorkerSessions(
 	const leads = workers.filter((r) => r.role === "lead");
 	const teammates = workers.filter((r) => r.role === "teammate");
 	const claimed = new Set<string>();
+	// A teammate that names its parent belongs to that lead only. Folder and repo are a fallback for teammates that
+	// don't, because every worktree of a repo shares one repo value.
+	const parentOf = (t: SessionRecord): SessionRecord | undefined => {
+		if (t.parentSessionFile) {
+			const parent = leads.find((l) => l.sessionFile === t.parentSessionFile);
+			if (parent) return parent;
+		}
+		return leads.find((l) => l.cwd === t.cwd) ?? leads.find((l) => l.repo === t.repo);
+	};
 	const groups = leads.map((lead) => {
-		const children = teammates.filter((t) => {
-			if (claimed.has(t.id)) return false;
-			const match =
-				(Boolean(t.parentSessionFile) && t.parentSessionFile === lead.sessionFile) ||
-				t.cwd === lead.cwd ||
-				t.repo === lead.repo;
-			if (match) claimed.add(t.id);
-			return match;
-		});
+		const children = teammates.filter((t) => parentOf(t) === lead);
+		for (const t of children) claimed.add(t.id);
 		return { lead, teammates: children };
 	});
 	for (const orphan of teammates) {
@@ -363,9 +412,14 @@ export function readTranscriptTail(jsonl: string, maxItems = 8): TranscriptItem[
 			} else if (msg.role === "assistant") {
 				const text = extractText(msg.content);
 				if (text) items.push({ role: "assistant", text });
-			} else if (msg.role === "toolResult" && msg.isError) {
-				const text = extractText(msg.content).split("\n")[0] ?? "failed";
-				items.push({ role: "tool", text: `${msg.toolName ?? "tool"} error: ${text}` });
+			} else if (msg.role === "toolResult") {
+				const tool = msg.toolName ?? "tool";
+				if (msg.isError) {
+					const text = extractText(msg.content).split("\n")[0] || "failed";
+					items.push({ role: "tool", text: `${tool} error: ${text}`, error: true });
+				} else {
+					items.push({ role: "tool", text: `${tool} ok`, error: false });
+				}
 			}
 		} catch {
 			// Skip malformed lines.

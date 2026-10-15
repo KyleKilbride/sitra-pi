@@ -3,17 +3,20 @@
  * between the tower and worker leads, and when launched as `sitra tower` (or by the tower's personal name), gives the
  * agent its tower rules and tools to inspect and message workers across projects.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Type } from "typebox";
 import { knowledgeRepo } from "./kb.ts";
 import {
+	auditSessionsFriction,
 	detectSessionAlerts,
 	drainInbox,
 	findSession,
 	formatSessionsReport,
 	gitBranch,
 	listSessions,
+	moveInbox,
 	readTranscriptTail,
 	removeSession,
 	type SessionRecord,
@@ -37,6 +40,7 @@ export function towerRules(userName?: string, towerName?: string): string {
 - **What to flag for ${who}:**
   - Anyone in \`waiting_for_user\` (needs ${who}'s answer).
   - Anyone who looks off track: drifting from the task ${who} gave them, repeating the same failing tool or test, or stopped unexpectedly.
+- **Improving sitra (\`audit_sessions\`):** use \`audit_sessions\` to spot repeated tool errors and friction across sessions. Propose durable setup improvements with \`kb_propose\` (kind \`setup\`), or edit the sitra repo directly when ${who} gives the go.
 - **How to talk to ${who}:** the headline or ask first, in one line, then a few short lines in plain everyday words. Name the project and branch — never send ${who} to look up session IDs or file paths.
 `;
 }
@@ -112,15 +116,74 @@ export default function sitraTower(pi: Pi): void {
 	const readFileTail = (sessionFile: string) =>
 		existsSync(sessionFile) ? readTranscriptTail(readFileSync(sessionFile, "utf8"), 8) : [];
 
+	const allSessions = (): SessionRecord[] => {
+		const recorded = listSessions(profileDir);
+		if (process.env.HERDR_ENV !== "1") return recorded;
+		try {
+			const raw = execFileSync("herdr", ["agent", "list"], {
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "ignore"],
+			});
+			const parsed = JSON.parse(raw) as {
+				result?: {
+					agents?: {
+						agent?: string;
+						agent_status?: string;
+						cwd?: string;
+						pane_id?: string;
+						agent_session?: { value?: string };
+					}[];
+				};
+			};
+			for (const a of parsed.result?.agents ?? []) {
+				const sessionFile = a.agent_session?.value;
+				if (a.agent !== "pi" || !sessionFile || !sessionFile.startsWith(profileDir)) continue;
+				if (a.pane_id && a.pane_id === process.env.HERDR_PANE_ID) continue;
+				if (recorded.some((r) => r.sessionFile === sessionFile || (a.pane_id && r.paneId === a.pane_id))) continue;
+				const idMatch = /_([0-9a-f-]{36})\.jsonl$/i.exec(sessionFile);
+				const id = idMatch?.[1] ?? (a.pane_id ? `herdr-${a.pane_id}` : basename(sessionFile, ".jsonl"));
+				const cwd = a.cwd || process.cwd();
+				const tail = readFileTail(sessionFile);
+				const lastUser = [...tail].reverse().find((t) => t.role === "user")?.text;
+				const mtime = existsSync(sessionFile) ? statSync(sessionFile).mtime.toISOString() : startedAt;
+				recorded.push({
+					id,
+					role: "lead",
+					discovered: true,
+					pid: process.pid,
+					cwd,
+					repo: knowledgeRepo(cwd),
+					...(gitBranch(cwd) ? { branch: gitBranch(cwd) } : {}),
+					sessionFile,
+					...(a.pane_id ? { paneId: a.pane_id } : {}),
+					status: a.agent_status === "blocked" ? "waiting_for_user" : a.agent_status === "working" ? "working" : "idle",
+					...(lastUser ? { task: summarizeTask(lastUser) } : {}),
+					startedAt: mtime,
+					updatedAt: mtime,
+				});
+			}
+		} catch {
+			// Fall back to file registry only.
+		}
+		return recorded;
+	};
+
 	const syncRecord = (ctx: Ctx, patch: Partial<SessionRecord>): void => {
 		lastCtx = ctx;
 		const id = ctx.sessionManager?.getSessionId?.() || `pid-${process.pid}`;
-		if (currentId && currentId !== id) removeSession(profileDir, currentId);
+		if (currentId && currentId !== id) {
+			// Keep anything already sent to the old id.
+			moveInbox(profileDir, currentId, id);
+			removeSession(profileDir, currentId);
+		}
 		currentId = id;
 		const sessionFile = ctx.sessionManager?.getSessionFile?.();
 		const now = new Date().toISOString();
 		const existing = updateSession(profileDir, id, {
 			...patch,
+			// A resumed session can find its own record left behind by a crash; it's this process now.
+			pid: process.pid,
+			...(process.env.HERDR_PANE_ID ? { paneId: process.env.HERDR_PANE_ID } : {}),
 			cwd: ctx.cwd,
 			branch: gitBranch(ctx.cwd),
 			...(sessionFile ? { sessionFile } : {}),
@@ -272,7 +335,7 @@ export default function sitraTower(pi: Pi): void {
 		promptSnippet: "list_sessions: list all running sitra worker sessions and their status",
 		parameters: Type.Object({}),
 		async execute() {
-			const sessions = listSessions(profileDir);
+			const sessions = allSessions();
 			const alerts = detectSessionAlerts(sessions, readFileTail);
 			for (const a of alerts) seenAlerts.add(a.key);
 			const report = formatSessionsReport(sessions);
@@ -298,7 +361,7 @@ export default function sitraTower(pi: Pi): void {
 		async execute(_id, params) {
 			const query = String(params.query ?? "");
 			const maxItems = typeof params.turns === "number" ? params.turns : 8;
-			const sessions = listSessions(profileDir);
+			const sessions = allSessions();
 			const match = findSession(sessions, query);
 			if (!match) {
 				return {
@@ -341,12 +404,24 @@ export default function sitraTower(pi: Pi): void {
 		async execute(_id, params) {
 			const query = String(params.query ?? "");
 			const text = String(params.message ?? "").trim();
-			const sessions = listSessions(profileDir).filter((s) => s.role === "lead" && s.status !== "stopped");
+			const sessions = allSessions().filter((s) => s.role === "lead" && s.status !== "stopped");
 			const match = findSession(sessions, query);
 			if (!match) {
 				return {
 					content: [{ type: "text", text: `No active worker lead matched "${query}".` }],
 					details: { sent: false },
+				};
+			}
+			if (match.discovered) {
+				// herdr shows it, but it isn't running sitra's inbox, so nothing would ever read the message.
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Not sent: ${basename(match.repo || match.cwd)}${match.branch ? ` (${match.branch})` : ""} has no sitra inbox (it started before sitra's tower, or outside sitra). It needs a restart with sitra to receive messages.`,
+						},
+					],
+					details: { sent: false, reason: "no_inbox", toSessionId: match.id },
 				};
 			}
 			const sent = sendInboxMessage(profileDir, {
@@ -363,6 +438,31 @@ export default function sitraTower(pi: Pi): void {
 					},
 				],
 				details: { sent: true, toSessionId: match.id, messageId: sent.id },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "audit_sessions",
+		label: "Audit sitra sessions for friction",
+		description:
+			"Scan all worker sessions and their recent transcripts for repeated tool errors, waiting bottlenecks, and patterns that suggest a sitra setup improvement.",
+		promptSnippet: "audit_sessions: aggregate tool errors and friction across worker sessions",
+		parameters: Type.Object({}),
+		async execute() {
+			const sessions = allSessions();
+			const audit = auditSessionsFriction(sessions, (file) =>
+				existsSync(file) ? readTranscriptTail(readFileSync(file, "utf8"), 30) : [],
+			);
+			const lines = [
+				`Sessions checked: ${audit.totalSessions}`,
+				...(audit.hotspots.length > 0
+					? ["Tool error hotspots:", ...audit.hotspots.map((h) => `- ${h}`)]
+					: ["No tool error hotspots in recent turns."]),
+			];
+			return {
+				content: [{ type: "text", text: lines.join("\n") }],
+				details: audit,
 			};
 		},
 	});
