@@ -7,6 +7,19 @@ export function piArgs(config: Config, args: readonly string[]): string[] {
 	return ["--no-skills", ...config.skills.flatMap((s) => ["--skill", s]), ...args];
 }
 
+export function launchCommand(
+	config: Config,
+	args: readonly string[],
+	role: "lead" | "tower" = "lead",
+): { command: string; args: string[] } {
+	const fullArgs = piArgs(config, args);
+	if (role === "tower" && config.towerCommand && config.towerCommand.length > 0) {
+		const [command = "pi", ...prefix] = config.towerCommand;
+		return { command, args: [...prefix, ...fullArgs] };
+	}
+	return { command: "pi", args: fullArgs };
+}
+
 export function piEnv(
 	sitra: string,
 	config: Config,
@@ -29,6 +42,11 @@ export function piEnv(
 		delete base.SITRA_TOWER_NAME;
 	}
 	return base;
+}
+
+/** Whether the first CLI argument starts the btop-style radar TUI (`sitra radar`). */
+export function isRadarCommand(first: string | undefined): boolean {
+	return first?.trim().toLowerCase() === "radar";
 }
 
 /** Whether the first CLI argument starts the tower: `sitra tower` or `sitra <its personal name>` (case-insensitive). */

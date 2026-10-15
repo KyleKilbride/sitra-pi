@@ -1,5 +1,5 @@
 /** Where sitra keeps its own state: ~/.sitra (or $SITRA_HOME), holding config.json and the Pi profile. */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export interface Config {
@@ -9,10 +9,13 @@ export interface Config {
 	skills: string[];
 	/** Personal name given to the tower (the person's number 2) on its first launch. */
 	tower?: string;
+	/** Optional command prefix to launch the tower (e.g. a local connector wrapper) instead of plain `pi`. */
+	towerCommand?: string[];
 }
 
 export function sitraHome(env: Record<string, string | undefined>, home: string): string {
-	return env.SITRA_HOME || join(home, ".sitra");
+	const raw = env.SITRA_HOME || join(home, ".sitra");
+	return existsSync(raw) ? realpathSync(raw) : raw;
 }
 
 export function profileDir(sitra: string): string {
@@ -23,7 +26,11 @@ export function readConfig(sitra: string): Config {
 	const file = join(sitra, "config.json");
 	if (!existsSync(file)) return { name: "", skills: [] };
 	const raw = JSON.parse(readFileSync(file, "utf8")) as Partial<Config>;
-	const base: Config = { name: raw.name ?? "", skills: raw.skills ?? [] };
+	const base: Config = {
+		name: raw.name ?? "",
+		skills: raw.skills ?? [],
+		...(Array.isArray(raw.towerCommand) && raw.towerCommand.length > 0 ? { towerCommand: raw.towerCommand } : {}),
+	};
 	return raw.tower?.trim() ? { ...base, tower: raw.tower.trim() } : base;
 }
 

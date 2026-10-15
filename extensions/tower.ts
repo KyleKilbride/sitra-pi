@@ -48,6 +48,9 @@ export function towerRules(userName?: string, towerName?: string): string {
 interface Ctx {
 	cwd: string;
 	isIdle?: () => boolean;
+	ui?: {
+		notify?(message: string, level?: "info" | "warning" | "error"): void;
+	};
 	sessionManager?: {
 		getSessionId?(): string | undefined;
 		getSessionFile?(): string | undefined;
@@ -82,6 +85,13 @@ interface Pi {
 			details: unknown;
 		}>;
 	}): void;
+	registerCommand?(
+		name: string,
+		command: {
+			description: string;
+			handler(args: string, ctx: Ctx): Promise<void>;
+		},
+	): void;
 	events: {
 		on(channel: string, handler: (data: { active?: boolean }) => void): void;
 	};
@@ -111,7 +121,43 @@ export default function sitraTower(pi: Pi): void {
 	let currentTask: string | undefined;
 	let isBusy = false;
 	let lastCtx: Ctx | undefined;
+	let radarPane: string | undefined;
 	const seenAlerts = new Set<string>();
+
+	const herdr = (args: string[]) =>
+		execFileSync("herdr", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+	const paneAlive = (id: string): boolean => {
+		try {
+			herdr(["pane", "get", id]);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	const openRadarPane = (cwd: string): string | undefined => {
+		if (process.env.HERDR_ENV !== "1" || !process.env.HERDR_PANE_ID) return undefined;
+		try {
+			if (radarPane && paneAlive(radarPane)) return radarPane;
+			const split = herdr([
+				"pane",
+				"split",
+				"--current",
+				"--direction",
+				"right",
+				"--ratio",
+				"0.42",
+				"--no-focus",
+				"--cwd",
+				cwd,
+			]);
+			radarPane = /"pane_id":"([^"]+)"/.exec(split)?.[1];
+			if (!radarPane) return undefined;
+			herdr(["pane", "run", radarPane, "sitra radar"]);
+			return radarPane;
+		} catch {
+			return undefined;
+		}
+	};
 
 	const readFileTail = (sessionFile: string) =>
 		existsSync(sessionFile) ? readTranscriptTail(readFileSync(sessionFile, "utf8"), 8) : [];
@@ -256,6 +302,9 @@ export default function sitraTower(pi: Pi): void {
 	pi.on("session_start", (_event, ctx) => {
 		isBusy = false;
 		syncRecord(ctx, { status: "idle" });
+		if (role === "tower" && process.env.SITRA_NO_RADAR !== "1") {
+			openRadarPane(ctx.cwd);
+		}
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {
@@ -290,6 +339,14 @@ export default function sitraTower(pi: Pi): void {
 
 	const cleanup = () => {
 		if (inboxTimer) clearInterval(inboxTimer);
+		if (radarPane) {
+			try {
+				herdr(["pane", "close", radarPane]);
+			} catch {
+				// Already closed.
+			}
+			radarPane = undefined;
+		}
 		if (!currentId) return;
 		removeSession(profileDir, currentId);
 		currentId = undefined;
@@ -326,6 +383,17 @@ export default function sitraTower(pi: Pi): void {
 	}
 
 	if (role !== "tower") return;
+
+	pi.registerCommand?.("radar", {
+		description: "Open (or focus) the live btop-style sitra radar in a right-hand herdr pane",
+		async handler(_args, ctx) {
+			const pane = openRadarPane(ctx.cwd);
+			ctx.ui?.notify?.(
+				pane ? `Radar open in herdr pane ${pane}.` : "Run `sitra radar` in a terminal pane to open the radar.",
+				"info",
+			);
+		},
+	});
 
 	pi.registerTool({
 		name: "list_sessions",

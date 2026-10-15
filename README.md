@@ -35,6 +35,7 @@ Then, inside herdr, in any repo:
 
     sitra            # start the lead here
     sitra tower      # start your tower (your number 2) watching all sitra sessions
+    sitra radar      # open the live btop-style pixel radar TUI on its own
     sitra -c         # continue the last conversation in this folder
     sitra -r         # pick a conversation to resume
 
@@ -50,7 +51,10 @@ without asking per step. It tells you what's starting and what finished.
 your projects and worktrees (`list_sessions`, `read_session`), flags when someone is waiting on you or looks off
 track, and keeps outside communication from muddying the workers. On its very first launch it asks you to give it a
 personal name, and after that both `sitra tower` and `sitra <its-name>` start it. It also reads every project's
-approved knowledge, so it can tell whether a worker is following what that project has learned.
+approved knowledge, so it can tell whether a worker is following what that project has learned. Inside herdr, starting
+the tower (or running `/radar`) opens **sitra radar** in a right-hand pane: a zero-token `btop`-style live monitor with
+animated pixel agents per worker state, Braille activity graphs, background runs, and `[1-9]` hotkeys to jump straight
+to a worker's pane.
 
 **Teammates** (via [pi-subagents](https://github.com/edxeth/pi-subagents)):
 

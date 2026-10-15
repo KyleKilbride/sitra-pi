@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { profileDir, readConfig, sitraHome, writeConfig } from "../cli/config.ts";
-import { ensureTowerName, isTowerCommand, piArgs, piEnv } from "../cli/launch.ts";
+import { ensureTowerName, isRadarCommand, isTowerCommand, launchCommand, piArgs, piEnv } from "../cli/launch.ts";
 import { scaffoldProfile } from "../cli/profile.ts";
 import { atLeast, parseVersion } from "../cli/versions.ts";
 import { leadRules } from "../extensions/lead.ts";
@@ -100,6 +100,21 @@ describe("launch", () => {
 		const env = piEnv(dir, named, { PATH: "/bin" }, "tower");
 		expect(env.SITRA_ROLE).toBe("tower");
 		expect(env.SITRA_TOWER_NAME).toBe("Radar");
+		expect(isRadarCommand("radar")).toBe(true);
+		expect(isRadarCommand("RADAR")).toBe(true);
+		expect(isRadarCommand("tower")).toBe(false);
+		expect(
+			launchCommand({ name: "Sam", skills: [], towerCommand: ["/bin/wrap", "start", "--"] }, ["-c"], "tower"),
+		).toEqual({
+			command: "/bin/wrap",
+			args: ["start", "--", "-c"],
+		});
+		expect(
+			launchCommand({ name: "Sam", skills: [], towerCommand: ["/bin/wrap", "start", "--"] }, ["-c"], "lead"),
+		).toEqual({
+			command: "pi",
+			args: ["-c"],
+		});
 	});
 });
 

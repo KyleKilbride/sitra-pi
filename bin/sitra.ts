@@ -9,7 +9,8 @@ import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { profileDir, readConfig, sitraHome } from "../cli/config.ts";
 import { type ExecResult, runInit } from "../cli/init.ts";
-import { ensureTowerName, isTowerCommand, piArgs, piEnv } from "../cli/launch.ts";
+import { ensureTowerName, isRadarCommand, isTowerCommand, launchCommand, piEnv } from "../cli/launch.ts";
+import { runRadarTui } from "../extensions/radar.ts";
 
 const repoRoot = dirname(dirname(realpathSync(fileURLToPath(import.meta.url))));
 const [first, ...rest] = process.argv.slice(2);
@@ -50,6 +51,9 @@ if (first === "init") {
 	rl?.close();
 	console.log(result.needsYou.length > 1 ? "\nStill to do:" : "\nNext:");
 	for (const item of result.needsYou) console.log(`- ${item}`);
+} else if (isRadarCommand(first)) {
+	const config = readConfig(sitra);
+	runRadarTui(profileDir(sitra), { towerName: config.tower });
 } else {
 	if (!existsSync(profileDir(sitra))) {
 		console.error("sitra isn't set up yet. Run: sitra init");
@@ -71,9 +75,11 @@ if (first === "init") {
 		);
 	}
 	const args = tower || first === undefined ? rest : [first, ...rest];
-	const run = spawnSync("pi", piArgs(config, args), {
+	const role = tower ? "tower" : "lead";
+	const plan = launchCommand(config, args, role);
+	const run = spawnSync(plan.command, plan.args, {
 		stdio: "inherit",
-		env: piEnv(sitra, config, process.env, tower ? "tower" : "lead"),
+		env: piEnv(sitra, config, process.env, role),
 	});
 	process.exit(run.status ?? 1);
 }
