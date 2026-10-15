@@ -3,8 +3,10 @@
  * new entries with `kb_propose`, and only you turn a proposal into knowledge (`/kb`). `/kb-reflect`
  * asks the agent to look back over the session and propose what future agents should know.
  */
+import { join } from "node:path";
 import { Type } from "typebox";
 import {
+	allProjectsKnowledgeIndex,
 	decide,
 	KINDS,
 	type Kind,
@@ -12,7 +14,9 @@ import {
 	knowledgeRepo,
 	knowledgeRoot,
 	listEntries,
+	listKnownProjects,
 	listProposals,
+	rememberProject,
 	writeProposal,
 } from "./kb.ts";
 
@@ -57,11 +61,25 @@ export default function sitraKnowledge(pi: Pi): void {
 		ctx.ui.setStatus("sitra-kb", `kb ${listEntries(root).length}${proposals ? ` · ${proposals} to review (/kb)` : ""}`);
 	};
 
-	pi.on("session_start", (_event, ctx) => status(ctx));
+	const profileDir = () => process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
+
+	pi.on("session_start", (_event, ctx) => {
+		try {
+			rememberProject(profileDir(), knowledgeRepo(ctx.cwd));
+		} catch {
+			// Knowing every project only helps the tower; never block a session on it.
+		}
+		status(ctx);
+	});
 
 	pi.on("before_agent_start", (event, ctx) => {
-		const root = knowledgeRoot(knowledgeRepo(ctx.cwd));
+		const repo = knowledgeRepo(ctx.cwd);
+		const root = knowledgeRoot(repo);
 		event.systemPromptOptions.sections["project-knowledge"] = knowledgeIndex(listEntries(root), root);
+		if (process.env.SITRA_ROLE === "tower") {
+			const others = allProjectsKnowledgeIndex(listKnownProjects(profileDir()), repo);
+			if (others) event.systemPromptOptions.sections["all-projects-knowledge"] = others;
+		}
 	});
 
 	pi.registerTool({
