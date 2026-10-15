@@ -2,6 +2,7 @@
 	"name": "sitra",
 	"version": "0.1.0",
 	"private": true,
+	"license": "MIT",
 	"type": "module",
 	"description": "A visible, collaborative agent setup on Pi and herdr: a lead you talk to, teammates in panes you can watch, long runs that never block, and a per-repo knowledge base you approve.",
 	"keywords": [
