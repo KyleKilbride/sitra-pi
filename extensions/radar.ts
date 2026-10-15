@@ -1,6 +1,6 @@
 /**
  * sitra radar: a zero-token, btop-inspired retro-futuristic TUI that renders live worker sessions as animated
- * half-block pixel agents, Braille activity sparklines, background runs, knowledge proposals, and peer mail.
+ * half-block pixel dioramas, gradient Braille activity sparklines, background runs, knowledge proposals, and peer mail.
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync, watch } from "node:fs";
@@ -55,23 +55,80 @@ export interface RadarSnapshot {
 }
 
 const ANSI_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
+const ANSI_TOKEN_PATTERN = new RegExp(`(${String.fromCharCode(27)}\\[[0-9;]*m)`, "g");
 
 export function stripAnsi(text: string): string {
 	return text.replace(ANSI_PATTERN, "");
 }
 
-export function visibleWidth(text: string): number {
-	return [...stripAnsi(text)].length;
+/** Terminal cell width of a single Unicode code point (accounts for 2-column emojis and CJK). */
+export function charWidth(cp: number): number {
+	if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) return 0;
+	if (cp >= 0x0300 && cp <= 0x036f) return 0;
+	if (cp >= 0xfe00 && cp <= 0xfe0f) return 0;
+	// Guaranteed 1-column geometric, box-drawing, block, and Braille ranges we use in the TUI.
+	if (cp >= 0x2500 && cp <= 0x25ff) return 1;
+	if (cp >= 0x2800 && cp <= 0x28ff) return 1;
+	if (cp === 0x2605 || cp === 0x2713 || cp === 0x2716 || cp === 0x2717 || cp === 0x2726 || cp === 0x2756) return 1;
+	if (cp >= 0x2190 && cp <= 0x21ff) return 1;
+	// Emojis, dingbats (like U+26A1 lightning), and fullwidth CJK occupy 2 cells in modern terminals.
+	if (
+		(cp >= 0x1100 && cp <= 0x115f) ||
+		(cp >= 0x231a && cp <= 0x23ff) ||
+		(cp >= 0x2600 && cp <= 0x27bf) ||
+		(cp >= 0x2e80 && cp <= 0xa4cf) ||
+		(cp >= 0xac00 && cp <= 0xd7a3) ||
+		(cp >= 0xf900 && cp <= 0xfaff) ||
+		(cp >= 0xfe10 && cp <= 0xfe6f) ||
+		(cp >= 0xff00 && cp <= 0xff60) ||
+		cp >= 0x1f000
+	) {
+		return 2;
+	}
+	return 1;
 }
 
-function padOrTrimAnsi(text: string, width: number): string {
-	if (width <= 0) return "";
-	const plain = [...stripAnsi(text)];
-	if (plain.length <= width) {
-		return text + " ".repeat(width - plain.length);
+export function visibleWidth(text: string): number {
+	let w = 0;
+	for (const ch of stripAnsi(text)) {
+		w += charWidth(ch.codePointAt(0) ?? 0);
 	}
-	const trimmed = plain.slice(0, Math.max(1, width - 1)).join("");
-	return `${trimmed}…`;
+	return w;
+}
+
+/**
+ * Pads or truncates a single-line ANSI string to an exact terminal cell width while preserving color codes
+ * and never splitting a 2-column character across the right edge.
+ */
+export function fitAnsi(text: string, width: number): string {
+	if (width <= 0) return "";
+	const sanitized = text.replace(/[\r\n\t]+/g, " ");
+	const total = visibleWidth(sanitized);
+	if (total <= width) {
+		return sanitized + " ".repeat(width - total);
+	}
+	const target = Math.max(1, width - 1);
+	const tokens = sanitized.split(ANSI_TOKEN_PATTERN);
+	let out = "";
+	let used = 0;
+	let hasAnsi = false;
+	for (const tok of tokens) {
+		if (!tok) continue;
+		if (tok.startsWith("\x1b[")) {
+			out += tok;
+			hasAnsi = true;
+			continue;
+		}
+		for (const ch of tok) {
+			const cw = charWidth(ch.codePointAt(0) ?? 0);
+			if (used + cw > target) {
+				return `${out}${hasAnsi ? "\x1b[0m" : ""}…${" ".repeat(Math.max(0, width - used - 1))}`;
+			}
+			out += ch;
+			used += cw;
+		}
+	}
+	return `${out}${hasAnsi ? "\x1b[0m" : ""}${" ".repeat(Math.max(0, width - used))}`;
 }
 
 const fg = (r: number, g: number, b: number, s: string) => `\x1b[38;2;${r};${g};${b}m${s}\x1b[0m`;
@@ -110,66 +167,279 @@ export function brailleSparkline(values: readonly number[], width = 8): string {
 	return out;
 }
 
+/** Colors each Braille cell along a smooth btop cyan -> mint -> emerald RGB gradient. */
+function gradientSparkline(
+	values: readonly number[],
+	width: number,
+	fromRgb: [number, number, number] = [55, 200, 255],
+	toRgb: [number, number, number] = [70, 255, 175],
+): string {
+	const raw = [...brailleSparkline(values, width)];
+	return raw
+		.map((ch, i) => {
+			const t = raw.length <= 1 ? 1 : i / (raw.length - 1);
+			const r = Math.round(fromRgb[0] + (toRgb[0] - fromRgb[0]) * t);
+			const g = Math.round(fromRgb[1] + (toRgb[1] - fromRgb[1]) * t);
+			const b = Math.round(fromRgb[2] + (toRgb[2] - fromRgb[2]) * t);
+			return fg(r, g, b, ch);
+		})
+		.join("");
+}
+
 const PALETTE: Record<string, [number, number, number]> = {
-	H: [90, 210, 255], // cyan helmet
-	V: [180, 255, 255], // bright visor
-	B: [45, 160, 210], // suit body
-	A: [120, 230, 255], // arms/hands
-	L: [35, 110, 155], // legs/boots
-	C: [40, 85, 110], // console desk
-	G: [50, 255, 160], // glowing green screen
-	S: [110, 255, 200], // data bit 1
-	D: [0, 215, 255], // data bit 2
-	W: [255, 195, 50], // amber warning suit
-	F: [255, 75, 110], // beacon flag
-	Y: [255, 240, 110], // beacon core / spark
-	E: [255, 70, 70], // error crimson
-	O: [255, 140, 40], // orange spark
-	I: [120, 140, 195], // idle indigo suit
-	Z: [150, 210, 255], // sleep zZ
-	M: [230, 160, 95], // coffee mug
+	H: [85, 205, 255], // cyan helmet
+	V: [200, 255, 255], // bright glowing visor
+	N: [40, 115, 165], // visor blink
+	B: [45, 155, 210], // suit torso
+	A: [125, 235, 255], // animated hands/arms
+	L: [35, 100, 145], // boots
+	C: [55, 95, 125], // workstation desk
+	T: [35, 65, 90], // monitor bezel
+	G: [55, 255, 165], // emerald code line 1
+	S: [115, 255, 215], // mint particle / code line 2
+	D: [0, 215, 255], // cyan matrix spark
+	W: [255, 195, 50], // amber alert suit
+	F: [255, 70, 115], // crimson/magenta beacon
+	Y: [255, 245, 120], // bright gold core / spark
+	E: [255, 65, 75], // error suit
+	O: [255, 145, 40], // orange arc
+	I: [120, 140, 200], // idle indigo suit
+	Z: [155, 215, 255], // floating sleep zZ
+	M: [235, 160, 95], // coffee mug
 	P: [90, 100, 115], // stopped grey
-	K: [55, 62, 72], // stopped dark visor
+	K: [55, 62, 72], // powered-down visor
 };
 
-const SPRITES: Record<VisualState, [string[], string[]]> = {
+/** 14x8 pixel dioramas (4 animation frames each): character + dual-monitor console + floating status particles. */
+const DIORAMAS_14: Record<VisualState, [string[], string[], string[], string[]]> = {
 	working: [
-		["..HHHH....", ".HVVVVH..S", ".HHHHHH...", "..BBBB..GG", ".ABBBBA.GG", "..BBBB..CC", "..L..L..CC", ".LL..LL..."],
-		["..HHHH...D", ".HVVVVH...", ".HHHHHH..S", ".ABBBBA.GG", "..BBBB..GG", "..BBBB..CC", "..L..L..CC", ".LL..LL..."],
+		[
+			"..HHHH....S...",
+			".HVVVVH.....D.",
+			".HHHHHH..TTTTT",
+			"..BBBB...TGGST",
+			".ABBBBA..TGSGT",
+			"..BBBB...TTTTT",
+			"..L..L..CCCCCC",
+			".LL..LL.......",
+		],
+		[
+			"..HHHH.....D..",
+			".HVVVVH..S....",
+			".HHHHHH..TTTTT",
+			".ABBBBA..TSGGT",
+			"..BBBB...TGGST",
+			"..BBBB...TTTTT",
+			"..L..L..CCCCCC",
+			".LL..LL.......",
+		],
+		[
+			"..HHHH...D...S",
+			".HVVVVH.......",
+			".HHHHHH..TTTTT",
+			"..BBBB...TGGST",
+			".ABBBBA..TSTGT",
+			"..BBBB...TTTTT",
+			"..L..L..CCCCCC",
+			".LL..LL.......",
+		],
+		[
+			"..HHHH....S...",
+			".HNNNNH....D..",
+			".HHHHHH..TTTTT",
+			".ABBBBA..TSTGT",
+			"..BBBB...TGGST",
+			"..BBBB...TTTTT",
+			"..L..L..CCCCCC",
+			".LL..LL.......",
+		],
 	],
 	waiting_for_user: [
-		["..WWWW..FF", ".WYYYYW.FY", ".WWWWWW..F", ".AWWWWA..F", "..WWWW...F", "..WWWW....", "..L..L...Y", ".LL..LL..."],
-		[".AWWWW..YF", ".WYYYYW.FF", "..WWWWW..F", "..WWWW...F", "..WWWW...F", "..WWWW....", "..L..L...F", ".LL..LL..."],
+		[
+			"..WWWW...FFFFF",
+			".WYYYYW..FYYYF",
+			".WWWWWW..FFFFF",
+			".AWWWWA....F..",
+			"..WWWW...TTTTT",
+			"..WWWW...TYYYT",
+			"..L..L..CCCCCC",
+			".LL..LL.......",
+		],
+		[
+			".AWWWW...YYYYY",
+			".WYYYYW..YFFFY",
+			"..WWWWW..YYYYY",
+			"..WWWW.....Y..",
+			"..WWWW...TTTTT",
+			"..WWWW...TFFFT",
+			"..L..L..CCCCCC",
+			".LL..LL.......",
+		],
+		[
+			"..WWWW...FFFFF",
+			".WYYYYW..FYYYF",
+			".WWWWWW..FFFFF",
+			".AWWWWA....F..",
+			"..WWWW...TTTTT",
+			"..WWWW...TFFFT",
+			"..L..L..CCCCCC",
+			".LL..LL.......",
+		],
+		[
+			".AWWWW...YYYYY",
+			".WYYYYW..YFFFY",
+			"..WWWWW..YYYYY",
+			"..WWWW.....Y..",
+			"..WWWW...TTTTT",
+			"..WWWW...TYYYT",
+			"..L..L..CCCCCC",
+			".LL..LL.......",
+		],
 	],
 	error_loop: [
-		[".AEEEEA..Y", ".EYYYYE.OE", ".EEEEEE..O", "..EEEE..EE", ".AEEEEA.CC", "..EEEE..CC", "..L..L....", ".LL..LL..."],
-		["..EEEE..OY", "AEYYYYEA.E", ".EEEEEE.Y.", "..EEEE..EE", "..EEEE..CC", "..EEEE..CC", ".L....L...", "LL....LL.."],
+		[
+			".AEEEEA..Y..O.",
+			".EYYYYE...OE..",
+			".EEEEEE..TTTTT",
+			"..EEEE...TEEET",
+			".AEEEEA..TEYET",
+			"..EEEE...TTTTT",
+			"..L..L..CCCCCC",
+			".LL..LL.......",
+		],
+		[
+			"..EEEE....OY..",
+			"AEYYYYEA.E..Y.",
+			".EEEEEE..TTTTT",
+			"..EEEE...TYEET",
+			"..EEEE...TEEET",
+			"..EEEE...TTTTT",
+			".L....L.CCCCCC",
+			"LL....LL......",
+		],
+		[
+			".AEEEEA...Y.O.",
+			".EYYYYE..O.E..",
+			".EEEEEE..TTTTT",
+			"..EEEE...TEEET",
+			".AEEEEA..TEYET",
+			"..EEEE...TTTTT",
+			"..L..L..CCCCCC",
+			".LL..LL.......",
+		],
+		[
+			"..EEEE...O..Y.",
+			"AEYYYYEA..EY..",
+			".EEEEEE..TTTTT",
+			"..EEEE...TEYET",
+			"..EEEE...TEEET",
+			"..EEEE...TTTTT",
+			".L....L.CCCCCC",
+			"LL....LL......",
+		],
 	],
 	idle: [
-		["..IIII...Z", ".IVVVVI...", ".IIIIII.Z.", "..IIII....", "..IIIIMMM.", "..IIII.MM.", "..L..L....", ".LL..LL..."],
-		["..IIII..Z.", ".IVVVVI..Z", ".IIIIII...", "..IIII....", "..IIIIMMM.", "..IIII.MM.", "..L..L....", ".LL..LL..."],
+		[
+			"..IIII....Z...",
+			".IVVVVI.....Z.",
+			".IIIIII..TTTTT",
+			"..IIII...TKKKT",
+			"..IIIIMMMTKKKT",
+			"..IIII.MMTTTTT",
+			"..L..L..CCCCCC",
+			".LL..LL.......",
+		],
+		[
+			"..IIII.....Z..",
+			".IVVVVI...Z...",
+			".IIIIII..TTTTT",
+			"..IIII...TKKKT",
+			"..IIIIMMMTKKKT",
+			"..IIII.MMTTTTT",
+			"..L..L..CCCCCC",
+			".LL..LL.......",
+		],
+		[
+			"..IIII...Z....",
+			".INNNNI....Z..",
+			".IIIIII..TTTTT",
+			"..IIII...TKKKT",
+			"..IIIIMMMTKKKT",
+			"..IIII.MMTTTTT",
+			"..L..L..CCCCCC",
+			".LL..LL.......",
+		],
+		[
+			"..IIII....Z...",
+			".IVVVVI..Z....",
+			".IIIIII..TTTTT",
+			"..IIII...TKKKT",
+			"..IIIIMMMTKKKT",
+			"..IIII.MMTTTTT",
+			"..L..L..CCCCCC",
+			".LL..LL.......",
+		],
 	],
 	stopped: [
-		["..PPPP....", ".PKKKKP...", ".PPPPPP...", "..PPPP....", "..PPPP....", "..PPPP....", "..K..K....", ".KK..KK..."],
-		["..PPPP....", ".PKKKKP...", ".PPPPPP...", "..PPPP....", "..PPPP..K.", "..PPPP....", "..K..K....", ".KK..KK..."],
+		[
+			"..PPPP........",
+			".PKKKKP.......",
+			".PPPPPP..TTTTT",
+			"..PPPP...TKKKT",
+			"..PPPP...TKKKT",
+			"..PPPP...TTTTT",
+			"..K..K..CCCCCC",
+			".KK..KK.......",
+		],
+		[
+			"..PPPP........",
+			".PKKKKP.......",
+			".PPPPPP..TTTTT",
+			"..PPPP...TKKKT",
+			"..PPPP...TKPPT",
+			"..PPPP...TTTTT",
+			"..K..K..CCCCCC",
+			".KK..KK.......",
+		],
+		[
+			"..PPPP........",
+			".PKKKKP.......",
+			".PPPPPP..TTTTT",
+			"..PPPP...TKKKT",
+			"..PPPP...TKKKT",
+			"..PPPP...TTTTT",
+			"..K..K..CCCCCC",
+			".KK..KK.......",
+		],
+		[
+			"..PPPP........",
+			".PKKKKP.......",
+			".PPPPPP..TTTTT",
+			"..PPPP...TKKKT",
+			"..PPPP...TPKKT",
+			"..PPPP...TTTTT",
+			"..K..K..CCCCCC",
+			".KK..KK.......",
+		],
 	],
 };
 
 /**
- * Renders an 8x10 pixel grid into 4 terminal rows of 10 columns using Unicode upper/lower half-blocks
- * (`▀`, `▄`, `█`) and 24-bit RGB ANSI colors.
+ * Renders an 8-row pixel diorama into 4 terminal rows using Unicode upper/lower half-blocks (`▀`, `▄`, `█`)
+ * and 24-bit RGB ANSI colors. Supports 14-column full dioramas (default) and 8-column compact mode.
  */
-export function renderSprite(state: VisualState, tick = 0): string[] {
-	const frames = SPRITES[state];
-	const grid = frames[Math.abs(tick) % 2] ?? frames[0];
+export function renderSprite(state: VisualState, tick = 0, width: 14 | 8 = 14): string[] {
+	const frames = DIORAMAS_14[state];
+	const grid = frames[Math.abs(tick) % 4] ?? frames[0];
 	const rows: string[] = [];
 	for (let r = 0; r < 8; r += 2) {
-		const topRow = grid[r] ?? "..........";
-		const botRow = grid[r + 1] ?? "..........";
+		const topRow = grid[r] ?? "";
+		const botRow = grid[r + 1] ?? "";
 		let line = "";
-		for (let c = 0; c < 10; c++) {
-			const t = topRow[c] ?? ".";
-			const b = botRow[c] ?? ".";
+		for (let c = 0; c < width; c++) {
+			const srcCol = width === 8 && c >= 6 ? c + 6 : c;
+			const t = topRow[srcCol] ?? ".";
+			const b = botRow[srcCol] ?? ".";
 			const tc = PALETTE[t];
 			const bc = PALETTE[b];
 			if (!tc && !bc) {
@@ -369,6 +639,10 @@ export function collectRadarSnapshot(
 	};
 }
 
+/**
+ * Draws a btop-inspired rounded box with bracketed title tabs (`╭─┤ TITLE ├───...─┤ TAG ├─╮`)
+ * where every returned line is guaranteed to be exactly `cols` terminal cells wide.
+ */
 function drawBox(
 	title: string,
 	rightTag: string,
@@ -376,16 +650,30 @@ function drawBox(
 	cols: number,
 	borderRgb: [number, number, number],
 ): string[] {
-	const w = Math.max(24, cols);
+	const w = Math.max(20, cols);
 	const inner = w - 2;
 	const color = (s: string) => fg(borderRgb[0], borderRgb[1], borderRgb[2], s);
-	const tClean = ` ${stripAnsi(title)} `;
-	const rClean = rightTag ? ` ${stripAnsi(rightTag)} ` : "";
-	const dashes = Math.max(1, inner - [...tClean].length - [...rClean].length);
-	const top = `${color("╭")}${bold(fg(210, 245, 255, tClean))}${color("─".repeat(dashes))}${
-		rClean ? fg(150, 210, 230, rClean) : ""
-	}${color("╮")}`;
-	const mid = bodyLines.map((line) => `${color("│")}${padOrTrimAnsi(line, inner)}${color("│")}`);
+
+	const rawTitle = stripAnsi(title).replace(/[\r\n\t]+/g, " ");
+	const rawRight = rightTag ? stripAnsi(rightTag).replace(/[\r\n\t]+/g, " ") : "";
+	let leftTab = `┤ ${rawTitle} ├`;
+	let rightTab = rawRight ? `┤ ${rawRight} ├` : "";
+
+	if (visibleWidth(leftTab) + visibleWidth(rightTab) + 1 > inner) {
+		rightTab = "";
+	}
+	if (visibleWidth(leftTab) > inner) {
+		leftTab = fitAnsi(rawTitle, inner);
+	}
+	const dashes = Math.max(0, inner - visibleWidth(leftTab) - visibleWidth(rightTab));
+	const topInner = `${color("┤ ")}${bold(fg(220, 250, 255, fitAnsi(rawTitle, visibleWidth(leftTab) - 4)))}${color(
+		" ├",
+	)}${color("─".repeat(dashes))}${rightTab ? `${color("┤ ")}${fg(155, 220, 240, rawRight)}${color(" ├")}` : ""}`;
+	const top =
+		visibleWidth(leftTab) === inner && !leftTab.startsWith("┤")
+			? `${color("╭")}${bold(fg(220, 250, 255, leftTab))}${color("╮")}`
+			: `${color("╭")}${topInner}${color("╮")}`;
+	const mid = bodyLines.map((line) => `${color("│")}${fitAnsi(line, inner)}${color("│")}`);
 	const bot = `${color("╰")}${color("─".repeat(inner))}${color("╯")}`;
 	return [top, ...mid, bot];
 }
@@ -393,26 +681,36 @@ function drawBox(
 function statusBadge(state: VisualState): string {
 	switch (state) {
 		case "working":
-			return fg(60, 255, 170, bold("● WORKING"));
+			return fg(65, 255, 175, bold("● WORKING"));
 		case "waiting_for_user":
-			return fg(255, 200, 50, bold("▲ NEEDS YOU"));
+			return fg(255, 205, 55, bold("▲ NEEDS YOU"));
 		case "error_loop":
 			return fg(255, 80, 95, bold("✖ LOOPING"));
 		case "stopped":
 			return fg(130, 140, 155, "◌ STOPPED");
 		default:
-			return fg(135, 175, 225, "○ IDLE");
+			return fg(140, 180, 230, "○ IDLE");
 	}
+}
+
+function formatAge(iso: string, nowMs = Date.now()): string {
+	const sec = Math.max(0, Math.round((nowMs - Date.parse(iso)) / 1000));
+	if (!Number.isFinite(sec)) return "";
+	if (sec < 60) return `${sec}s`;
+	const min = Math.floor(sec / 60);
+	if (min < 60) return `${min}m`;
+	return `${Math.floor(min / 60)}h`;
 }
 
 export function renderRadarFrame(
 	snapshot: RadarSnapshot,
-	options?: { cols?: number; rows?: number; tick?: number; selectedIndex?: number },
+	options?: { cols?: number; rows?: number; tick?: number; selectedIndex?: number; nowMs?: number },
 ): string {
-	const cols = Math.max(48, options?.cols ?? 84);
-	const rows = Math.max(18, options?.rows ?? 32);
+	const cols = Math.max(20, options?.cols ?? 84);
+	const rows = Math.max(12, options?.rows ?? 32);
 	const tick = options?.tick ?? 0;
 	const selected = options?.selectedIndex ?? 0;
+	const nowMs = options?.nowMs ?? Date.now();
 
 	const workingCount = snapshot.workers.filter((w) => w.visualState === "working").length;
 	const waitingCount = snapshot.workers.filter(
@@ -421,51 +719,65 @@ export function renderRadarFrame(
 	const totalActivity = [0, 0, 0, 0, 0, 0, 0, 0].map((_, idx) =>
 		snapshot.workers.reduce((sum, w) => sum + (w.activity[idx] ?? 0), 0),
 	);
-	const pulse = tick % 2 === 0 ? "⚡" : "✦";
-	const headerSummary = `${workingCount} active · ${waitingCount} alert · ${snapshot.pendingProposals} /kb`;
-	const headerLine = ` ${fg(80, 240, 255, brailleSparkline(totalActivity, 8))}  ${fg(180, 225, 245, headerSummary)}`;
+
+	// Guaranteed 1-column geometric glyphs so the header border never shifts width across ticks.
+	const beacon = waitingCount > 0 ? "▲" : workingCount > 0 ? "◈" : "❖";
+	const waveWidth = Math.max(4, Math.min(14, cols - 38));
+	const wave = gradientSparkline(totalActivity, waveWidth, [0, 215, 255], [75, 255, 175]);
+	const headerSummary = `${fg(75, 255, 175, `${workingCount} active`)} · ${
+		waitingCount > 0 ? fg(255, 200, 55, bold(`${waitingCount} alert`)) : dim("0 alert")
+	} · ${snapshot.pendingProposals > 0 ? fg(255, 210, 80, `${snapshot.pendingProposals} /kb`) : dim("0 /kb")}`;
 	const headerBox = drawBox(
-		`${pulse} SITRA RADAR // ${snapshot.towerName}`,
-		"zero-token watch",
-		[headerLine],
+		`${beacon} SITRA RADAR · ${snapshot.towerName}`,
+		waitingCount > 0 ? "NEEDS YOU" : "LIVE WATCH",
+		[` ${wave}  ${headerSummary}`],
 		cols,
-		waitingCount > 0 ? [255, 185, 50] : [55, 185, 235],
+		waitingCount > 0 ? [255, 190, 55] : [60, 195, 245],
 	);
 
 	const inner = cols - 2;
-	const textCols = Math.max(20, inner - 13);
+	const spriteWidth: 14 | 8 = cols >= 44 ? 14 : 8;
+	const textCols = Math.max(8, inner - spriteWidth - 3);
 	const workerLines: string[] = [];
+
 	if (snapshot.workers.length === 0) {
 		workerLines.push(dim(" No active worker sessions recorded yet."));
 	} else {
 		for (let i = 0; i < snapshot.workers.length; i++) {
 			const w = snapshot.workers[i];
 			if (!w) continue;
-			const sprite = renderSprite(w.visualState, tick + i);
+			const sprite = renderSprite(w.visualState, tick + i, spriteWidth);
 			const project = basename(w.lead.repo || w.lead.cwd);
 			const branch = w.lead.branch ? ` (${w.lead.branch})` : "";
 			const pane = w.lead.paneId ? ` [${w.lead.paneId}]` : "";
+			const age = formatAge(w.lead.updatedAt, nowMs);
+			const ageTag = age ? ` · ${age}` : "";
 			const selMark = i === selected ? fg(80, 255, 200, "▸") : " ";
-			const spark = fg(70, 235, 200, brailleSparkline(w.activity, 6));
+			const spark = gradientSparkline(
+				w.activity,
+				Math.max(4, Math.min(8, Math.floor(textCols / 5))),
+				w.visualState === "waiting_for_user" ? [255, 180, 50] : [55, 205, 255],
+				w.visualState === "waiting_for_user" ? [255, 235, 100] : [80, 255, 175],
+			);
 
-			const r0 = `${selMark}${bold(`[${w.index}] ${project}`)}${fg(140, 205, 245, branch)} ${statusBadge(
+			const r0 = `${selMark}${bold(`[${w.index}] ${project}`)}${fg(140, 210, 250, branch)} ${statusBadge(
 				w.visualState,
-			)}${dim(pane)}`;
-			const r1 = `  ${fg(220, 235, 245, w.lead.task ?? "(no task prompt yet)")}`;
+			)}${dim(`${pane}${ageTag}`)}`;
+			const r1 = `  ${fg(225, 240, 250, w.lead.task ?? "(ready for task)")}`;
 			const r2 = `  ${spark} ${dim(w.lastAction ?? w.lead.waitingFor ?? w.lead.cwd)}`;
 			const tmText =
 				w.teammates.length > 0
-					? `  ${fg(120, 225, 255, "↳ team:")} ${w.teammates
+					? `  ${fg(120, 230, 255, "↳ team:")} ${w.teammates
 							.map((t) => `${t.name ?? t.agent ?? "helper"}[${t.status}]`)
 							.join(", ")}`
 					: `  ${dim(w.lead.cwd)}`;
 
 			const rightRows = [r0, r1, r2, tmText];
 			for (let r = 0; r < 4; r++) {
-				workerLines.push(` ${sprite[r]} ${padOrTrimAnsi(rightRows[r] ?? "", textCols)}`);
+				workerLines.push(` ${sprite[r]}  ${fitAnsi(rightRows[r] ?? "", textCols)}`);
 			}
 			if (i < snapshot.workers.length - 1) {
-				workerLines.push(dim(` ${"─".repeat(Math.max(10, inner - 2))}`));
+				workerLines.push(dim(` ${"─".repeat(Math.max(6, inner - 2))} `));
 			}
 		}
 	}
@@ -474,52 +786,53 @@ export function renderRadarFrame(
 		`${snapshot.workers.length} session${snapshot.workers.length === 1 ? "" : "s"}`,
 		workerLines,
 		cols,
-		[65, 195, 245],
+		[65, 200, 245],
 	);
 
 	const runLines: string[] = [];
 	if (snapshot.runs.length === 0) {
 		runLines.push(dim(" No background pane runs yet."));
 	} else {
+		const spinner = ["◐", "◓", "◑", "◒"][Math.abs(tick) % 4] ?? "◐";
 		for (const r of snapshot.runs.slice(0, 3)) {
 			const icon = !r.done
-				? fg(80, 230, 255, tick % 2 === 0 ? "◐" : "◓")
+				? fg(80, 235, 255, spinner)
 				: r.exitCode === 0
-					? fg(70, 250, 160, "✓")
-					: fg(255, 90, 90, `✗(${r.exitCode})`);
+					? fg(70, 250, 165, "✓")
+					: fg(255, 90, 95, `✗(${r.exitCode})`);
 			runLines.push(` ${icon} ${r.label}`);
 		}
 	}
 	if (snapshot.pendingProposals > 0) {
 		runLines.push(
-			` ${fg(255, 205, 70, "★")} ${snapshot.pendingProposals} knowledge proposal${
+			` ${fg(255, 210, 75, "★")} ${snapshot.pendingProposals} knowledge proposal${
 				snapshot.pendingProposals === 1 ? "" : "s"
 			} waiting for /kb`,
 		);
 	}
-	const runsBox = drawBox("RUNS & KNOWLEDGE", `/kb: ${snapshot.pendingProposals}`, runLines, cols, [70, 210, 175]);
+	const runsBox = drawBox("RUNS & KNOWLEDGE", `/kb: ${snapshot.pendingProposals}`, runLines, cols, [70, 215, 175]);
 
 	const mailBox =
 		snapshot.mail.length > 0
 			? drawBox(
-					"PEER MAIL // COMMS",
+					"PEER MAIL · COMMS",
 					`${snapshot.mail.length} thread${snapshot.mail.length === 1 ? "" : "s"}`,
 					snapshot.mail.slice(0, 3).map((m) => {
-						const arrow = m.direction === "in" ? fg(90, 245, 255, "↙") : fg(180, 220, 140, "↗");
+						const arrow = m.direction === "in" ? fg(95, 245, 255, "↙") : fg(185, 225, 145, "↗");
 						return ` ${arrow} ${bold(m.peer)} [${m.state}] ${m.summary}`;
 					}),
 					cols,
-					[185, 140, 255],
+					[185, 145, 255],
 				)
 			: [];
 
-	const footer = padOrTrimAnsi(
-		` ${fg(95, 220, 255, "[1-9]")} focus pane  ${fg(95, 220, 255, "[↑/↓ Enter]")} jump  ${fg(
+	const footer = fitAnsi(
+		` ${fg(95, 225, 255, "[1-9]")} focus pane  ${fg(95, 225, 255, "[↑/↓ Enter]")} jump  ${fg(
 			95,
-			220,
+			225,
 			255,
 			"[r]",
-		)} refresh  ${fg(95, 220, 255, "[q]")} close`,
+		)} refresh  ${fg(95, 225, 255, "[q]")} close`,
 		cols,
 	);
 
@@ -551,11 +864,16 @@ export function runRadarTui(profileDir: string, options?: { towerName?: string }
 		}
 		const cols = process.stdout.columns || 84;
 		const rows = process.stdout.rows || 32;
-		const frame = renderRadarFrame(lastSnap, { cols, rows, tick, selectedIndex });
-		process.stdout.write(`\x1b[H${frame}\x1b[J`);
+		const frameLines = renderRadarFrame(lastSnap, { cols, rows, tick, selectedIndex }).split("\n");
+		let out = "\x1b[?2026h";
+		for (let r = 0; r < frameLines.length; r++) {
+			out += `\x1b[${r + 1};1H${frameLines[r]}\x1b[K`;
+		}
+		out += "\x1b[J\x1b[?2026l";
+		process.stdout.write(out);
 	};
 
-	process.stdout.write("\x1b[?1049h\x1b[?25l\x1b[2J");
+	process.stdout.write("\x1b]0;sitra radar\x07\x1b[?1049h\x1b[?25l\x1b[2J");
 	render(false);
 
 	const watchers: ReturnType<typeof watch>[] = [];
@@ -573,7 +891,10 @@ export function runRadarTui(profileDir: string, options?: { towerName?: string }
 		render(tick % 4 === 0);
 	}, 450);
 
-	const onResize = () => render(false);
+	const onResize = () => {
+		process.stdout.write("\x1b[2J");
+		render(false);
+	};
 	process.stdout.on("resize", onResize);
 
 	const cleanup = () => {
@@ -581,7 +902,7 @@ export function runRadarTui(profileDir: string, options?: { towerName?: string }
 		for (const w of watchers) w.close();
 		process.stdout.off("resize", onResize);
 		if (process.stdin.isTTY) process.stdin.setRawMode(false);
-		process.stdout.write("\x1b[?25h\x1b[?1049l");
+		process.stdout.write("\x1b[?25h\x1b[?1049l\x1b]0;\x07");
 	};
 	process.once("SIGINT", () => {
 		cleanup();
@@ -599,6 +920,13 @@ export function runRadarTui(profileDir: string, options?: { towerName?: string }
 			const key = buf.toString("utf8");
 			if (key === "q" || key === "\u0003") {
 				cleanup();
+				if (process.env.HERDR_ENV === "1" && process.env.HERDR_PANE_ID) {
+					try {
+						execFileSync("herdr", ["pane", "close", process.env.HERDR_PANE_ID], { stdio: "ignore" });
+					} catch {
+						// Ignore if already closing.
+					}
+				}
 				process.exit(0);
 			}
 			if (key === "r") {

@@ -28,17 +28,17 @@ describe("braille sparklines", () => {
 });
 
 describe("half-block pixel sprites", () => {
-	test("draws a 4-row half-block pixel character for every state and animates across ticks", () => {
+	test("draws a 4-row, 14-column half-block pixel diorama for every state across 4 animation frames", () => {
 		const states: VisualState[] = ["working", "waiting_for_user", "error_loop", "idle", "stopped"];
 		for (const state of states) {
-			const frame0 = renderSprite(state, 0);
-			const frame1 = renderSprite(state, 1);
-			expect(frame0).toHaveLength(4);
-			expect(frame1).toHaveLength(4);
-			for (const row of frame0) {
-				expect(visibleWidth(row)).toBe(10);
+			const frames = [0, 1, 2, 3].map((t) => renderSprite(state, t));
+			for (const f of frames) {
+				expect(f).toHaveLength(4);
+				for (const row of f) {
+					expect(visibleWidth(row)).toBe(14);
+				}
 			}
-			expect(frame0.join("\n")).not.toBe(frame1.join("\n"));
+			expect(new Set(frames.map((f) => f.join("\n"))).size).toBeGreaterThanOrEqual(2);
 		}
 		expect(renderSprite("working", 0).join("\n")).not.toBe(renderSprite("waiting_for_user", 0).join("\n"));
 		expect(renderSprite("error_loop", 0).join("\n")).not.toBe(renderSprite("idle", 0).join("\n"));
@@ -145,29 +145,48 @@ describe("radar snapshot and frame", () => {
 		expect(snap.runs[0]?.done).toBe(true);
 		expect(snap.mail[0]?.peer).toBe("operator/main");
 
-		const frame = renderRadarFrame(snap, { cols: 88, rows: 34, tick: 0 });
-		const lines = frame.split("\n");
-		for (const line of lines) {
-			expect(visibleWidth(line)).toBeLessThanOrEqual(88);
+		const frame0 = renderRadarFrame(snap, { cols: 88, rows: 34, tick: 0 });
+		const frame1 = renderRadarFrame(snap, { cols: 88, rows: 34, tick: 1 });
+		const lines0 = frame0.split("\n");
+		const lines1 = frame1.split("\n");
+		expect(lines0.length).toBe(lines1.length);
+		for (let i = 0; i < lines0.length; i++) {
+			expect(visibleWidth(lines0[i] ?? "")).toBe(88);
+			expect(visibleWidth(lines1[i] ?? "")).toBe(88);
 		}
-		expect(frame).toContain("Ron");
-		expect(frame).toContain("travelagent-ai");
-		expect(frame).toContain("flights-scout");
-		expect(frame).toContain("wF:p1");
-		expect(frame).toContain("unit-tests");
-		expect(frame).toContain("operator/main");
+		expect(frame0).not.toContain("⚡");
+		expect(frame0).toContain("Ron");
+		expect(frame0).toContain("travelagent-ai");
+		expect(frame0).toContain("flights-scout");
+		expect(frame0).toContain("wF:p1");
+		expect(frame0).toContain("unit-tests");
+		expect(frame0).toContain("operator/main");
+
+		const narrowSnap = {
+			...snap,
+			workers: snap.workers.map((w) => ({ ...w, lead: { ...w.lead, task: "Fix 🚀 flight search ⚡" } })),
+		};
+		const narrow = renderRadarFrame(narrowSnap, { cols: 36, rows: 24, tick: 0 });
+		for (const line of narrow.split("\n")) {
+			expect(visibleWidth(line)).toBe(36);
+		}
 	});
 
-	test("tower auto-opens the radar in a right-hand herdr pane on start and reuses it on /radar", async () => {
+	test("tower auto-opens the radar in a right-hand herdr pane on start, focuses or restarts it on /radar", async () => {
 		const profile = tmp();
 		const bin = tmp();
 		const logFile = join(bin, "herdr-calls.log");
+		const titleFile = join(bin, "pane-title.txt");
+		writeFileSync(titleFile, "sitra radar");
 		writeFileSync(
 			join(bin, "herdr"),
 			`#!/bin/sh
 echo "$@" >> "${logFile}"
 if [ "$1" = "pane" ] && [ "$2" = "split" ]; then
   echo '{"result":{"pane_id":"wR:p2"}}'
+elif [ "$1" = "pane" ] && [ "$2" = "get" ]; then
+  title=$(cat "${titleFile}")
+  echo "{\\"result\\":{\\"pane\\":{\\"pane_id\\":\\"wR:p2\\",\\"terminal_title\\":\\"$title\\"}}}"
 fi
 `,
 		);
@@ -200,9 +219,15 @@ fi
 			handlers.get("session_start")?.({}, ctx);
 			await commands.get("radar")?.handler("", ctx);
 
-			const calls = readFileSync(logFile, "utf8").trim().split("\n");
+			let calls = readFileSync(logFile, "utf8").trim().split("\n");
 			expect(calls.filter((c) => c.startsWith("pane split --current --direction right"))).toHaveLength(1);
-			expect(calls.some((c) => c === "pane run wR:p2 sitra radar")).toBe(true);
+			expect(calls.filter((c) => c === "pane run wR:p2 sitra radar --tui")).toHaveLength(1);
+			expect(calls.some((c) => c === "pane focus wR:p2")).toBe(true);
+
+			writeFileSync(titleFile, "zsh");
+			await commands.get("radar")?.handler("", ctx);
+			calls = readFileSync(logFile, "utf8").trim().split("\n");
+			expect(calls.filter((c) => c === "pane run wR:p2 sitra radar --tui")).toHaveLength(2);
 
 			handlers.get("session_shutdown")?.({}, ctx);
 			const afterShutdown = readFileSync(logFile, "utf8").trim().split("\n");

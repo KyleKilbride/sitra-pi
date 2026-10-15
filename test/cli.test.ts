@@ -100,9 +100,11 @@ describe("launch", () => {
 		const env = piEnv(dir, named, { PATH: "/bin" }, "tower");
 		expect(env.SITRA_ROLE).toBe("tower");
 		expect(env.SITRA_TOWER_NAME).toBe("Radar");
-		expect(isRadarCommand("radar")).toBe(true);
-		expect(isRadarCommand("RADAR")).toBe(true);
-		expect(isRadarCommand("tower")).toBe(false);
+		expect(isRadarCommand("radar", [], { name: "Sam", skills: [], tower: "Ron" })).toBe(true);
+		expect(isRadarCommand("RADAR", [], { name: "Sam", skills: [], tower: "Ron" })).toBe(true);
+		expect(isRadarCommand("radar", [], named)).toBe(false);
+		expect(isRadarCommand("radar", ["--tui"], named)).toBe(true);
+		expect(isRadarCommand("tower", [], named)).toBe(false);
 		expect(
 			launchCommand({ name: "Sam", skills: [], towerCommand: ["/bin/wrap", "start", "--"] }, ["-c"], "tower"),
 		).toEqual({

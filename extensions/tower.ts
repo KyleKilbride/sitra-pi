@@ -126,18 +126,30 @@ export default function sitraTower(pi: Pi): void {
 
 	const herdr = (args: string[]) =>
 		execFileSync("herdr", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-	const paneAlive = (id: string): boolean => {
+	const inspectPane = (id: string): { alive: boolean; runningRadar: boolean } => {
 		try {
-			herdr(["pane", "get", id]);
-			return true;
+			const info = herdr(["pane", "get", id]);
+			const title = /"terminal_title":"([^"]*)"/.exec(info)?.[1]?.toLowerCase() ?? "";
+			return { alive: true, runningRadar: title.includes("radar") };
 		} catch {
-			return false;
+			return { alive: false, runningRadar: false };
 		}
 	};
-	const openRadarPane = (cwd: string): string | undefined => {
+	const openRadarPane = (cwd: string, focus = false): string | undefined => {
 		if (process.env.HERDR_ENV !== "1" || !process.env.HERDR_PANE_ID) return undefined;
 		try {
-			if (radarPane && paneAlive(radarPane)) return radarPane;
+			if (radarPane) {
+				const state = inspectPane(radarPane);
+				if (state.alive) {
+					if (!state.runningRadar) {
+						herdr(["pane", "run", radarPane, "sitra radar --tui"]);
+					}
+					if (focus) {
+						herdr(["pane", "focus", radarPane]);
+					}
+					return radarPane;
+				}
+			}
 			const split = herdr([
 				"pane",
 				"split",
@@ -152,7 +164,10 @@ export default function sitraTower(pi: Pi): void {
 			]);
 			radarPane = /"pane_id":"([^"]+)"/.exec(split)?.[1];
 			if (!radarPane) return undefined;
-			herdr(["pane", "run", radarPane, "sitra radar"]);
+			herdr(["pane", "run", radarPane, "sitra radar --tui"]);
+			if (focus) {
+				herdr(["pane", "focus", radarPane]);
+			}
 			return radarPane;
 		} catch {
 			return undefined;
@@ -387,7 +402,7 @@ export default function sitraTower(pi: Pi): void {
 	pi.registerCommand?.("radar", {
 		description: "Open (or focus) the live btop-style sitra radar in a right-hand herdr pane",
 		async handler(_args, ctx) {
-			const pane = openRadarPane(ctx.cwd);
+			const pane = openRadarPane(ctx.cwd, true);
 			ctx.ui?.notify?.(
 				pane ? `Radar open in herdr pane ${pane}.` : "Run `sitra radar` in a terminal pane to open the radar.",
 				"info",

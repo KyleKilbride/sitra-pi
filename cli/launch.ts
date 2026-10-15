@@ -44,9 +44,14 @@ export function piEnv(
 	return base;
 }
 
-/** Whether the first CLI argument starts the btop-style radar TUI (`sitra radar`). */
-export function isRadarCommand(first: string | undefined): boolean {
-	return first?.trim().toLowerCase() === "radar";
+/**
+ * Whether the CLI arguments start the btop-style radar TUI (`sitra radar` or `sitra radar --tui`).
+ * If the person named their tower "Radar", plain `sitra radar` starts their tower and `sitra radar --tui` starts the TUI.
+ */
+export function isRadarCommand(first: string | undefined, rest: readonly string[] = [], config?: Config): boolean {
+	if (first?.trim().toLowerCase() !== "radar") return false;
+	if (rest.includes("--tui")) return true;
+	return config?.tower?.trim().toLowerCase() !== "radar";
 }
 
 /** Whether the first CLI argument starts the tower: `sitra tower` or `sitra <its personal name>` (case-insensitive). */
