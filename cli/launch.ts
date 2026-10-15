@@ -23,6 +23,10 @@ export function piEnv(
 	if (role === "tower") {
 		base.SITRA_ROLE = "tower";
 		base.SITRA_TOWER_NAME = config.tower?.trim() || "Tower";
+	} else {
+		// A lead started from a shell inside the tower's pane inherits the tower's role; it must not become a second tower.
+		delete base.SITRA_ROLE;
+		delete base.SITRA_TOWER_NAME;
 	}
 	return base;
 }

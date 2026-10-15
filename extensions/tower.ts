@@ -16,6 +16,7 @@ import {
 	formatSessionsReport,
 	gitBranch,
 	listSessions,
+	moveInbox,
 	readTranscriptTail,
 	removeSession,
 	type SessionRecord,
@@ -148,6 +149,7 @@ export default function sitraTower(pi: Pi): void {
 				recorded.push({
 					id,
 					role: "lead",
+					discovered: true,
 					pid: process.pid,
 					cwd,
 					repo: knowledgeRepo(cwd),
@@ -169,12 +171,19 @@ export default function sitraTower(pi: Pi): void {
 	const syncRecord = (ctx: Ctx, patch: Partial<SessionRecord>): void => {
 		lastCtx = ctx;
 		const id = ctx.sessionManager?.getSessionId?.() || `pid-${process.pid}`;
-		if (currentId && currentId !== id) removeSession(profileDir, currentId);
+		if (currentId && currentId !== id) {
+			// Keep anything already sent to the old id.
+			moveInbox(profileDir, currentId, id);
+			removeSession(profileDir, currentId);
+		}
 		currentId = id;
 		const sessionFile = ctx.sessionManager?.getSessionFile?.();
 		const now = new Date().toISOString();
 		const existing = updateSession(profileDir, id, {
 			...patch,
+			// A resumed session can find its own record left behind by a crash; it's this process now.
+			pid: process.pid,
+			...(process.env.HERDR_PANE_ID ? { paneId: process.env.HERDR_PANE_ID } : {}),
 			cwd: ctx.cwd,
 			branch: gitBranch(ctx.cwd),
 			...(sessionFile ? { sessionFile } : {}),
@@ -401,6 +410,18 @@ export default function sitraTower(pi: Pi): void {
 				return {
 					content: [{ type: "text", text: `No active worker lead matched "${query}".` }],
 					details: { sent: false },
+				};
+			}
+			if (match.discovered) {
+				// herdr shows it, but it isn't running sitra's inbox, so nothing would ever read the message.
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Not sent: ${basename(match.repo || match.cwd)}${match.branch ? ` (${match.branch})` : ""} has no sitra inbox (it started before sitra's tower, or outside sitra). It needs a restart with sitra to receive messages.`,
+						},
+					],
+					details: { sent: false, reason: "no_inbox", toSessionId: match.id },
 				};
 			}
 			const sent = sendInboxMessage(profileDir, {
