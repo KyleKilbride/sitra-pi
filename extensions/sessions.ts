@@ -49,6 +49,38 @@ export interface SessionAlert {
 	summary: string;
 }
 
+export interface FrictionReport {
+	totalSessions: number;
+	toolErrorCounts: Record<string, number>;
+	hotspots: string[];
+}
+
+export function auditSessionsFriction(
+	records: readonly SessionRecord[],
+	readTail: (sessionFile: string) => TranscriptItem[],
+): FrictionReport {
+	const workers = records.filter((r) => r.role !== "tower");
+	const toolErrorCounts: Record<string, number> = {};
+	const examples: Record<string, string> = {};
+	for (const r of workers) {
+		if (!r.sessionFile) continue;
+		for (const item of readTail(r.sessionFile)) {
+			if (item.role !== "tool") continue;
+			const match = /^([a-zA-Z0-9_-]+) error:\s*(.*)$/.exec(item.text);
+			const tool = match?.[1] ?? "tool";
+			toolErrorCounts[tool] = (toolErrorCounts[tool] ?? 0) + 1;
+			if (!examples[tool] && match?.[2]) examples[tool] = `${sessionLabel(r)}: ${match[2]}`;
+		}
+	}
+	const hotspots = Object.entries(toolErrorCounts)
+		.sort((a, b) => b[1] - a[1])
+		.map(
+			([tool, count]) =>
+				`${tool} (${count} error${count === 1 ? "" : "s"}${examples[tool] ? ` — e.g. ${examples[tool]}` : ""})`,
+		);
+	return { totalSessions: workers.length, toolErrorCounts, hotspots };
+}
+
 const STALL_MS = 10 * 60_000;
 
 function sessionLabel(record: SessionRecord): string {

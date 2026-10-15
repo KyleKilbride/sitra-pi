@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
+	auditSessionsFriction,
 	detectSessionAlerts,
 	drainInbox,
 	findSession,
@@ -188,6 +189,29 @@ describe("session registry", () => {
 			now,
 		);
 		expect(alerts.map((a) => a.kind)).toEqual(["waiting_for_user", "stopped", "repeated_errors", "stalled"]);
+	});
+
+	test("aggregates tool errors and friction across sessions so the tower can suggest sitra improvements", () => {
+		const s1: SessionRecord = { ...baseLead, id: "s1", sessionFile: "/tmp/s1.jsonl" };
+		const s2: SessionRecord = {
+			...baseLead,
+			id: "s2",
+			cwd: "/work/billing",
+			repo: "/work/billing",
+			branch: "main",
+			sessionFile: "/tmp/s2.jsonl",
+		};
+		const audit = auditSessionsFriction([s1, s2], (f) =>
+			f === "/tmp/s1.jsonl"
+				? [
+						{ role: "tool", text: "bash error: command timed out" },
+						{ role: "tool", text: "edit error: oldText not found" },
+					]
+				: [{ role: "tool", text: "edit error: oldText not found" }],
+		);
+		expect(audit.totalSessions).toBe(2);
+		expect(audit.toolErrorCounts).toEqual({ edit: 2, bash: 1 });
+		expect(audit.hotspots[0]).toContain("edit");
 	});
 });
 
