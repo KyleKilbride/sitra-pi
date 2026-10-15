@@ -616,4 +616,24 @@ describe("tower edge cases", () => {
 			s.restore();
 		}
 	});
+
+	test("uses the transcript file's latest write time so a long active turn is not flagged as stalled", () => {
+		const profile = tmp();
+		const sessionFile = join(profile, "active.jsonl");
+		writeFileSync(sessionFile, '{"type":"message"}\n');
+		const fileMtimeMs = Date.now();
+		const staleStart = new Date(fileMtimeMs - 20 * 60_000).toISOString();
+		writeSession(profile, {
+			...baseLead,
+			id: "long-turn",
+			pid: process.pid,
+			sessionFile,
+			status: "working",
+			startedAt: staleStart,
+			updatedAt: staleStart,
+		});
+		const listed = listSessions(profile);
+		expect(Date.parse(listed[0]?.updatedAt ?? "")).toBeGreaterThan(Date.parse(staleStart));
+		expect(detectSessionAlerts(listed, undefined, fileMtimeMs)).toEqual([]);
+	});
 });

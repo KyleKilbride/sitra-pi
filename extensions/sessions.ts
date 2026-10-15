@@ -3,7 +3,7 @@
  * `<PI_CODING_AGENT_DIR>/sitra-sessions/<id>.json` so the tower can see every session across all projects and worktrees.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 export type SessionRole = "lead" | "teammate" | "tower";
@@ -292,6 +292,10 @@ export function listSessions(
 			const record = JSON.parse(readFileSync(join(dir, file), "utf8")) as SessionRecord;
 			if (record.status !== "stopped" && !isPidAlive(record.pid)) {
 				record.status = "stopped";
+			}
+			if (record.sessionFile && existsSync(record.sessionFile)) {
+				const mtime = statSync(record.sessionFile).mtime.toISOString();
+				if (mtime > record.updatedAt) record.updatedAt = mtime;
 			}
 			out.push(record);
 		} catch {
