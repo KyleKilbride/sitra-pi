@@ -77,8 +77,10 @@ interface Pi {
 
 export default function sitraLead(pi: Pi): void {
 	const isTeammate = Boolean(process.env.PI_SUBAGENT_NAME);
+	const isTower = process.env.SITRA_ROLE === "tower";
 	pi.on("before_agent_start", (event, ctx) => {
-		if (!isTeammate) event.systemPromptOptions.sections["sitra-lead"] = leadRules(process.env.SITRA_USER_NAME);
+		if (!isTeammate && !isTower)
+			event.systemPromptOptions.sections["sitra-lead"] = leadRules(process.env.SITRA_USER_NAME);
 		// Context files from folders above the repo (e.g. a workspace-wide CLAUDE.md mapping other projects) cost every
 		// agent attention and aren't about this repo: keep only the repo's own and the profile's.
 		const options = event.systemPromptOptions as unknown as { contextFiles?: { path: string }[] };

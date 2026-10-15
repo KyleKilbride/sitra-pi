@@ -34,6 +34,7 @@ You need macOS or Linux, Node 24.12+, and pnpm or npm.
 Then, inside herdr, in any repo:
 
     sitra            # start the lead here
+    sitra tower      # start your tower (your number 2) watching all sitra sessions
     sitra -c         # continue the last conversation in this folder
     sitra -r         # pick a conversation to resume
 
@@ -42,8 +43,13 @@ On first start, pick your model with `/model` (Pi otherwise picks the first prov
 
 ## What's in it
 
-**The lead** is the agent you talk to. It plans, waits for your go, then carries the plan out without asking per
-step. It tells you what's starting and what finished.
+**The lead** is the agent you talk to in a project folder. It plans, waits for your go, then carries the plan out
+without asking per step. It tells you what's starting and what finished.
+
+**The tower** (`sitra tower`) is your number 2: a separate session that watches every running sitra session across all
+your projects and worktrees (`list_sessions`, `read_session`), flags when someone is waiting on you or looks off
+track, and keeps outside communication from muddying the workers. On its very first launch it asks you to give it a
+personal name, and after that both `sitra tower` and `sitra <its-name>` start it.
 
 **Teammates** (via [pi-subagents](https://github.com/edxeth/pi-subagents)):
 

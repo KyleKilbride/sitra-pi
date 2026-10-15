@@ -28,7 +28,8 @@
 	"pi": {
 		"extensions": [
 			"./extensions/knowledge.ts",
-			"./extensions/lead.ts"
+			"./extensions/lead.ts",
+			"./extensions/tower.ts"
 		]
 	},
 	"scripts": {
