@@ -1,12 +1,14 @@
 /**
- * sitra tower: records every sitra session in the shared session registry, and when launched as `sitra tower` (or by
- * the tower's personal name), gives the agent its tower rules and tools to inspect all workers across projects.
+ * sitra tower: records every sitra session in the shared session registry, delivers between-step inbox messages
+ * between the tower and worker leads, and when launched as `sitra tower` (or by the tower's personal name), gives the
+ * agent its tower rules and tools to inspect and message workers across projects.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { Type } from "typebox";
 import { knowledgeRepo } from "./kb.ts";
 import {
+	drainInbox,
 	findSession,
 	formatSessionsReport,
 	gitBranch,
@@ -15,6 +17,7 @@ import {
 	removeSession,
 	type SessionRecord,
 	type SessionRole,
+	sendInboxMessage,
 	updateSession,
 	writeSession,
 } from "./sessions.ts";
@@ -29,6 +32,7 @@ export function towerRules(userName?: string, towerName?: string): string {
 - **Your job:** watch every sitra session across all projects and worktrees, keep outside communication from muddying the workers, tell ${who} when someone needs their input or looks off track, and help improve sitra itself.
 - **Workers stay ${who}'s.** ${Who} starts and steers worker sessions directly. Never edit a project's application code behind a worker's back. Only edit sitra itself when ${who} asks for a sitra improvement.
 - **Check live state first, and label every claim.** Call \`list_sessions\` and \`read_session\` before answering about any worker. Label every claim about what happened or why: \`verified\` (from session transcript or state), \`observed\` (from status or timing), or \`guess\`.
+- **Messaging workers (\`message_session\`):** messages go into the worker's inbox and are delivered only between steps, never mid-task. Only message a worker when you have a clear reason (an update request or something ${who} approved) so workers aren't flooded.
 - **What to flag for ${who}:**
   - Anyone in \`waiting_for_user\` (needs ${who}'s answer).
   - Anyone who looks off track: drifting from the task ${who} gave them, repeating the same failing tool or test, or stopped unexpectedly.
@@ -38,6 +42,7 @@ export function towerRules(userName?: string, towerName?: string): string {
 
 interface Ctx {
 	cwd: string;
+	isIdle?: () => boolean;
 	sessionManager?: {
 		getSessionId?(): string | undefined;
 		getSessionFile?(): string | undefined;
@@ -75,6 +80,10 @@ interface Pi {
 	events: {
 		on(channel: string, handler: (data: { active?: boolean }) => void): void;
 	};
+	sendMessage?(
+		message: { customType: string; content: string; display: boolean },
+		options: { triggerTurn: boolean; deliverAs?: "followUp" | "steer" | "nextTurn" },
+	): void;
 }
 
 function summarizeTask(prompt: string | undefined): string | undefined {
@@ -91,11 +100,15 @@ export default function sitraTower(pi: Pi): void {
 	const profileDir = process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
 	const subagentName = process.env.PI_SUBAGENT_NAME?.trim();
 	const role: SessionRole = subagentName ? "teammate" : process.env.SITRA_ROLE === "tower" ? "tower" : "lead";
+	const towerName = process.env.SITRA_TOWER_NAME?.trim() || "Tower";
 	const startedAt = new Date().toISOString();
 	let currentId: string | undefined;
 	let currentTask: string | undefined;
+	let isBusy = false;
+	let lastCtx: Ctx | undefined;
 
 	const syncRecord = (ctx: Ctx, patch: Partial<SessionRecord>): void => {
+		lastCtx = ctx;
 		const id = ctx.sessionManager?.getSessionId?.() || `pid-${process.pid}`;
 		if (currentId && currentId !== id) removeSession(profileDir, currentId);
 		currentId = id;
@@ -113,11 +126,7 @@ export default function sitraTower(pi: Pi): void {
 		const record: SessionRecord = {
 			id,
 			role,
-			...(subagentName
-				? { name: subagentName }
-				: role === "tower"
-					? { name: process.env.SITRA_TOWER_NAME || "Tower" }
-					: {}),
+			...(subagentName ? { name: subagentName } : role === "tower" ? { name: towerName } : {}),
 			...(process.env.PI_SUBAGENT_AGENT ? { agent: process.env.PI_SUBAGENT_AGENT } : {}),
 			pid: process.pid,
 			cwd: ctx.cwd,
@@ -135,11 +144,37 @@ export default function sitraTower(pi: Pi): void {
 		writeSession(profileDir, record);
 	};
 
+	const deliverInbox = (): void => {
+		if (role === "teammate" || isBusy || !pi.sendMessage) return;
+		if (lastCtx?.isIdle && !lastCtx.isIdle()) return;
+		const target = role === "tower" ? "tower" : currentId;
+		if (!target) return;
+		const messages = drainInbox(profileDir, target);
+		if (messages.length === 0) return;
+		const text =
+			role === "tower"
+				? messages.map((m) => `Reply from worker ${m.from} (${m.fromSessionId}): ${m.text}`).join("\n\n")
+				: messages
+						.map((m) => `Message from ${m.from} (tower): ${m.text}\n(Reply when ready with the reply_tower tool.)`)
+						.join("\n\n");
+		pi.sendMessage({ customType: "sitra-inbox", content: text, display: true }, { triggerTurn: true });
+	};
+
+	const inboxTimer =
+		role === "teammate"
+			? undefined
+			: setInterval(() => {
+					deliverInbox();
+				}, 2_000);
+	inboxTimer?.unref();
+
 	pi.on("session_start", (_event, ctx) => {
+		isBusy = false;
 		syncRecord(ctx, { status: "idle" });
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {
+		isBusy = true;
 		if (event.messageType === "user" || !currentTask) {
 			const nextTask = summarizeTask(event.prompt);
 			if (nextTask) currentTask = nextTask;
@@ -154,7 +189,9 @@ export default function sitraTower(pi: Pi): void {
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
+		isBusy = false;
 		syncRecord(ctx, { status: "idle" });
+		deliverInbox();
 	});
 
 	pi.events.on("rpiv:ask-user:blocked", (data) => {
@@ -167,12 +204,41 @@ export default function sitraTower(pi: Pi): void {
 	});
 
 	const cleanup = () => {
+		if (inboxTimer) clearInterval(inboxTimer);
 		if (!currentId) return;
 		removeSession(profileDir, currentId);
 		currentId = undefined;
 	};
 	pi.on("session_shutdown", cleanup);
 	process.once("exit", cleanup);
+
+	if (role === "lead") {
+		pi.registerTool({
+			name: "reply_tower",
+			label: "Reply to tower",
+			description: "Send a short status update or answer back to the tower's inbox.",
+			promptSnippet: "reply_tower: send a short status or answer back to the tower",
+			parameters: Type.Object({
+				message: Type.String({ description: "Short status or answer for the tower." }),
+			}),
+			async execute(_id, params, _signal, _onUpdate, ctx) {
+				const repo = basename(knowledgeRepo(ctx.cwd));
+				const branch = gitBranch(ctx.cwd);
+				const label = branch ? `${repo} (${branch})` : repo;
+				const sent = sendInboxMessage(profileDir, {
+					from: label,
+					fromSessionId: currentId ?? `pid-${process.pid}`,
+					toSessionId: "tower",
+					text: String(params.message ?? ""),
+				});
+				return {
+					content: [{ type: "text", text: "Sent to the tower's inbox." }],
+					details: { messageId: sent.id },
+				};
+			},
+		});
+		return;
+	}
 
 	if (role !== "tower") return;
 
@@ -231,6 +297,45 @@ export default function sitraTower(pi: Pi): void {
 			return {
 				content: [{ type: "text", text: `${header}\n\nRecent turns:\n${transcript}` }],
 				details: { found: true, session: match, tail },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "message_session",
+		label: "Message a sitra worker",
+		description:
+			"Drop a short message or question into a worker lead's inbox. Delivered only between steps (never mid-task); the worker can answer with reply_tower.",
+		promptSnippet: "message_session: send a message to a worker's inbox (delivered between steps)",
+		parameters: Type.Object({
+			query: Type.String({ description: "Worker session id, project name, or branch." }),
+			message: Type.String({ description: "Short message or question for the worker." }),
+		}),
+		async execute(_id, params) {
+			const query = String(params.query ?? "");
+			const text = String(params.message ?? "").trim();
+			const sessions = listSessions(profileDir).filter((s) => s.role === "lead" && s.status !== "stopped");
+			const match = findSession(sessions, query);
+			if (!match) {
+				return {
+					content: [{ type: "text", text: `No active worker lead matched "${query}".` }],
+					details: { sent: false },
+				};
+			}
+			const sent = sendInboxMessage(profileDir, {
+				from: towerName,
+				fromSessionId: currentId ?? `pid-${process.pid}`,
+				toSessionId: match.id,
+				text,
+			});
+			return {
+				content: [
+					{
+						type: "text",
+						text: `Queued in ${basename(match.repo || match.cwd)}${match.branch ? ` (${match.branch})` : ""}'s inbox. It will read it between steps and can reply with reply_tower.`,
+					},
+				],
+				details: { sent: true, toSessionId: match.id, messageId: sent.id },
 			};
 		},
 	});

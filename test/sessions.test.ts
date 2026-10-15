@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
+	drainInbox,
 	findSession,
 	formatSessionsReport,
 	groupWorkerSessions,
@@ -10,6 +11,7 @@ import {
 	readTranscriptTail,
 	removeSession,
 	type SessionRecord,
+	sendInboxMessage,
 	updateSession,
 	writeSession,
 } from "../extensions/sessions.ts";
@@ -216,15 +218,15 @@ describe("tower rules", () => {
 			});
 			expect(promptEvent.systemPromptOptions.sections["sitra-tower"]).toContain("Radar");
 
-			const listed = await tools.get("list_sessions")!.execute("1", {}, undefined, undefined, { cwd: "/work" });
-			expect(listed.content[0]?.text).toContain("worker-checkout");
-			expect(listed.content[0]?.text).toContain("waiting_for_user");
-			expect(listed.content[0]?.text).toContain("Fix double charge on retry");
+			const listed = await tools.get("list_sessions")?.execute("1", {}, undefined, undefined, { cwd: "/work" });
+			expect(listed?.content[0]?.text).toContain("worker-checkout");
+			expect(listed?.content[0]?.text).toContain("waiting_for_user");
+			expect(listed?.content[0]?.text).toContain("Fix double charge on retry");
 
 			const detail = await tools
-				.get("read_session")!
-				.execute("2", { query: "checkout" }, undefined, undefined, { cwd: "/work" });
-			expect((detail.details as { found: boolean }).found).toBe(true);
+				.get("read_session")
+				?.execute("2", { query: "checkout" }, undefined, undefined, { cwd: "/work" });
+			expect((detail?.details as { found?: boolean } | undefined)?.found).toBe(true);
 
 			workerHandlers.get("session_shutdown")?.({}, ctx);
 			towerHandlers.get("session_shutdown")?.({}, { cwd: "/work" });
@@ -238,6 +240,115 @@ describe("tower rules", () => {
 			else process.env.SITRA_TOWER_NAME = prevTower;
 			if (prevUser === undefined) delete process.env.SITRA_USER_NAME;
 			else process.env.SITRA_USER_NAME = prevUser;
+		}
+	});
+
+	test("delivers tower inbox messages to a worker between steps and delivers reply_tower back to the tower", async () => {
+		const profile = tmp();
+		const m1 = sendInboxMessage(profile, {
+			id: "m1",
+			from: "Radar",
+			fromSessionId: "tower-1",
+			toSessionId: "worker-checkout",
+			text: "How is the retry fix going?",
+			createdAt: "2026-10-15T14:10:00.000Z",
+		});
+		expect(m1.id).toBe("m1");
+		expect(drainInbox(profile, "worker-checkout")).toEqual([m1]);
+		expect(drainInbox(profile, "worker-checkout")).toEqual([]);
+
+		const prevDir = process.env.PI_CODING_AGENT_DIR;
+		const prevRole = process.env.SITRA_ROLE;
+		const prevTower = process.env.SITRA_TOWER_NAME;
+		try {
+			process.env.PI_CODING_AGENT_DIR = profile;
+			delete process.env.SITRA_ROLE;
+
+			const workerHandlers = new Map<string, (event: unknown, ctx: unknown) => void>();
+			const workerTools = new Map<
+				string,
+				{
+					execute: (
+						id: string,
+						params: Record<string, unknown>,
+						s: unknown,
+						u: unknown,
+						c: unknown,
+					) => Promise<{ content: { text: string }[]; details: unknown }>;
+				}
+			>();
+			const workerMessages: { customType: string; content: string }[] = [];
+			sitraTower({
+				on: (ev, fn) => workerHandlers.set(ev, fn as never),
+				registerTool: (t) => workerTools.set(t.name, t as never),
+				events: { on: () => {} },
+				sendMessage: (msg) => workerMessages.push(msg),
+			});
+
+			const workerCtx = {
+				cwd: "/work/checkout",
+				sessionManager: { getSessionId: () => "worker-checkout", getSessionFile: () => undefined },
+			};
+			workerHandlers.get("session_start")?.({}, workerCtx);
+			workerHandlers.get("before_agent_start")?.(
+				{ messageType: "user", prompt: "Fix retry", systemPromptOptions: { sections: {} } },
+				workerCtx,
+			);
+
+			process.env.SITRA_ROLE = "tower";
+			process.env.SITRA_TOWER_NAME = "Radar";
+			const towerHandlers = new Map<string, (event: unknown, ctx: unknown) => void>();
+			const towerTools = new Map<
+				string,
+				{
+					execute: (
+						id: string,
+						params: Record<string, unknown>,
+						s: unknown,
+						u: unknown,
+						c: unknown,
+					) => Promise<{ content: { text: string }[]; details: unknown }>;
+				}
+			>();
+			const towerMessages: { customType: string; content: string }[] = [];
+			sitraTower({
+				on: (ev, fn) => towerHandlers.set(ev, fn as never),
+				registerTool: (t) => towerTools.set(t.name, t as never),
+				events: { on: () => {} },
+				sendMessage: (msg) => towerMessages.push(msg),
+			});
+			const towerCtx = {
+				cwd: "/work",
+				sessionManager: { getSessionId: () => "tower-1", getSessionFile: () => undefined },
+			};
+			towerHandlers.get("session_start")?.({}, towerCtx);
+
+			await towerTools
+				.get("message_session")
+				?.execute("1", { query: "checkout", message: "Any blockers?" }, undefined, undefined, towerCtx);
+			expect(workerMessages).toEqual([]);
+
+			workerHandlers.get("agent_end")?.({}, workerCtx);
+			expect(workerMessages).toHaveLength(1);
+			expect(workerMessages[0]?.content).toContain("Any blockers?");
+			expect(workerMessages[0]?.content).toContain("reply_tower");
+
+			await workerTools
+				.get("reply_tower")
+				?.execute("2", { message: "Tests green, opening PR next." }, undefined, undefined, workerCtx);
+			towerHandlers.get("agent_end")?.({}, towerCtx);
+			expect(towerMessages).toHaveLength(1);
+			expect(towerMessages[0]?.content).toContain("Tests green, opening PR next.");
+
+			workerHandlers.get("session_shutdown")?.({}, workerCtx);
+			towerHandlers.get("session_shutdown")?.({}, towerCtx);
+		} finally {
+			if (prevDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = prevDir;
+			if (prevRole === undefined) delete process.env.SITRA_ROLE;
+			else process.env.SITRA_ROLE = prevRole;
+			if (prevTower === undefined) delete process.env.SITRA_TOWER_NAME;
+			else process.env.SITRA_TOWER_NAME = prevTower;
 		}
 	});
 });

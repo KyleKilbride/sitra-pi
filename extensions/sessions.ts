@@ -33,6 +33,56 @@ export interface TranscriptItem {
 	text: string;
 }
 
+export interface InboxMessage {
+	id: string;
+	from: string;
+	fromSessionId: string;
+	toSessionId: string;
+	text: string;
+	createdAt: string;
+}
+
+export function sendInboxMessage(
+	profileDir: string,
+	msg: Omit<InboxMessage, "id" | "createdAt"> & { id?: string; createdAt?: string },
+): InboxMessage {
+	const createdAt = msg.createdAt ?? new Date().toISOString();
+	const id = msg.id ?? `${createdAt.replace(/[:.]/g, "-")}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+	const full: InboxMessage = {
+		id,
+		from: msg.from,
+		fromSessionId: msg.fromSessionId,
+		toSessionId: msg.toSessionId,
+		text: msg.text,
+		createdAt,
+	};
+	const dir = join(profileDir, "sitra-inbox", safeFileId(msg.toSessionId));
+	mkdirSync(dir, { recursive: true });
+	const target = join(dir, `${safeFileId(id)}.json`);
+	const tmp = `${target}.${process.pid}.tmp`;
+	writeFileSync(tmp, `${JSON.stringify(full, null, "\t")}\n`);
+	renameSync(tmp, target);
+	return full;
+}
+
+export function drainInbox(profileDir: string, toSessionId: string): InboxMessage[] {
+	const dir = join(profileDir, "sitra-inbox", safeFileId(toSessionId));
+	if (!existsSync(dir)) return [];
+	const out: InboxMessage[] = [];
+	for (const file of readdirSync(dir)) {
+		if (!file.endsWith(".json")) continue;
+		const fullPath = join(dir, file);
+		try {
+			const msg = JSON.parse(readFileSync(fullPath, "utf8")) as InboxMessage;
+			rmSync(fullPath, { force: true });
+			out.push(msg);
+		} catch {
+			// Skip unreadable or already-drained files.
+		}
+	}
+	return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
 export function sessionsDir(profileDir: string): string {
 	return join(profileDir, "sitra-sessions");
 }
