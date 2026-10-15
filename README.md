@@ -80,6 +80,7 @@ splits it: agents **propose**, you **approve**. Approved knowledge is plain mark
       warnings/  decisions/  lessons/  facts/  setups/    approved, by kind
       rejected/       kept, so you can see what was turned down
 
+- One knowledge base per repo: sessions in any git worktree of the repo use the main checkout's `.pi/knowledge`.
 - Agents propose with the `kb_propose` tool. It only ever writes to `proposals/`.
 - You review with `/kb`, one at a time: Accept, Reject, Skip, "Accept this and all the rest", or Stop.
 - Before every turn, a short index of approved entries (titles and paths, warnings first) goes into every agent's

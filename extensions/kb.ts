@@ -1,5 +1,6 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 /** What an entry is. `setup` entries propose changes to the agent setup itself (extensions, config, prompts). */
 export const KINDS = ["lesson", "fact", "decision", "warning", "setup"] as const;
@@ -135,4 +136,21 @@ export function decide(root: string, proposalFile: string, verdict: "accept" | "
 	for (let n = 2; existsSync(join(root, to)); n++) to = `${dir}/${name}-${n}.md`;
 	renameSync(from, join(root, to));
 	return to;
+}
+
+/**
+ * The checkout whose `.pi/knowledge` this folder uses: the main checkout, even from inside a linked worktree, so
+ * every worktree of a repo reads and grows the same knowledge base. Outside git, the folder itself.
+ */
+export function knowledgeRepo(cwd: string): string {
+	const git = (...args: string[]) =>
+		execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+	try {
+		// The shared `.git` of all worktrees lives in the main checkout. Submodules and unusual layouts keep their
+		// own top level.
+		const common = git("rev-parse", "--path-format=absolute", "--git-common-dir");
+		return basename(common) === ".git" ? dirname(common) : git("rev-parse", "--show-toplevel");
+	} catch {
+		return cwd;
+	}
 }
