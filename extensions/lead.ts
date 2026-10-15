@@ -6,7 +6,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
-import { paneCommand, readRun } from "./runs.ts";
+import { paneCommand, readRun, shellQuote } from "./runs.ts";
 
 /** The lead's working rules, written for the person it works with (their name, or "the user"). */
 export function leadRules(name?: string): string {
@@ -77,8 +77,10 @@ interface Pi {
 
 export default function sitraLead(pi: Pi): void {
 	const isTeammate = Boolean(process.env.PI_SUBAGENT_NAME);
+	const isTower = process.env.SITRA_ROLE === "tower";
 	pi.on("before_agent_start", (event, ctx) => {
-		if (!isTeammate) event.systemPromptOptions.sections["sitra-lead"] = leadRules(process.env.SITRA_USER_NAME);
+		if (!isTeammate && !isTower)
+			event.systemPromptOptions.sections["sitra-lead"] = leadRules(process.env.SITRA_USER_NAME);
 		// Context files from folders above the repo (e.g. a workspace-wide CLAUDE.md mapping other projects) cost every
 		// agent attention and aren't about this repo: keep only the repo's own and the profile's.
 		const options = event.systemPromptOptions as unknown as { contextFiles?: { path: string }[] };
@@ -94,6 +96,26 @@ export default function sitraLead(pi: Pi): void {
 	// A question waiting for the person shows as "blocked" in herdr, so they see that something needs them.
 	pi.events.on("rpiv:ask-user:blocked", (data) => {
 		pi.events.emit("herdr:blocked", { active: Boolean(data?.active), label: "waiting for your answer" });
+	});
+
+	// One run pane per agent, never a new pane per command. Runs reuse this pane (a run started while another is still
+	// going queues behind it in the same shell), and it closes when the agent exits.
+	let runPane: string | undefined;
+	const paneAlive = (id: string): boolean => {
+		try {
+			herdr(["pane", "get", id]);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	process.once("exit", () => {
+		if (!runPane) return;
+		try {
+			herdr(["pane", "close", runPane]);
+		} catch {
+			// Already closed.
+		}
 	});
 
 	const runsDir = join(process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent"), "runs");
@@ -118,21 +140,24 @@ export default function sitraLead(pi: Pi): void {
 			const line = paneCommand(params.command, log);
 			let where: string;
 			if (process.env.HERDR_ENV === "1" && process.env.HERDR_PANE_ID) {
-				const split = herdr([
-					"pane",
-					"split",
-					"--current",
-					"--direction",
-					"down",
-					"--ratio",
-					"0.3",
-					"--no-focus",
-					"--cwd",
-					ctx.cwd,
-				]);
-				const pane = /"pane_id":"([^"]+)"/.exec(split)?.[1];
-				if (!pane) throw new Error(`could not open a pane: ${split.slice(0, 200)}`);
-				herdr(["pane", "run", pane, line]);
+				if (!runPane || !paneAlive(runPane)) {
+					const split = herdr([
+						"pane",
+						"split",
+						"--current",
+						"--direction",
+						"down",
+						"--ratio",
+						"0.3",
+						"--no-focus",
+						"--cwd",
+						ctx.cwd,
+					]);
+					runPane = /"pane_id":"([^"]+)"/.exec(split)?.[1];
+					if (!runPane) throw new Error(`could not open a pane: ${split.slice(0, 200)}`);
+				}
+				const pane = runPane;
+				herdr(["pane", "run", pane, `cd ${shellQuote(ctx.cwd)} && ${line}`]);
 				where = `herdr pane ${pane} ("${params.label}")`;
 			} else {
 				spawn("bash", ["-c", line], { cwd: ctx.cwd, detached: true, stdio: "ignore" }).unref();

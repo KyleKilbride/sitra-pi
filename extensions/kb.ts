@@ -1,5 +1,6 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 /** What an entry is. `setup` entries propose changes to the agent setup itself (extensions, config, prompts). */
 export const KINDS = ["lesson", "fact", "decision", "warning", "setup"] as const;
@@ -135,4 +136,69 @@ export function decide(root: string, proposalFile: string, verdict: "accept" | "
 	for (let n = 2; existsSync(join(root, to)); n++) to = `${dir}/${name}-${n}.md`;
 	renameSync(from, join(root, to));
 	return to;
+}
+
+/**
+ * The checkout whose `.pi/knowledge` this folder uses: the main checkout, even from inside a linked worktree, so
+ * every worktree of a repo reads and grows the same knowledge base. Outside git, the folder itself.
+ */
+export function knowledgeRepo(cwd: string): string {
+	const git = (...args: string[]) =>
+		execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+	try {
+		// The shared `.git` of all worktrees lives in the main checkout. Submodules and unusual layouts keep their
+		// own top level.
+		const common = git("rev-parse", "--path-format=absolute", "--git-common-dir");
+		return basename(common) === ".git" ? dirname(common) : git("rev-parse", "--show-toplevel");
+	} catch {
+		return cwd;
+	}
+}
+
+/** Every project (knowledge repo) any sitra session has run in, so the tower can read all their knowledge. */
+function knownProjectsFile(profileDir: string): string {
+	return join(profileDir, "sitra-known-projects.json");
+}
+
+export function listKnownProjects(profileDir: string): string[] {
+	try {
+		const list = JSON.parse(readFileSync(knownProjectsFile(profileDir), "utf8"));
+		return Array.isArray(list) ? list.filter((p): p is string => typeof p === "string") : [];
+	} catch {
+		return [];
+	}
+}
+
+export function rememberProject(profileDir: string, repo: string): void {
+	const known = listKnownProjects(profileDir);
+	if (known.includes(repo)) return;
+	mkdirSync(profileDir, { recursive: true });
+	writeFileSync(knownProjectsFile(profileDir), `${JSON.stringify([...known, repo], null, "\t")}\n`);
+}
+
+/**
+ * The tower's view of every other project's approved knowledge: one line per entry, grouped by project, most
+ * important kinds first. Empty string when no other project has entries.
+ */
+export function allProjectsKnowledgeIndex(repos: readonly string[], ownRepo: string): string {
+	const out: string[] = [];
+	for (const repo of new Set(repos)) {
+		if (repo === ownRepo) continue;
+		const root = knowledgeRoot(repo);
+		const entries = listEntries(root);
+		if (entries.length === 0) continue;
+		out.push("", `## ${basename(repo)} (${entries.length} entries)`);
+		for (const kind of ORDER) {
+			for (const e of entries.filter((x) => x.kind === kind))
+				out.push(`- [${kind}] ${e.title} — ${join(root, e.file)}`);
+		}
+	}
+	if (out.length === 0) return "";
+	return [
+		"# Other projects' knowledge (approved by the human)",
+		"What the workers in each project have been told. Read an entry in full before judging whether a worker is",
+		"following it or before advising on anything it touches. Workers propose these with kb_propose in their own project.",
+		...out,
+		"",
+	].join("\n");
 }

@@ -3,16 +3,20 @@
  * new entries with `kb_propose`, and only you turn a proposal into knowledge (`/kb`). `/kb-reflect`
  * asks the agent to look back over the session and propose what future agents should know.
  */
-import { execFileSync } from "node:child_process";
+import { join } from "node:path";
 import { Type } from "typebox";
 import {
+	allProjectsKnowledgeIndex,
 	decide,
 	KINDS,
 	type Kind,
 	knowledgeIndex,
+	knowledgeRepo,
 	knowledgeRoot,
 	listEntries,
+	listKnownProjects,
 	listProposals,
+	rememberProject,
 	writeProposal,
 } from "./kb.ts";
 
@@ -50,26 +54,32 @@ interface Pi {
 	sendUserMessage(content: string): void;
 }
 
-function repoRoot(cwd: string): string {
-	try {
-		return execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8" }).trim();
-	} catch {
-		return cwd;
-	}
-}
-
 export default function sitraKnowledge(pi: Pi): void {
 	const status = (ctx: Ctx) => {
-		const root = knowledgeRoot(repoRoot(ctx.cwd));
+		const root = knowledgeRoot(knowledgeRepo(ctx.cwd));
 		const proposals = listProposals(root).length;
 		ctx.ui.setStatus("sitra-kb", `kb ${listEntries(root).length}${proposals ? ` · ${proposals} to review (/kb)` : ""}`);
 	};
 
-	pi.on("session_start", (_event, ctx) => status(ctx));
+	const profileDir = () => process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
+
+	pi.on("session_start", (_event, ctx) => {
+		try {
+			rememberProject(profileDir(), knowledgeRepo(ctx.cwd));
+		} catch {
+			// Knowing every project only helps the tower; never block a session on it.
+		}
+		status(ctx);
+	});
 
 	pi.on("before_agent_start", (event, ctx) => {
-		const root = knowledgeRoot(repoRoot(ctx.cwd));
+		const repo = knowledgeRepo(ctx.cwd);
+		const root = knowledgeRoot(repo);
 		event.systemPromptOptions.sections["project-knowledge"] = knowledgeIndex(listEntries(root), root);
+		if (process.env.SITRA_ROLE === "tower") {
+			const others = allProjectsKnowledgeIndex(listKnownProjects(profileDir()), repo);
+			if (others) event.systemPromptOptions.sections["all-projects-knowledge"] = others;
+		}
 	});
 
 	pi.registerTool({
@@ -87,7 +97,7 @@ export default function sitraKnowledge(pi: Pi): void {
 			),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const root = knowledgeRoot(repoRoot(ctx.cwd));
+			const root = knowledgeRoot(knowledgeRepo(ctx.cwd));
 			const file = writeProposal(root, { ...params, proposedBy: "agent", date: new Date().toISOString() });
 			status(ctx);
 			return {
@@ -105,7 +115,7 @@ export default function sitraKnowledge(pi: Pi): void {
 	pi.registerCommand("kb", {
 		description: "Review knowledge proposals one at a time: accept, reject, or skip",
 		async handler(_args, ctx) {
-			const root = knowledgeRoot(repoRoot(ctx.cwd));
+			const root = knowledgeRoot(knowledgeRepo(ctx.cwd));
 			const proposals = listProposals(root);
 			if (proposals.length === 0) {
 				ctx.ui.notify(`No proposals. ${listEntries(root).length} entries in ${root}.`, "info");

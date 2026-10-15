@@ -7,6 +7,8 @@ export interface Config {
 	name: string;
 	/** Skill folders to load. Empty means Pi's normal skill discovery. */
 	skills: string[];
+	/** Personal name given to the tower (the person's number 2) on its first launch. */
+	tower?: string;
 }
 
 export function sitraHome(env: Record<string, string | undefined>, home: string): string {
@@ -21,7 +23,8 @@ export function readConfig(sitra: string): Config {
 	const file = join(sitra, "config.json");
 	if (!existsSync(file)) return { name: "", skills: [] };
 	const raw = JSON.parse(readFileSync(file, "utf8")) as Partial<Config>;
-	return { name: raw.name ?? "", skills: raw.skills ?? [] };
+	const base: Config = { name: raw.name ?? "", skills: raw.skills ?? [] };
+	return raw.tower?.trim() ? { ...base, tower: raw.tower.trim() } : base;
 }
 
 export function writeConfig(sitra: string, config: Config): void {

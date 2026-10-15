@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** sitra: `sitra init` checks and sets everything up; `sitra [pi options]` starts the lead in this folder, inside herdr. */
+/** sitra: `sitra init` sets up; `sitra tower` (or `sitra <name>`) starts your number 2; `sitra` starts a worker lead. */
 import { spawnSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -9,7 +9,7 @@ import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { profileDir, readConfig, sitraHome } from "../cli/config.ts";
 import { type ExecResult, runInit } from "../cli/init.ts";
-import { piArgs, piEnv } from "../cli/launch.ts";
+import { ensureTowerName, isTowerCommand, piArgs, piEnv } from "../cli/launch.ts";
 
 const repoRoot = dirname(dirname(realpathSync(fileURLToPath(import.meta.url))));
 const [first, ...rest] = process.argv.slice(2);
@@ -60,8 +60,20 @@ if (first === "init") {
 			"Not inside herdr: teammates and long runs won't get their own panes. Start herdr first for the full setup.",
 		);
 	}
-	const config = readConfig(sitra);
-	const args = first === undefined ? rest : [first, ...rest];
-	const run = spawnSync("pi", piArgs(config, args), { stdio: "inherit", env: piEnv(sitra, config, process.env) });
+	let config = readConfig(sitra);
+	const tower = isTowerCommand(first, config);
+	if (tower && !config.tower?.trim()) {
+		const rl = stdin.isTTY ? createInterface({ input: stdin, output: stdout }) : undefined;
+		config = await ensureTowerName(sitra, config, async (q) => (rl ? await rl.question(`${q} `) : ""));
+		rl?.close();
+		console.log(
+			`${config.tower} is on watch. Next time, either \`sitra tower\` or \`sitra ${config.tower?.toLowerCase()}\` starts it.`,
+		);
+	}
+	const args = tower || first === undefined ? rest : [first, ...rest];
+	const run = spawnSync("pi", piArgs(config, args), {
+		stdio: "inherit",
+		env: piEnv(sitra, config, process.env, tower ? "tower" : "lead"),
+	});
 	process.exit(run.status ?? 1);
 }

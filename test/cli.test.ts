@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { profileDir, readConfig, sitraHome, writeConfig } from "../cli/config.ts";
-import { piArgs, piEnv } from "../cli/launch.ts";
+import { ensureTowerName, isTowerCommand, piArgs, piEnv } from "../cli/launch.ts";
 import { scaffoldProfile } from "../cli/profile.ts";
 import { atLeast, parseVersion } from "../cli/versions.ts";
 import { leadRules } from "../extensions/lead.ts";
@@ -65,6 +65,41 @@ describe("launch", () => {
 			PI_MEMORY_DIR: "/home/sam/.sitra/profile/memory",
 			SITRA_USER_NAME: "Sam",
 		});
+	});
+
+	test("a lead started from inside the tower's shell is a lead, not a second tower", () => {
+		const env = piEnv(
+			"/home/sam/.sitra",
+			{ name: "Sam", skills: [] },
+			{ SITRA_ROLE: "tower", SITRA_TOWER_NAME: "Radar" },
+		);
+		expect(env.SITRA_ROLE).toBeUndefined();
+		expect(env.SITRA_TOWER_NAME).toBeUndefined();
+	});
+
+	test("recognizes sitra tower and the tower's personal name, and asks for a name on first launch", async () => {
+		const dir = tmp();
+		writeConfig(dir, { name: "Sam", skills: [] });
+		expect(isTowerCommand("tower", readConfig(dir))).toBe(true);
+		expect(isTowerCommand("-c", readConfig(dir))).toBe(false);
+
+		const asked: string[] = [];
+		const named = await ensureTowerName(dir, readConfig(dir), async (q) => {
+			asked.push(q);
+			return "Radar";
+		});
+		expect(asked).toHaveLength(1);
+		expect(named.tower).toBe("Radar");
+		expect(readConfig(dir).tower).toBe("Radar");
+		expect(isTowerCommand("radar", readConfig(dir))).toBe(true);
+		expect(isTowerCommand("Radar", readConfig(dir))).toBe(true);
+
+		const again = await ensureTowerName(dir, readConfig(dir), async () => "Other");
+		expect(again.tower).toBe("Radar");
+
+		const env = piEnv(dir, named, { PATH: "/bin" }, "tower");
+		expect(env.SITRA_ROLE).toBe("tower");
+		expect(env.SITRA_TOWER_NAME).toBe("Radar");
 	});
 });
 

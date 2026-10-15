@@ -34,6 +34,7 @@ You need macOS or Linux, Node 24.12+, and pnpm or npm.
 Then, inside herdr, in any repo:
 
     sitra            # start the lead here
+    sitra tower      # start your tower (your number 2) watching all sitra sessions
     sitra -c         # continue the last conversation in this folder
     sitra -r         # pick a conversation to resume
 
@@ -42,8 +43,14 @@ On first start, pick your model with `/model` (Pi otherwise picks the first prov
 
 ## What's in it
 
-**The lead** is the agent you talk to. It plans, waits for your go, then carries the plan out without asking per
-step. It tells you what's starting and what finished.
+**The lead** is the agent you talk to in a project folder. It plans, waits for your go, then carries the plan out
+without asking per step. It tells you what's starting and what finished.
+
+**The tower** (`sitra tower`) is your number 2: a separate session that watches every running sitra session across all
+your projects and worktrees (`list_sessions`, `read_session`), flags when someone is waiting on you or looks off
+track, and keeps outside communication from muddying the workers. On its very first launch it asks you to give it a
+personal name, and after that both `sitra tower` and `sitra <its-name>` start it. It also reads every project's
+approved knowledge, so it can tell whether a worker is following what that project has learned.
 
 **Teammates** (via [pi-subagents](https://github.com/edxeth/pi-subagents)):
 
@@ -59,7 +66,8 @@ the app-tester to check X"). Watch their panes, but don't type into them: that s
 instead.
 
 **Long runs never block.** `run_in_pane` runs tests, builds and installs in a pane you can watch, with the output
-logged. When the run ends, the lead gets the result as a message and picks up from there. No sleep or poll loops.
+logged. Each agent gets one run pane that it reuses (a new run queues behind one still going), closed when the agent
+exits. When the run ends, the lead gets the result as a message and picks up from there. No sleep or poll loops.
 
 **Knowledge base** (`/kb`): see below.
 
@@ -80,6 +88,7 @@ splits it: agents **propose**, you **approve**. Approved knowledge is plain mark
       warnings/  decisions/  lessons/  facts/  setups/    approved, by kind
       rejected/       kept, so you can see what was turned down
 
+- One knowledge base per repo: sessions in any git worktree of the repo use the main checkout's `.pi/knowledge`.
 - Agents propose with the `kb_propose` tool. It only ever writes to `proposals/`.
 - You review with `/kb`, one at a time: Accept, Reject, Skip, "Accept this and all the rest", or Stop.
 - Before every turn, a short index of approved entries (titles and paths, warnings first) goes into every agent's
