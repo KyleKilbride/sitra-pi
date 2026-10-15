@@ -42,6 +42,8 @@ test("a real pi session sees the approved knowledge and can only propose, not wr
 			],
 			{
 				cwd: repo,
+				// A throwaway profile, so this test never adds its temp repo to the real tower's project list.
+				env: { ...process.env, PI_CODING_AGENT_DIR: mkdtempSync(join(tmpdir(), "sitra-e2e-profile-")) },
 				stdio: ["pipe", "pipe", "inherit"],
 			},
 		);

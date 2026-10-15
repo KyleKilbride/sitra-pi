@@ -67,6 +67,16 @@ describe("launch", () => {
 		});
 	});
 
+	test("a lead started from inside the tower's shell is a lead, not a second tower", () => {
+		const env = piEnv(
+			"/home/sam/.sitra",
+			{ name: "Sam", skills: [] },
+			{ SITRA_ROLE: "tower", SITRA_TOWER_NAME: "Radar" },
+		);
+		expect(env.SITRA_ROLE).toBeUndefined();
+		expect(env.SITRA_TOWER_NAME).toBeUndefined();
+	});
+
 	test("recognizes sitra tower and the tower's personal name, and asks for a name on first launch", async () => {
 		const dir = tmp();
 		writeConfig(dir, { name: "Sam", skills: [] });
