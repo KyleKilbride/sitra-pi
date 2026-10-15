@@ -508,7 +508,12 @@ function readTranscriptInsights(
 					type?: string;
 					message?: { role?: string; content?: unknown };
 				};
-				if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
+				if (entry.type !== "message" || !entry.message) continue;
+				if (entry.message.role === "user") {
+					if (nowLine?.startsWith("Asking you:")) nowLine = undefined;
+					continue;
+				}
+				if (entry.message.role !== "assistant") continue;
 				const content = entry.message.content;
 				if (!Array.isArray(content)) continue;
 				for (const part of content) {
@@ -529,7 +534,7 @@ function readTranscriptInsights(
 							lastLine = cleanMarkdown(trimmed);
 							break;
 						}
-					} else if (p.type === "toolCall" && p.name === "ask_user_question") {
+					} else if (p.type === "toolCall" && p.name === "ask_user_question" && status === "waiting_for_user") {
 						const args = p.arguments as { questions?: { header?: string; question?: string }[] } | undefined;
 						const q = args?.questions?.[0];
 						if (q?.question) {
@@ -605,6 +610,8 @@ interface HerdrWorkspaceMeta {
 	cwd?: string;
 	sessionFile?: string;
 	paneId?: string;
+	allSessionFiles: string[];
+	allPaneIds: string[];
 }
 
 function stripNumberPrefix(label: string): string {
@@ -618,7 +625,11 @@ function cleanTabLabel(label: string | undefined): string | undefined {
 		.trim();
 }
 
-function queryHerdrWorkspaces(towerSessionFile: string | undefined): HerdrWorkspaceMeta[] {
+function queryHerdrWorkspaces(
+	towerSessionFile: string | undefined,
+	teammateSessionFiles: ReadonlySet<string>,
+	teammatePaneIds: ReadonlySet<string>,
+): HerdrWorkspaceMeta[] {
 	if (process.env.HERDR_ENV !== "1") return [];
 	try {
 		const run = (args: string[]) =>
@@ -653,10 +664,19 @@ function queryHerdrWorkspaces(towerSessionFile: string | undefined): HerdrWorksp
 			if (towerSessionFile && wsAgents.some((a) => a.agent_session?.value === towerSessionFile)) continue;
 			if (wsAgents.length === 0) continue;
 
+			const isTeammateAgent = (a: (typeof wsAgents)[number]): boolean => {
+				if (a.agent_session?.value && teammateSessionFiles.has(a.agent_session.value)) return true;
+				if (a.pane_id && teammatePaneIds.has(a.pane_id)) return true;
+				const tLabel = a.tab_id ? stripNumberPrefix(tabs.get(a.tab_id) ?? "") : "";
+				return /^\[[a-z0-9_-]+\]/i.test(tLabel);
+			};
+			const leadCandidates = wsAgents.filter((a) => !isTeammateAgent(a));
+			const pool = leadCandidates.length > 0 ? leadCandidates : wsAgents;
+
 			const primary =
-				wsAgents.find((a) => a.tab_id === ws.active_tab_id) ??
-				wsAgents.find((a) => a.agent_status === "working" || a.agent_status === "blocked") ??
-				wsAgents[0];
+				pool.find((a) => a.tab_id === ws.active_tab_id) ??
+				pool.find((a) => a.agent_status === "working" || a.agent_status === "blocked") ??
+				pool[0];
 			if (!primary) continue;
 
 			let activeSubagents = 0;
@@ -679,6 +699,8 @@ function queryHerdrWorkspaces(towerSessionFile: string | undefined): HerdrWorksp
 				...(primary.cwd ? { cwd: primary.cwd } : {}),
 				...(primary.agent_session?.value ? { sessionFile: primary.agent_session.value } : {}),
 				...(primary.pane_id ? { paneId: primary.pane_id } : {}),
+				allSessionFiles: wsAgents.map((a) => a.agent_session?.value).filter((v): v is string => Boolean(v)),
+				allPaneIds: wsAgents.map((a) => a.pane_id).filter((v): v is string => Boolean(v)),
 			});
 		}
 		return out.sort((a, b) => a.number - b.number);
@@ -700,16 +722,40 @@ export function collectRadarSnapshot(
 	const errorLoopIds = new Set(alerts.filter((a) => a.kind === "repeated_errors").map((a) => a.sessionId));
 	const groups = groupWorkerSessions(baseSessions);
 
-	const herdrWorkspaces = options?.includeHerdr ? queryHerdrWorkspaces(towerRecord?.sessionFile) : [];
+	const teammateSessionFiles = new Set(
+		baseSessions
+			.filter((s) => s.role === "teammate")
+			.map((s) => s.sessionFile)
+			.filter((v): v is string => Boolean(v)),
+	);
+	const teammatePaneIds = new Set(
+		baseSessions
+			.filter((s) => s.role === "teammate")
+			.map((s) => s.paneId)
+			.filter((v): v is string => Boolean(v)),
+	);
+	const herdrWorkspaces = options?.includeHerdr
+		? queryHerdrWorkspaces(towerRecord?.sessionFile, teammateSessionFiles, teammatePaneIds)
+		: [];
 	const workers: WorkerCard[] = [];
+	const claimedLeadIds = new Set<string>();
 
 	if (herdrWorkspaces.length > 0) {
 		for (const ws of herdrWorkspaces) {
 			const matchedGroup = groups.find(
-				(g) => (ws.sessionFile && g.lead.sessionFile === ws.sessionFile) || (ws.paneId && g.lead.paneId === ws.paneId),
+				(g) =>
+					(g.lead.sessionFile && ws.allSessionFiles.includes(g.lead.sessionFile)) ||
+					(g.lead.paneId && ws.allPaneIds.includes(g.lead.paneId)) ||
+					g.teammates.some(
+						(t) =>
+							(t.sessionFile && ws.allSessionFiles.includes(t.sessionFile)) ||
+							(t.paneId && ws.allPaneIds.includes(t.paneId)),
+					),
 			);
+			if (matchedGroup) claimedLeadIds.add(matchedGroup.lead.id);
 			const cwd = ws.cwd ?? matchedGroup?.lead.cwd ?? process.cwd();
-			const sessionFile = ws.sessionFile?.endsWith(".jsonl") ? ws.sessionFile : matchedGroup?.lead.sessionFile;
+			const sessionFile =
+				matchedGroup?.lead.sessionFile ?? (ws.sessionFile?.endsWith(".jsonl") ? ws.sessionFile : undefined);
 			const mtime =
 				sessionFile && existsSync(sessionFile)
 					? statSync(sessionFile).mtime.toISOString()
@@ -719,7 +765,9 @@ export function collectRadarSnapshot(
 					? "waiting_for_user"
 					: ws.agentStatus === "working" || ws.activeSubagents > 0 || matchedGroup?.lead.status === "working"
 						? "working"
-						: "idle";
+						: matchedGroup?.lead.status === "stopped"
+							? "stopped"
+							: "idle";
 			const lead: SessionRecord = matchedGroup?.lead
 				? {
 						...matchedGroup.lead,
@@ -745,7 +793,9 @@ export function collectRadarSnapshot(
 					? "waiting_for_user"
 					: status === "working"
 						? "working"
-						: "idle";
+						: status === "stopped"
+							? "stopped"
+							: "idle";
 			const insights = readTranscriptInsights(sessionFile, nowMs, status);
 			const teammates = matchedGroup?.teammates ?? [];
 			const activeHelpers = Math.max(ws.activeSubagents, teammates.filter((t) => t.status === "working").length);
@@ -764,6 +814,32 @@ export function collectRadarSnapshot(
 					: ws.terminalTitle && !ws.terminalTitle.startsWith("π -")
 						? { nowLine: ws.terminalTitle }
 						: {}),
+				...(insights.lastLine ? { lastLine: insights.lastLine } : {}),
+				...(insights.lastAction ? { lastAction: insights.lastAction } : {}),
+				activity: insights.activity,
+			});
+		}
+		for (const g of groups) {
+			if (claimedLeadIds.has(g.lead.id)) continue;
+			const visualState: VisualState = errorLoopIds.has(g.lead.id)
+				? "error_loop"
+				: g.lead.status === "waiting_for_user"
+					? "waiting_for_user"
+					: g.lead.status === "working"
+						? "working"
+						: g.lead.status === "stopped"
+							? "stopped"
+							: "idle";
+			const insights = readTranscriptInsights(g.lead.sessionFile, nowMs, g.lead.status);
+			workers.push({
+				index: workers.length + 1,
+				title: basename(g.lead.repo || g.lead.cwd),
+				...(g.lead.branch ? { subtitle: g.lead.branch } : {}),
+				lead: g.lead,
+				teammates: g.teammates,
+				activeHelpers: g.teammates.filter((t) => t.status === "working").length,
+				visualState,
+				...(insights.nowLine ? { nowLine: insights.nowLine } : {}),
 				...(insights.lastLine ? { lastLine: insights.lastLine } : {}),
 				...(insights.lastAction ? { lastAction: insights.lastAction } : {}),
 				activity: insights.activity,
@@ -1030,14 +1106,9 @@ export function renderRadarFrame(
 function focusWorker(card: WorkerCard | undefined): void {
 	if (!card) return;
 	try {
-		if (card.workspaceId) {
-			execFileSync("herdr", ["workspace", "focus", card.workspaceId], { stdio: "ignore" });
-			return;
-		}
-		if (card.lead.paneId) {
-			execFileSync("herdr", ["pane", "focus", "--pane", card.lead.paneId, "--direction", "left"], {
-				stdio: "ignore",
-			});
+		const wsId = card.workspaceId ?? (card.lead.paneId?.includes(":") ? card.lead.paneId.split(":")[0] : undefined);
+		if (wsId) {
+			execFileSync("herdr", ["workspace", "focus", wsId], { stdio: "ignore" });
 		}
 	} catch {
 		// Ignore when outside herdr.
@@ -1045,7 +1116,7 @@ function focusWorker(card: WorkerCard | undefined): void {
 }
 
 /** Runs the interactive full-screen btop-style radar TUI in the current terminal. */
-export function runRadarTui(profileDir: string, options?: { towerName?: string }): void {
+export function runRadarTui(profileDir: string, options?: { towerName?: string; closePaneOnExit?: boolean }): void {
 	let tick = 0;
 	let selectedIndex = 0;
 	let lastSnap = collectRadarSnapshot(profileDir, { towerName: options?.towerName, includeHerdr: true });
@@ -1115,7 +1186,7 @@ export function runRadarTui(profileDir: string, options?: { towerName?: string }
 			const key = buf.toString("utf8");
 			if (key === "q" || key === "\u0003") {
 				cleanup();
-				if (process.env.HERDR_ENV === "1" && process.env.HERDR_PANE_ID) {
+				if (options?.closePaneOnExit && process.env.HERDR_ENV === "1" && process.env.HERDR_PANE_ID) {
 					try {
 						execFileSync("herdr", ["pane", "close", process.env.HERDR_PANE_ID], { stdio: "ignore" });
 					} catch {

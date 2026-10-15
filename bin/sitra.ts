@@ -58,7 +58,7 @@ if (first === "init") {
 	}
 	let config = readConfig(sitra);
 	if (isRadarCommand(first, rest, config)) {
-		runRadarTui(profileDir(sitra), { towerName: config.tower });
+		runRadarTui(profileDir(sitra), { towerName: config.tower, closePaneOnExit: rest.includes("--tui") });
 	} else {
 		if (!process.env.HERDR_ENV) {
 			console.error(

@@ -295,7 +295,11 @@ export function listSessions(
 			}
 			if (record.sessionFile && existsSync(record.sessionFile)) {
 				const mtime = statSync(record.sessionFile).mtime.toISOString();
-				if (mtime > record.updatedAt) record.updatedAt = mtime;
+				if (mtime > record.updatedAt) {
+					const driftMs = Date.parse(mtime) - Date.parse(record.updatedAt);
+					record.updatedAt = mtime;
+					if (driftMs >= 60_000) writeSession(profileDir, record);
+				}
 			}
 			out.push(record);
 		} catch {

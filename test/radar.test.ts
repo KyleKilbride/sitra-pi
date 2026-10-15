@@ -238,4 +238,111 @@ fi
 			}
 		}
 	});
+
+	test("herdr workspace view keeps the lead when a teammate tab is focused, preserves stopped leads, and clears answered questions", () => {
+		const profile = tmp();
+		const bin = tmp();
+		const leadTranscript = join(profile, "lead.jsonl");
+		writeFileSync(
+			leadTranscript,
+			[
+				JSON.stringify({
+					type: "message",
+					message: {
+						role: "assistant",
+						content: [
+							{
+								type: "toolCall",
+								name: "ask_user_question",
+								arguments: { questions: [{ question: "Which branch should we target?" }] },
+							},
+						],
+					},
+				}),
+				JSON.stringify({ type: "message", message: { role: "user", content: "staging" } }),
+				JSON.stringify({
+					type: "message",
+					message: { role: "assistant", content: [{ type: "text", text: "Targeting staging now." }] },
+				}),
+			].join("\n"),
+		);
+
+		const lead: SessionRecord = {
+			id: "lead-ws",
+			role: "lead",
+			pid: process.pid,
+			cwd: "/work/app",
+			repo: "/work/app",
+			branch: "staging",
+			sessionFile: leadTranscript,
+			paneId: "wH:p1",
+			status: "idle",
+			startedAt: "2026-10-15T16:00:00.000Z",
+			updatedAt: "2026-10-15T16:10:00.000Z",
+		};
+		const teammate: SessionRecord = {
+			id: "tm-ws",
+			role: "teammate",
+			name: "tips-tester",
+			agent: "app-tester",
+			pid: process.pid,
+			cwd: "/work/app",
+			repo: "/work/app",
+			sessionFile: join(profile, "tm.jsonl"),
+			parentSessionFile: leadTranscript,
+			paneId: "wH:p4",
+			status: "idle",
+			startedAt: "2026-10-15T16:05:00.000Z",
+			updatedAt: "2026-10-15T16:09:00.000Z",
+		};
+		const crashed: SessionRecord = {
+			id: "lead-crashed",
+			role: "lead",
+			pid: 2_147_483_000,
+			cwd: "/work/crashed",
+			repo: "/work/crashed",
+			branch: "fix/crash",
+			paneId: "wZ:p1",
+			status: "working",
+			startedAt: "2026-10-15T15:00:00.000Z",
+			updatedAt: "2026-10-15T15:30:00.000Z",
+		};
+		writeSession(profile, lead);
+		writeSession(profile, teammate);
+		writeSession(profile, crashed);
+
+		writeFileSync(
+			join(bin, "herdr"),
+			`#!/bin/sh
+if [ "$1" = "workspace" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"workspaces":[{"workspace_id":"wH","number":3,"label":"[3] Flight-tips review","active_tab_id":"wH:t2","agent_status":"idle"}]}}'
+elif [ "$1" = "tab" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"tabs":[{"tab_id":"wH:t1","label":"[1] travelagent › pi"},{"tab_id":"wH:t2","label":"[2] [app-tester] Test travel tips"}]}}'
+elif [ "$1" = "agent" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"agents":[{"workspace_id":"wH","tab_id":"wH:t1","pane_id":"wH:p1","agent":"pi","agent_status":"idle","cwd":"/work/app","agent_session":{"value":"${leadTranscript}"}},{"workspace_id":"wH","tab_id":"wH:t2","pane_id":"wH:p4","agent":"pi","agent_status":"idle","cwd":"/work/app","agent_session":{"value":"${teammate.sessionFile}"}}]}}'
+fi
+`,
+		);
+		chmodSync(join(bin, "herdr"), 0o755);
+
+		const savedEnv = { HERDR_ENV: process.env.HERDR_ENV, PATH: process.env.PATH };
+		process.env.HERDR_ENV = "1";
+		process.env.PATH = `${bin}:${process.env.PATH}`;
+		try {
+			const snap = collectRadarSnapshot(profile, { includeHerdr: true, towerName: "Ron" });
+			const wsCard = snap.workers.find((w) => w.workspaceId === "wH");
+			expect(wsCard?.lead.id).toBe("lead-ws");
+			expect(wsCard?.teammates.map((t) => t.id)).toEqual(["tm-ws"]);
+			expect(wsCard?.nowLine).toBeUndefined();
+			expect(wsCard?.lastLine).toBe("Targeting staging now.");
+
+			const crashedCard = snap.workers.find((w) => w.lead.id === "lead-crashed");
+			expect(crashedCard?.visualState).toBe("stopped");
+		} finally {
+			for (const [k, v] of Object.entries(savedEnv)) {
+				if (v === undefined) delete process.env[k];
+				else process.env[k] = v;
+			}
+		}
+	});
 });
