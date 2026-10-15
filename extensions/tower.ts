@@ -145,7 +145,7 @@ export default function sitraTower(pi: Pi): void {
 						herdr(["pane", "run", radarPane, "sitra radar --tui"]);
 					}
 					if (focus) {
-						herdr(["pane", "focus", radarPane]);
+						herdr(["pane", "focus", "--current", "--direction", "right"]);
 					}
 					return radarPane;
 				}
@@ -166,7 +166,7 @@ export default function sitraTower(pi: Pi): void {
 			if (!radarPane) return undefined;
 			herdr(["pane", "run", radarPane, "sitra radar --tui"]);
 			if (focus) {
-				herdr(["pane", "focus", radarPane]);
+				herdr(["pane", "focus", "--current", "--direction", "right"]);
 			}
 			return radarPane;
 		} catch {

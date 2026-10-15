@@ -158,7 +158,6 @@ describe("radar snapshot and frame", () => {
 		expect(frame0).toContain("Ron");
 		expect(frame0).toContain("travelagent-ai");
 		expect(frame0).toContain("flights-scout");
-		expect(frame0).toContain("wF:p1");
 		expect(frame0).toContain("unit-tests");
 		expect(frame0).toContain("operator/main");
 
@@ -222,7 +221,7 @@ fi
 			let calls = readFileSync(logFile, "utf8").trim().split("\n");
 			expect(calls.filter((c) => c.startsWith("pane split --current --direction right"))).toHaveLength(1);
 			expect(calls.filter((c) => c === "pane run wR:p2 sitra radar --tui")).toHaveLength(1);
-			expect(calls.some((c) => c === "pane focus wR:p2")).toBe(true);
+			expect(calls.some((c) => c === "pane focus --current --direction right")).toBe(true);
 
 			writeFileSync(titleFile, "zsh");
 			await commands.get("radar")?.handler("", ctx);

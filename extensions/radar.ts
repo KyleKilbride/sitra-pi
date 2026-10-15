@@ -1,6 +1,6 @@
 /**
- * sitra radar: a zero-token, btop-inspired retro-futuristic TUI that renders live worker sessions as animated
- * half-block pixel dioramas, gradient Braille activity sparklines, background runs, knowledge proposals, and peer mail.
+ * sitra radar: a zero-token, btop-inspired retro-futuristic TUI that renders your live herdr workspaces as animated
+ * half-block pixel dioramas, gradient Braille activity waves, plain-English progress lines, and peer mail.
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync, watch } from "node:fs";
@@ -38,9 +38,16 @@ export interface RunSummary {
 
 export interface WorkerCard {
 	index: number;
+	title: string;
+	subtitle?: string;
+	workspaceId?: string;
+	harness?: string;
 	lead: SessionRecord;
 	teammates: SessionRecord[];
+	activeHelpers: number;
 	visualState: VisualState;
+	nowLine?: string;
+	lastLine?: string;
 	lastAction?: string;
 	activity: number[];
 }
@@ -66,12 +73,10 @@ export function charWidth(cp: number): number {
 	if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) return 0;
 	if (cp >= 0x0300 && cp <= 0x036f) return 0;
 	if (cp >= 0xfe00 && cp <= 0xfe0f) return 0;
-	// Guaranteed 1-column geometric, box-drawing, block, and Braille ranges we use in the TUI.
 	if (cp >= 0x2500 && cp <= 0x25ff) return 1;
 	if (cp >= 0x2800 && cp <= 0x28ff) return 1;
 	if (cp === 0x2605 || cp === 0x2713 || cp === 0x2716 || cp === 0x2717 || cp === 0x2726 || cp === 0x2756) return 1;
 	if (cp >= 0x2190 && cp <= 0x21ff) return 1;
-	// Emojis, dingbats (like U+26A1 lightning), and fullwidth CJK occupy 2 cells in modern terminals.
 	if (
 		(cp >= 0x1100 && cp <= 0x115f) ||
 		(cp >= 0x231a && cp <= 0x23ff) ||
@@ -167,7 +172,6 @@ export function brailleSparkline(values: readonly number[], width = 8): string {
 	return out;
 }
 
-/** Colors each Braille cell along a smooth btop cyan -> mint -> emerald RGB gradient. */
 function gradientSparkline(
 	values: readonly number[],
 	width: number,
@@ -187,30 +191,29 @@ function gradientSparkline(
 }
 
 const PALETTE: Record<string, [number, number, number]> = {
-	H: [85, 205, 255], // cyan helmet
-	V: [200, 255, 255], // bright glowing visor
-	N: [40, 115, 165], // visor blink
-	B: [45, 155, 210], // suit torso
-	A: [125, 235, 255], // animated hands/arms
-	L: [35, 100, 145], // boots
-	C: [55, 95, 125], // workstation desk
-	T: [35, 65, 90], // monitor bezel
-	G: [55, 255, 165], // emerald code line 1
-	S: [115, 255, 215], // mint particle / code line 2
-	D: [0, 215, 255], // cyan matrix spark
-	W: [255, 195, 50], // amber alert suit
-	F: [255, 70, 115], // crimson/magenta beacon
-	Y: [255, 245, 120], // bright gold core / spark
-	E: [255, 65, 75], // error suit
-	O: [255, 145, 40], // orange arc
-	I: [120, 140, 200], // idle indigo suit
-	Z: [155, 215, 255], // floating sleep zZ
-	M: [235, 160, 95], // coffee mug
-	P: [90, 100, 115], // stopped grey
-	K: [55, 62, 72], // powered-down visor
+	H: [85, 205, 255],
+	V: [200, 255, 255],
+	N: [40, 115, 165],
+	B: [45, 155, 210],
+	A: [125, 235, 255],
+	L: [35, 100, 145],
+	C: [55, 95, 125],
+	T: [35, 65, 90],
+	G: [55, 255, 165],
+	S: [115, 255, 215],
+	D: [0, 215, 255],
+	W: [255, 195, 50],
+	F: [255, 70, 115],
+	Y: [255, 245, 120],
+	E: [255, 65, 75],
+	O: [255, 145, 40],
+	I: [120, 140, 200],
+	Z: [155, 215, 255],
+	M: [235, 160, 95],
+	P: [90, 100, 115],
+	K: [55, 62, 72],
 };
 
-/** 14x8 pixel dioramas (4 animation frames each): character + dual-monitor console + floating status particles. */
 const DIORAMAS_14: Record<VisualState, [string[], string[], string[], string[]]> = {
 	working: [
 		[
@@ -424,10 +427,6 @@ const DIORAMAS_14: Record<VisualState, [string[], string[], string[], string[]]>
 	],
 };
 
-/**
- * Renders an 8-row pixel diorama into 4 terminal rows using Unicode upper/lower half-blocks (`▀`, `▄`, `█`)
- * and 24-bit RGB ANSI colors. Supports 14-column full dioramas (default) and 8-column compact mode.
- */
 export function renderSprite(state: VisualState, tick = 0, width: 14 | 8 = 14): string[] {
 	const frames = DIORAMAS_14[state];
 	const grid = frames[Math.abs(tick) % 4] ?? frames[0];
@@ -459,11 +458,22 @@ export function renderSprite(state: VisualState, tick = 0, width: 14 | 8 = 14): 
 	return rows;
 }
 
-function readTranscriptActivity(
+function cleanMarkdown(text: string): string {
+	return text
+		.replace(/\*\*([^*]+)\*\*/g, "$1")
+		.replace(/`([^`]+)`/g, "$1")
+		.replace(/^#+\s*/gm, "")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function readTranscriptInsights(
 	sessionFile: string | undefined,
 	nowMs: number,
 	status: string,
 ): {
+	nowLine?: string;
+	lastLine?: string;
 	lastAction?: string;
 	activity: number[];
 } {
@@ -479,21 +489,68 @@ function readTranscriptActivity(
 		const lastAction = last ? `${last.role}: ${last.text}` : undefined;
 		const lines = raw.split("\n");
 		const windowMs = 12 * 60_000;
-		for (let i = Math.max(0, lines.length - 120); i < lines.length; i++) {
+		let nowLine: string | undefined;
+		let lastLine: string | undefined;
+
+		for (let i = Math.max(0, lines.length - 100); i < lines.length; i++) {
 			const line = lines[i]?.trim();
 			if (!line) continue;
 			const tsMatch = /"timestamp":"([^"]+)"/.exec(line);
-			if (!tsMatch?.[1]) continue;
-			const age = nowMs - Date.parse(tsMatch[1]);
-			if (!Number.isFinite(age) || age < 0 || age > windowMs) continue;
-			const idx = Math.min(7, Math.max(0, 7 - Math.floor((age / windowMs) * 8)));
-			buckets[idx] = (buckets[idx] ?? 0) + 1;
+			if (tsMatch?.[1]) {
+				const age = nowMs - Date.parse(tsMatch[1]);
+				if (Number.isFinite(age) && age >= 0 && age <= windowMs) {
+					const idx = Math.min(7, Math.max(0, 7 - Math.floor((age / windowMs) * 8)));
+					buckets[idx] = (buckets[idx] ?? 0) + 1;
+				}
+			}
+			try {
+				const entry = JSON.parse(line) as {
+					type?: string;
+					message?: { role?: string; content?: unknown };
+				};
+				if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
+				const content = entry.message.content;
+				if (!Array.isArray(content)) continue;
+				for (const part of content) {
+					if (!part || typeof part !== "object") continue;
+					const p = part as { type?: string; thinking?: string; text?: string; name?: string; arguments?: unknown };
+					if (p.type === "thinking" && typeof p.thinking === "string") {
+						const m = /^\*\*([^*]+)\*\*\s*(.*)/s.exec(p.thinking.trim());
+						if (m?.[1]) {
+							const firstSentence = m[2]?.trim().split(/\.\s|\n/)[0] ?? "";
+							nowLine = firstSentence
+								? `${cleanMarkdown(m[1])} — ${cleanMarkdown(firstSentence)}`
+								: cleanMarkdown(m[1]);
+						}
+					} else if (p.type === "text" && typeof p.text === "string" && p.text.trim()) {
+						for (const rawLine of p.text.trim().split("\n")) {
+							const trimmed = rawLine.trim();
+							if (!trimmed || trimmed.startsWith("---") || trimmed.startsWith("|")) continue;
+							lastLine = cleanMarkdown(trimmed);
+							break;
+						}
+					} else if (p.type === "toolCall" && p.name === "ask_user_question") {
+						const args = p.arguments as { questions?: { header?: string; question?: string }[] } | undefined;
+						const q = args?.questions?.[0];
+						if (q?.question) {
+							nowLine = `Asking you: ${cleanMarkdown(q.question.split("\n")[0] ?? q.question)}`;
+						}
+					}
+				}
+			} catch {
+				// Ignore non-JSON lines.
+			}
 		}
 		if (status === "working" && buckets.every((b) => !b)) {
 			buckets[6] = 1;
 			buckets[7] = 3;
 		}
-		return { ...(lastAction ? { lastAction } : {}), activity: buckets };
+		return {
+			...(nowLine ? { nowLine } : {}),
+			...(lastLine ? { lastLine } : {}),
+			...(lastAction ? { lastAction } : {}),
+			activity: buckets,
+		};
 	} catch {
 		return { activity: buckets };
 	}
@@ -536,51 +593,97 @@ function collectMail(profileDir: string): MailItem[] {
 	}
 }
 
-function discoverHerdrSessions(profileDir: string, recorded: SessionRecord[], startedAt: string): SessionRecord[] {
-	if (process.env.HERDR_ENV !== "1") return recorded;
+interface HerdrWorkspaceMeta {
+	workspaceId: string;
+	number: number;
+	name: string;
+	tabLabel?: string;
+	agentStatus?: string;
+	harness?: string;
+	activeSubagents: number;
+	terminalTitle?: string;
+	cwd?: string;
+	sessionFile?: string;
+	paneId?: string;
+}
+
+function stripNumberPrefix(label: string): string {
+	return label.replace(/^\[\d+\]\s*/, "").trim();
+}
+
+function cleanTabLabel(label: string | undefined): string | undefined {
+	if (!label) return undefined;
+	return stripNumberPrefix(label)
+		.replace(/\s*›\s*(pi|claude)$/i, "")
+		.trim();
+}
+
+function queryHerdrWorkspaces(towerSessionFile: string | undefined): HerdrWorkspaceMeta[] {
+	if (process.env.HERDR_ENV !== "1") return [];
 	try {
-		const raw = execFileSync("herdr", ["agent", "list"], {
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "ignore"],
-		});
-		const parsed = JSON.parse(raw) as {
-			result?: {
-				agents?: {
-					agent?: string;
-					agent_status?: string;
-					cwd?: string;
-					pane_id?: string;
-					agent_session?: { value?: string };
-				}[];
-			};
-		};
-		const merged = [...recorded];
-		for (const a of parsed.result?.agents ?? []) {
-			const sessionFile = a.agent_session?.value;
-			if (a.agent !== "pi" || !sessionFile || !sessionFile.startsWith(profileDir)) continue;
-			if (merged.some((r) => r.sessionFile === sessionFile || (a.pane_id && r.paneId === a.pane_id))) continue;
-			const idMatch = /_([0-9a-f-]{36})\.jsonl$/i.exec(sessionFile);
-			const id = idMatch?.[1] ?? (a.pane_id ? `herdr-${a.pane_id}` : basename(sessionFile, ".jsonl"));
-			const cwd = a.cwd || process.cwd();
-			const mtime = existsSync(sessionFile) ? statSync(sessionFile).mtime.toISOString() : startedAt;
-			merged.push({
-				id,
-				role: "lead",
-				discovered: true,
-				pid: process.pid,
-				cwd,
-				repo: knowledgeRepo(cwd),
-				...(gitBranch(cwd) ? { branch: gitBranch(cwd) } : {}),
-				sessionFile,
-				...(a.pane_id ? { paneId: a.pane_id } : {}),
-				status: a.agent_status === "blocked" ? "waiting_for_user" : a.agent_status === "working" ? "working" : "idle",
-				startedAt: mtime,
-				updatedAt: mtime,
+		const run = (args: string[]) =>
+			JSON.parse(execFileSync("herdr", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })).result;
+		const workspaces = (run(["workspace", "list"])?.workspaces ?? []) as {
+			workspace_id: string;
+			number: number;
+			label: string;
+			active_tab_id?: string;
+			agent_status?: string;
+		}[];
+		const tabs = new Map<string, string>(
+			((run(["tab", "list"])?.tabs ?? []) as { tab_id: string; label: string }[]).map((t) => [t.tab_id, t.label]),
+		);
+		const agents = (run(["agent", "list"])?.agents ?? []) as {
+			workspace_id: string;
+			tab_id?: string;
+			pane_id?: string;
+			agent?: string;
+			agent_status?: string;
+			cwd?: string;
+			terminal_title_stripped?: string;
+			agent_session?: { value?: string };
+			tokens?: { pi_subagents_work_v1?: string };
+		}[];
+
+		const out: HerdrWorkspaceMeta[] = [];
+		for (const ws of workspaces) {
+			const wsName = stripNumberPrefix(ws.label);
+			const wsAgents = agents.filter((a) => a.workspace_id === ws.workspace_id);
+			if (wsName.toLowerCase() === "tower") continue;
+			if (towerSessionFile && wsAgents.some((a) => a.agent_session?.value === towerSessionFile)) continue;
+			if (wsAgents.length === 0) continue;
+
+			const primary =
+				wsAgents.find((a) => a.tab_id === ws.active_tab_id) ??
+				wsAgents.find((a) => a.agent_status === "working" || a.agent_status === "blocked") ??
+				wsAgents[0];
+			if (!primary) continue;
+
+			let activeSubagents = 0;
+			const token = primary.tokens?.pi_subagents_work_v1;
+			if (token) {
+				const parts = token.split(":");
+				const count = Number(parts[1]);
+				if (Number.isFinite(count) && count > 0) activeSubagents = count;
+			}
+			const tabLabel = cleanTabLabel(primary.tab_id ? tabs.get(primary.tab_id) : undefined);
+			out.push({
+				workspaceId: ws.workspace_id,
+				number: ws.number,
+				name: wsName,
+				...(tabLabel ? { tabLabel } : {}),
+				...(primary.agent_status ? { agentStatus: primary.agent_status } : {}),
+				...(primary.agent ? { harness: primary.agent } : {}),
+				activeSubagents,
+				...(primary.terminal_title_stripped ? { terminalTitle: primary.terminal_title_stripped } : {}),
+				...(primary.cwd ? { cwd: primary.cwd } : {}),
+				...(primary.agent_session?.value ? { sessionFile: primary.agent_session.value } : {}),
+				...(primary.pane_id ? { paneId: primary.pane_id } : {}),
 			});
 		}
-		return merged;
+		return out.sort((a, b) => a.number - b.number);
 	} catch {
-		return recorded;
+		return [];
 	}
 }
 
@@ -591,34 +694,110 @@ export function collectRadarSnapshot(
 	const nowMs = options?.nowMs ?? Date.now();
 	const towerName = options?.towerName?.trim() || process.env.SITRA_TOWER_NAME?.trim() || "Tower";
 	const baseSessions = listSessions(profileDir);
-	const sessions = options?.includeHerdr
-		? discoverHerdrSessions(profileDir, baseSessions, new Date(nowMs).toISOString())
-		: baseSessions;
+	const towerRecord = baseSessions.find((s) => s.role === "tower");
 	const readTail = (file: string) => (existsSync(file) ? readTranscriptTail(readFileSync(file, "utf8"), 8) : []);
-	const alerts = detectSessionAlerts(sessions, readTail, nowMs);
+	const alerts = detectSessionAlerts(baseSessions, readTail, nowMs);
 	const errorLoopIds = new Set(alerts.filter((a) => a.kind === "repeated_errors").map((a) => a.sessionId));
-	const groups = groupWorkerSessions(sessions);
+	const groups = groupWorkerSessions(baseSessions);
 
-	const workers: WorkerCard[] = groups.map((g, i) => {
-		const visualState: VisualState = errorLoopIds.has(g.lead.id)
-			? "error_loop"
-			: g.lead.status === "waiting_for_user"
-				? "waiting_for_user"
-				: g.lead.status === "working"
-					? "working"
-					: g.lead.status === "stopped"
-						? "stopped"
+	const herdrWorkspaces = options?.includeHerdr ? queryHerdrWorkspaces(towerRecord?.sessionFile) : [];
+	const workers: WorkerCard[] = [];
+
+	if (herdrWorkspaces.length > 0) {
+		for (const ws of herdrWorkspaces) {
+			const matchedGroup = groups.find(
+				(g) => (ws.sessionFile && g.lead.sessionFile === ws.sessionFile) || (ws.paneId && g.lead.paneId === ws.paneId),
+			);
+			const cwd = ws.cwd ?? matchedGroup?.lead.cwd ?? process.cwd();
+			const sessionFile = ws.sessionFile?.endsWith(".jsonl") ? ws.sessionFile : matchedGroup?.lead.sessionFile;
+			const mtime =
+				sessionFile && existsSync(sessionFile)
+					? statSync(sessionFile).mtime.toISOString()
+					: new Date(nowMs).toISOString();
+			const status =
+				ws.agentStatus === "blocked" || matchedGroup?.lead.status === "waiting_for_user"
+					? "waiting_for_user"
+					: ws.agentStatus === "working" || ws.activeSubagents > 0 || matchedGroup?.lead.status === "working"
+						? "working"
 						: "idle";
-		const { lastAction, activity } = readTranscriptActivity(g.lead.sessionFile, nowMs, g.lead.status);
-		return {
-			index: i + 1,
-			lead: g.lead,
-			teammates: g.teammates,
-			visualState,
-			...(lastAction ? { lastAction } : {}),
-			activity,
-		};
-	});
+			const lead: SessionRecord = matchedGroup?.lead
+				? {
+						...matchedGroup.lead,
+						status,
+						updatedAt: mtime > matchedGroup.lead.updatedAt ? mtime : matchedGroup.lead.updatedAt,
+					}
+				: {
+						id: `ws-${ws.number}`,
+						role: "lead",
+						pid: process.pid,
+						cwd,
+						repo: knowledgeRepo(cwd),
+						...(gitBranch(cwd) ? { branch: gitBranch(cwd) } : {}),
+						...(sessionFile ? { sessionFile } : {}),
+						...(ws.paneId ? { paneId: ws.paneId } : {}),
+						status,
+						startedAt: mtime,
+						updatedAt: mtime,
+					};
+			const visualState: VisualState = errorLoopIds.has(lead.id)
+				? "error_loop"
+				: status === "waiting_for_user"
+					? "waiting_for_user"
+					: status === "working"
+						? "working"
+						: "idle";
+			const insights = readTranscriptInsights(sessionFile, nowMs, status);
+			const teammates = matchedGroup?.teammates ?? [];
+			const activeHelpers = Math.max(ws.activeSubagents, teammates.filter((t) => t.status === "working").length);
+			workers.push({
+				index: ws.number,
+				title: ws.name,
+				...(ws.tabLabel && ws.tabLabel.toLowerCase() !== ws.name.toLowerCase() ? { subtitle: ws.tabLabel } : {}),
+				workspaceId: ws.workspaceId,
+				...(ws.harness ? { harness: ws.harness } : {}),
+				lead,
+				teammates,
+				activeHelpers,
+				visualState,
+				...(insights.nowLine
+					? { nowLine: insights.nowLine }
+					: ws.terminalTitle && !ws.terminalTitle.startsWith("π -")
+						? { nowLine: ws.terminalTitle }
+						: {}),
+				...(insights.lastLine ? { lastLine: insights.lastLine } : {}),
+				...(insights.lastAction ? { lastAction: insights.lastAction } : {}),
+				activity: insights.activity,
+			});
+		}
+	} else {
+		for (let i = 0; i < groups.length; i++) {
+			const g = groups[i];
+			if (!g) continue;
+			const visualState: VisualState = errorLoopIds.has(g.lead.id)
+				? "error_loop"
+				: g.lead.status === "waiting_for_user"
+					? "waiting_for_user"
+					: g.lead.status === "working"
+						? "working"
+						: g.lead.status === "stopped"
+							? "stopped"
+							: "idle";
+			const insights = readTranscriptInsights(g.lead.sessionFile, nowMs, g.lead.status);
+			workers.push({
+				index: i + 1,
+				title: basename(g.lead.repo || g.lead.cwd),
+				...(g.lead.branch ? { subtitle: g.lead.branch } : {}),
+				lead: g.lead,
+				teammates: g.teammates,
+				activeHelpers: g.teammates.filter((t) => t.status === "working").length,
+				visualState,
+				...(insights.nowLine ? { nowLine: insights.nowLine } : {}),
+				...(insights.lastLine ? { lastLine: insights.lastLine } : {}),
+				...(insights.lastAction ? { lastAction: insights.lastAction } : {}),
+				activity: insights.activity,
+			});
+		}
+	}
 
 	let pendingProposals = 0;
 	for (const repo of listKnownProjects(profileDir)) {
@@ -639,10 +818,6 @@ export function collectRadarSnapshot(
 	};
 }
 
-/**
- * Draws a btop-inspired rounded box with bracketed title tabs (`╭─┤ TITLE ├───...─┤ TAG ├─╮`)
- * where every returned line is guaranteed to be exactly `cols` terminal cells wide.
- */
 function drawBox(
 	title: string,
 	rightTag: string,
@@ -678,14 +853,15 @@ function drawBox(
 	return [top, ...mid, bot];
 }
 
-function statusBadge(state: VisualState): string {
+function statusBadge(state: VisualState, activeHelpers = 0): string {
+	const helperNote = activeHelpers > 0 ? ` +${activeHelpers} helper${activeHelpers === 1 ? "" : "s"}` : "";
 	switch (state) {
 		case "working":
-			return fg(65, 255, 175, bold("● WORKING"));
+			return fg(65, 255, 175, bold(`● WORKING${helperNote}`));
 		case "waiting_for_user":
 			return fg(255, 205, 55, bold("▲ NEEDS YOU"));
 		case "error_loop":
-			return fg(255, 80, 95, bold("✖ LOOPING"));
+			return fg(255, 80, 95, bold("✖ STUCK IN LOOP"));
 		case "stopped":
 			return fg(130, 140, 155, "◌ STOPPED");
 		default:
@@ -696,10 +872,13 @@ function statusBadge(state: VisualState): string {
 function formatAge(iso: string, nowMs = Date.now()): string {
 	const sec = Math.max(0, Math.round((nowMs - Date.parse(iso)) / 1000));
 	if (!Number.isFinite(sec)) return "";
+	if (sec < 30) return "now";
 	if (sec < 60) return `${sec}s`;
 	const min = Math.floor(sec / 60);
 	if (min < 60) return `${min}m`;
-	return `${Math.floor(min / 60)}h`;
+	const hr = Math.floor(min / 60);
+	if (hr < 24) return `${hr}h`;
+	return `${Math.floor(hr / 24)}d`;
 }
 
 export function renderRadarFrame(
@@ -713,24 +892,25 @@ export function renderRadarFrame(
 	const nowMs = options?.nowMs ?? Date.now();
 
 	const workingCount = snapshot.workers.filter((w) => w.visualState === "working").length;
-	const waitingCount = snapshot.workers.filter(
+	const waitingWorkers = snapshot.workers.filter(
 		(w) => w.visualState === "waiting_for_user" || w.visualState === "error_loop",
-	).length;
+	);
+	const waitingCount = waitingWorkers.length;
 	const totalActivity = [0, 0, 0, 0, 0, 0, 0, 0].map((_, idx) =>
 		snapshot.workers.reduce((sum, w) => sum + (w.activity[idx] ?? 0), 0),
 	);
 
-	// Guaranteed 1-column geometric glyphs so the header border never shifts width across ticks.
 	const beacon = waitingCount > 0 ? "▲" : workingCount > 0 ? "◈" : "❖";
-	const waveWidth = Math.max(4, Math.min(14, cols - 38));
+	const waveWidth = Math.max(4, Math.min(12, cols - 44));
 	const wave = gradientSparkline(totalActivity, waveWidth, [0, 215, 255], [75, 255, 175]);
-	const headerSummary = `${fg(75, 255, 175, `${workingCount} active`)} · ${
-		waitingCount > 0 ? fg(255, 200, 55, bold(`${waitingCount} alert`)) : dim("0 alert")
-	} · ${snapshot.pendingProposals > 0 ? fg(255, 210, 80, `${snapshot.pendingProposals} /kb`) : dim("0 /kb")}`;
+	const headerHeadline =
+		waitingCount > 0
+			? fg(255, 205, 55, bold(`Needs you in #${waitingWorkers[0]?.index} ${waitingWorkers[0]?.title}`))
+			: `${fg(75, 255, 175, `${workingCount} working`)} · ${dim(`${snapshot.workers.length - workingCount} idle`)} · ${fg(160, 225, 200, "Nothing waiting on you")}`;
 	const headerBox = drawBox(
 		`${beacon} SITRA RADAR · ${snapshot.towerName}`,
-		waitingCount > 0 ? "NEEDS YOU" : "LIVE WATCH",
-		[` ${wave}  ${headerSummary}`],
+		waitingCount > 0 ? "NEEDS YOU" : "ALL CLEAR",
+		[` ${wave}  ${headerHeadline}`],
 		cols,
 		waitingCount > 0 ? [255, 190, 55] : [60, 195, 245],
 	);
@@ -741,15 +921,14 @@ export function renderRadarFrame(
 	const workerLines: string[] = [];
 
 	if (snapshot.workers.length === 0) {
-		workerLines.push(dim(" No active worker sessions recorded yet."));
+		workerLines.push(dim(" No active workspaces found."));
 	} else {
 		for (let i = 0; i < snapshot.workers.length; i++) {
 			const w = snapshot.workers[i];
 			if (!w) continue;
 			const sprite = renderSprite(w.visualState, tick + i, spriteWidth);
-			const project = basename(w.lead.repo || w.lead.cwd);
-			const branch = w.lead.branch ? ` (${w.lead.branch})` : "";
-			const pane = w.lead.paneId ? ` [${w.lead.paneId}]` : "";
+			const sub = w.subtitle ? ` · ${w.subtitle}` : "";
+			const paneTag = !w.workspaceId && w.lead.paneId ? ` [${w.lead.paneId}]` : "";
 			const age = formatAge(w.lead.updatedAt, nowMs);
 			const ageTag = age ? ` · ${age}` : "";
 			const selMark = i === selected ? fg(80, 255, 200, "▸") : " ";
@@ -760,19 +939,32 @@ export function renderRadarFrame(
 				w.visualState === "waiting_for_user" ? [255, 235, 100] : [80, 255, 175],
 			);
 
-			const r0 = `${selMark}${bold(`[${w.index}] ${project}`)}${fg(140, 210, 250, branch)} ${statusBadge(
+			const r0 = `${selMark}${bold(`#${w.index} ${w.title}`)}${fg(140, 210, 250, sub)}  ${statusBadge(
 				w.visualState,
-			)}${dim(`${pane}${ageTag}`)}`;
-			const r1 = `  ${fg(225, 240, 250, w.lead.task ?? "(ready for task)")}`;
-			const r2 = `  ${spark} ${dim(w.lastAction ?? w.lead.waitingFor ?? w.lead.cwd)}`;
-			const tmText =
-				w.teammates.length > 0
-					? `  ${fg(120, 230, 255, "↳ team:")} ${w.teammates
-							.map((t) => `${t.name ?? t.agent ?? "helper"}[${t.status}]`)
-							.join(", ")}`
-					: `  ${dim(w.lead.cwd)}`;
+				w.activeHelpers,
+			)}${dim(`${paneTag}${ageTag}`)}`;
 
-			const rightRows = [r0, r1, r2, tmText];
+			const line1Text =
+				w.nowLine ??
+				(w.visualState === "waiting_for_user"
+					? (w.lead.waitingFor ?? "Waiting for your answer")
+					: (w.lead.task ?? "Standing by"));
+			const r1 = `  ${fg(120, 220, 255, w.visualState === "working" ? "Now: " : "Task: ")}${fg(230, 245, 255, line1Text)}`;
+
+			const line2Text =
+				w.lastLine ??
+				(w.teammates.length > 0
+					? `Helpers: ${w.teammates.map((t) => `${t.name ?? t.agent ?? "helper"} (${t.status})`).join(", ")}`
+					: (w.lastAction ?? "Ready"));
+			const r2 = `  ${dim(`Last: ${line2Text}`)}`;
+
+			const branchOrTeam =
+				w.teammates.length > 0
+					? `${fg(120, 230, 255, "team:")} ${w.teammates.map((t) => t.name ?? t.agent ?? "helper").join(", ")}`
+					: dim(w.lead.branch ?? basename(w.lead.repo || w.lead.cwd));
+			const r3 = `  ${spark}  ${branchOrTeam}`;
+
+			const rightRows = [r0, r1, r2, r3];
 			for (let r = 0; r < 4; r++) {
 				workerLines.push(` ${sprite[r]}  ${fitAnsi(rightRows[r] ?? "", textCols)}`);
 			}
@@ -781,45 +973,40 @@ export function renderRadarFrame(
 			}
 		}
 	}
-	const workersBox = drawBox(
-		"AGENTS ON WATCH",
-		`${snapshot.workers.length} session${snapshot.workers.length === 1 ? "" : "s"}`,
-		workerLines,
-		cols,
-		[65, 200, 245],
-	);
+	const workersBox = drawBox("YOUR WORKSPACES", `${snapshot.workers.length} open`, workerLines, cols, [65, 200, 245]);
 
-	const runLines: string[] = [];
-	if (snapshot.runs.length === 0) {
-		runLines.push(dim(" No background pane runs yet."));
-	} else {
-		const spinner = ["◐", "◓", "◑", "◒"][Math.abs(tick) % 4] ?? "◐";
-		for (const r of snapshot.runs.slice(0, 3)) {
-			const icon = !r.done
-				? fg(80, 235, 255, spinner)
-				: r.exitCode === 0
-					? fg(70, 250, 165, "✓")
-					: fg(255, 90, 95, `✗(${r.exitCode})`);
-			runLines.push(` ${icon} ${r.label}`);
-		}
-	}
-	if (snapshot.pendingProposals > 0) {
-		runLines.push(
-			` ${fg(255, 210, 75, "★")} ${snapshot.pendingProposals} knowledge proposal${
-				snapshot.pendingProposals === 1 ? "" : "s"
-			} waiting for /kb`,
-		);
-	}
-	const runsBox = drawBox("RUNS & KNOWLEDGE", `/kb: ${snapshot.pendingProposals}`, runLines, cols, [70, 215, 175]);
+	const activeRuns = snapshot.runs.filter((r) => !r.done);
+	const runsBox =
+		activeRuns.length > 0 || (snapshot.runs.length > 0 && !snapshot.workers.some((w) => w.workspaceId))
+			? drawBox(
+					"BACKGROUND RUNS",
+					`${snapshot.runs.length}`,
+					snapshot.runs.slice(0, 2).map((r) => {
+						const icon = !r.done
+							? fg(80, 235, 255, "◐")
+							: r.exitCode === 0
+								? fg(70, 250, 165, "✓")
+								: fg(255, 90, 95, `✗(${r.exitCode})`);
+						return ` ${icon} ${r.label}`;
+					}),
+					cols,
+					[70, 215, 175],
+				)
+			: [];
 
 	const mailBox =
 		snapshot.mail.length > 0
 			? drawBox(
-					"PEER MAIL · COMMS",
-					`${snapshot.mail.length} thread${snapshot.mail.length === 1 ? "" : "s"}`,
+					"CONCOURSE MAIL",
+					`${snapshot.mail.length} recent`,
 					snapshot.mail.slice(0, 3).map((m) => {
-						const arrow = m.direction === "in" ? fg(95, 245, 255, "↙") : fg(185, 225, 145, "↗");
-						return ` ${arrow} ${bold(m.peer)} [${m.state}] ${m.summary}`;
+						const tag =
+							m.state === "WORKING"
+								? fg(255, 210, 80, "waiting on them")
+								: m.state === "INPUT_REQUIRED"
+									? fg(255, 110, 110, bold("needs reply"))
+									: fg(110, 235, 175, "done");
+						return ` ${bold(m.peer)} (${tag}): ${m.summary}`;
 					}),
 					cols,
 					[185, 145, 255],
@@ -827,12 +1014,12 @@ export function renderRadarFrame(
 			: [];
 
 	const footer = fitAnsi(
-		` ${fg(95, 225, 255, "[1-9]")} focus pane  ${fg(95, 225, 255, "[↑/↓ Enter]")} jump  ${fg(
+		` ${fg(95, 225, 255, "[1-9]")} jump to workspace  ${fg(95, 225, 255, "[↑/↓ Enter]")} switch  ${fg(
 			95,
 			225,
 			255,
-			"[r]",
-		)} refresh  ${fg(95, 225, 255, "[q]")} close`,
+			"[q]",
+		)} close`,
 		cols,
 	);
 
@@ -840,12 +1027,20 @@ export function renderRadarFrame(
 	return allLines.slice(0, rows).join("\n");
 }
 
-function focusWorkerPane(card: WorkerCard | undefined): void {
-	if (!card?.lead.paneId) return;
+function focusWorker(card: WorkerCard | undefined): void {
+	if (!card) return;
 	try {
-		execFileSync("herdr", ["pane", "focus", card.lead.paneId], { stdio: "ignore" });
+		if (card.workspaceId) {
+			execFileSync("herdr", ["workspace", "focus", card.workspaceId], { stdio: "ignore" });
+			return;
+		}
+		if (card.lead.paneId) {
+			execFileSync("herdr", ["pane", "focus", "--pane", card.lead.paneId, "--direction", "left"], {
+				stdio: "ignore",
+			});
+		}
 	} catch {
-		// Ignore when outside herdr or pane already closed.
+		// Ignore when outside herdr.
 	}
 }
 
@@ -944,14 +1139,16 @@ export function runRadarTui(profileDir: string, options?: { towerName?: string }
 				return;
 			}
 			if (key === "\r" || key === "\n") {
-				focusWorkerPane(lastSnap.workers[selectedIndex]);
+				focusWorker(lastSnap.workers[selectedIndex]);
 				return;
 			}
 			if (/^[1-9]$/.test(key)) {
-				const idx = Number(key) - 1;
+				const num = Number(key);
+				const byWorkspaceNumber = lastSnap.workers.findIndex((w) => w.index === num);
+				const idx = byWorkspaceNumber !== -1 ? byWorkspaceNumber : num - 1;
 				if (lastSnap.workers[idx]) {
 					selectedIndex = idx;
-					focusWorkerPane(lastSnap.workers[idx]);
+					focusWorker(lastSnap.workers[idx]);
 					render(false);
 				}
 			}
