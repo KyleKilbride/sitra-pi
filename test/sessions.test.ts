@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync } from "node:fs";
+import { chmodSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
@@ -141,7 +141,7 @@ describe("session registry", () => {
 		expect(tail).toEqual([
 			{ role: "user", text: "Check the date parser" },
 			{ role: "assistant", text: "Reading parser.ts now. [tool: read]" },
-			{ role: "tool", text: "read error: ENOENT: no such file" },
+			{ role: "tool", text: "read error: ENOENT: no such file", error: true },
 		]);
 	});
 
@@ -181,9 +181,9 @@ describe("session registry", () => {
 			(file) =>
 				file === "/tmp/loop.jsonl"
 					? [
-							{ role: "tool", text: "bash error: exit 1" },
-							{ role: "tool", text: "bash error: exit 1" },
-							{ role: "tool", text: "bash error: exit 1" },
+							{ role: "tool", text: "bash error: exit 1", error: true },
+							{ role: "tool", text: "bash error: exit 1", error: true },
+							{ role: "tool", text: "bash error: exit 1", error: true },
 						]
 					: [],
 			now,
@@ -204,10 +204,10 @@ describe("session registry", () => {
 		const audit = auditSessionsFriction([s1, s2], (f) =>
 			f === "/tmp/s1.jsonl"
 				? [
-						{ role: "tool", text: "bash error: command timed out" },
-						{ role: "tool", text: "edit error: oldText not found" },
+						{ role: "tool", text: "bash error: command timed out", error: true },
+						{ role: "tool", text: "edit error: oldText not found", error: true },
 					]
-				: [{ role: "tool", text: "edit error: oldText not found" }],
+				: [{ role: "tool", text: "edit error: oldText not found", error: true }],
 		);
 		expect(audit.totalSessions).toBe(2);
 		expect(audit.toolErrorCounts).toEqual({ edit: 2, bash: 1 });
@@ -420,6 +420,200 @@ describe("tower rules", () => {
 			else process.env.SITRA_ROLE = prevRole;
 			if (prevTower === undefined) delete process.env.SITRA_TOWER_NAME;
 			else process.env.SITRA_TOWER_NAME = prevTower;
+		}
+	});
+});
+
+type Tool = {
+	execute: (
+		id: string,
+		params: Record<string, unknown>,
+		s: unknown,
+		u: unknown,
+		c: unknown,
+	) => Promise<{ content: { text: string }[]; details: unknown }>;
+};
+
+/** Loads the extension as one Pi session would, with the given environment, and hands back its hooks and tools. */
+function startSession(env: Record<string, string | undefined>) {
+	const keys = [
+		"PI_CODING_AGENT_DIR",
+		"SITRA_ROLE",
+		"SITRA_TOWER_NAME",
+		"PI_SUBAGENT_NAME",
+		"HERDR_ENV",
+		"HERDR_PANE_ID",
+		"PATH",
+	];
+	const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+	for (const k of keys) if (k !== "PATH") delete process.env[k];
+	for (const [k, v] of Object.entries(env)) {
+		if (v === undefined) delete process.env[k];
+		else process.env[k] = v;
+	}
+	const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
+	const tools = new Map<string, Tool>();
+	const messages: { customType: string; content: string }[] = [];
+	sitraTower({
+		on: (ev, fn) => handlers.set(ev, fn as never),
+		registerTool: (t) => tools.set(t.name, t as never),
+		events: { on: () => {} },
+		sendMessage: (msg) => messages.push(msg),
+	});
+	const restore = () => {
+		for (const [k, v] of Object.entries(saved)) {
+			if (v === undefined) delete process.env[k];
+			else process.env[k] = v;
+		}
+	};
+	const ctxFor = (id: string, cwd = "/work/checkout") => ({
+		cwd,
+		sessionManager: { getSessionId: () => id, getSessionFile: () => undefined },
+	});
+	return { handlers, tools, messages, restore, ctxFor };
+}
+
+describe("tower edge cases", () => {
+	test("a teammate stays with the lead that started it, even when another lead in the same repo is more recent", () => {
+		const older: SessionRecord = { ...baseLead, id: "lead-old", sessionFile: "/profile/sessions/old.jsonl" };
+		const newer: SessionRecord = {
+			...baseLead,
+			id: "lead-new",
+			cwd: "/work/app/.worktrees/billing",
+			branch: "feat/billing",
+			sessionFile: "/profile/sessions/new.jsonl",
+			updatedAt: "2026-10-15T14:09:00.000Z",
+		};
+		const scout: SessionRecord = {
+			...baseLead,
+			id: "scout-1",
+			role: "teammate",
+			name: "flights-scout",
+			cwd: "/work/app/.worktrees/billing",
+			parentSessionFile: older.sessionFile,
+		};
+		const groups = groupWorkerSessions([newer, older, scout]);
+		expect(groups.find((g) => g.lead.id === "lead-old")?.teammates.map((t) => t.id)).toEqual(["scout-1"]);
+		expect(groups.find((g) => g.lead.id === "lead-new")?.teammates).toEqual([]);
+	});
+
+	test("a resumed session left behind by a crash shows as running, not stopped", () => {
+		const profile = tmp();
+		writeSession(profile, { ...baseLead, id: "worker-checkout", pid: 2_147_483_000 });
+		const s = startSession({ PI_CODING_AGENT_DIR: profile });
+		try {
+			s.handlers.get("session_start")?.({}, s.ctxFor("worker-checkout"));
+			const [record] = listSessions(profile);
+			expect(record?.pid).toBe(process.pid);
+			expect(record?.status).not.toBe("stopped");
+		} finally {
+			s.handlers.get("session_shutdown")?.({}, s.ctxFor("worker-checkout"));
+			s.restore();
+		}
+	});
+
+	test("a message sent before the worker's session id changed still reaches it", () => {
+		const profile = tmp();
+		const s = startSession({ PI_CODING_AGENT_DIR: profile });
+		try {
+			s.handlers.get("session_start")?.({}, s.ctxFor("first-id"));
+			sendInboxMessage(profile, { from: "Radar", fromSessionId: "tower-1", toSessionId: "first-id", text: "ping" });
+			s.handlers.get("session_start")?.({}, s.ctxFor("second-id"));
+			s.handlers.get("agent_end")?.({}, s.ctxFor("second-id"));
+			expect(s.messages.map((m) => m.customType)).toEqual(["sitra-inbox"]);
+			expect(drainInbox(profile, "first-id")).toEqual([]);
+		} finally {
+			s.handlers.get("session_shutdown")?.({}, s.ctxFor("second-id"));
+			s.restore();
+		}
+	});
+
+	test("flags a worker retrying a failing tool one call at a time", () => {
+		const call = { role: "assistant" as const, text: "[tool: bash]" };
+		const fail = { role: "tool" as const, text: "bash error: exit 1", error: true };
+		const looping: SessionRecord = { ...baseLead, id: "w-loop", sessionFile: "/tmp/loop.jsonl" };
+		const alerts = detectSessionAlerts(
+			[looping],
+			() => [call, fail, call, fail, call, fail],
+			Date.parse(baseLead.updatedAt),
+		);
+		expect(alerts.map((a) => a.kind)).toEqual(["repeated_errors"]);
+	});
+
+	test("does not flag a batch where some tool calls succeeded between the failures", () => {
+		const fail = { role: "tool" as const, text: "bash error: exit 1", error: true };
+		const ok = { role: "tool" as const, text: "read ok", error: false };
+		const batch: SessionRecord = { ...baseLead, id: "w-batch", sessionFile: "/tmp/batch.jsonl" };
+		const alerts = detectSessionAlerts(
+			[batch],
+			() => [{ role: "assistant", text: "[tool: bash, read, bash, read, bash]" }, fail, ok, fail, ok, fail],
+			Date.parse(baseLead.updatedAt),
+		);
+		expect(alerts).toEqual([]);
+	});
+
+	test("the transcript tail keeps successful tool results, marked as not errors", () => {
+		const jsonl = [
+			JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "read", content: "file body" } }),
+			JSON.stringify({
+				type: "message",
+				message: { role: "toolResult", toolName: "bash", isError: true, content: "exit 1" },
+			}),
+		].join("\n");
+		expect(readTranscriptTail(jsonl)).toEqual([
+			{ role: "tool", text: "read ok", error: false },
+			{ role: "tool", text: "bash error: exit 1", error: true },
+		]);
+	});
+
+	test("the audit counts only failed tool results", () => {
+		const s1: SessionRecord = { ...baseLead, id: "s1", sessionFile: "/tmp/s1.jsonl" };
+		const audit = auditSessionsFriction([s1], () => [
+			{ role: "tool", text: "read ok", error: false },
+			{ role: "tool", text: "bash error: exit 1", error: true },
+		]);
+		expect(audit.toolErrorCounts).toEqual({ bash: 1 });
+	});
+
+	test("refuses to message a session herdr shows but that has no sitra inbox", async () => {
+		const profile = tmp();
+		const bin = tmp();
+		const sessionFile = join(profile, "sessions", "old_01a11bfb-8764-730a-8028-998d5abed1ab.jsonl");
+		writeFileSync(
+			join(bin, "herdr"),
+			`#!/bin/sh\necho '${JSON.stringify({
+				result: {
+					agents: [
+						{
+							agent: "pi",
+							agent_status: "idle",
+							cwd: "/work/legacy",
+							pane_id: "w9:p1",
+							agent_session: { value: sessionFile },
+						},
+					],
+				},
+			})}'\n`,
+		);
+		chmodSync(join(bin, "herdr"), 0o755);
+		const s = startSession({
+			PI_CODING_AGENT_DIR: profile,
+			SITRA_ROLE: "tower",
+			HERDR_ENV: "1",
+			HERDR_PANE_ID: "w0:p0",
+			PATH: `${bin}:${process.env.PATH}`,
+		});
+		try {
+			const towerCtx = s.ctxFor("tower-1", "/work");
+			const listed = await s.tools.get("list_sessions")?.execute("1", {}, undefined, undefined, towerCtx);
+			expect(listed?.content[0]?.text).toContain("01a11bfb-8764-730a-8028-998d5abed1ab");
+			const sent = await s.tools
+				.get("message_session")
+				?.execute("2", { query: "legacy", message: "status?" }, undefined, undefined, towerCtx);
+			expect((sent?.details as { sent?: boolean } | undefined)?.sent).toBe(false);
+			expect(drainInbox(profile, "01a11bfb-8764-730a-8028-998d5abed1ab")).toEqual([]);
+		} finally {
+			s.restore();
 		}
 	});
 });
