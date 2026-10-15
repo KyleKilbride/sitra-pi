@@ -3,11 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
+	allProjectsKnowledgeIndex,
 	decide,
 	knowledgeIndex,
 	listEntries,
+	listKnownProjects,
 	listProposals,
 	parseEntry,
+	rememberProject,
 	renderEntry,
 	slug,
 	writeProposal,
@@ -109,5 +112,33 @@ describe("bugs the reviewer found", () => {
 		decide(root, writeProposal(root, lesson), "accept");
 		mkdirSync(join(root, "lessons", "not-a-file.md"));
 		expect(listEntries(root).map((e) => e.title)).toEqual([lesson.title]);
+	});
+});
+
+describe("tower sees every project's knowledge", () => {
+	test("remembers each project once and lists them", () => {
+		const profile = mkdtempSync(join(tmpdir(), "sitra-profile-"));
+		expect(listKnownProjects(profile)).toEqual([]);
+		rememberProject(profile, "/repos/a");
+		rememberProject(profile, "/repos/b");
+		rememberProject(profile, "/repos/a");
+		expect(listKnownProjects(profile)).toEqual(["/repos/a", "/repos/b"]);
+	});
+
+	test("index lists other projects' entries by project, skipping the tower's own and empty ones", () => {
+		const own = mkdtempSync(join(tmpdir(), "sitra-own-"));
+		const other = mkdtempSync(join(tmpdir(), "travelagent-ai-"));
+		const empty = mkdtempSync(join(tmpdir(), "empty-"));
+		const root = join(other, ".pi", "knowledge");
+		decide(root, writeProposal(root, lesson), "accept");
+		decide(root, writeProposal(root, { ...lesson, kind: "warning", title: "Never merge" }), "accept");
+		const text = allProjectsKnowledgeIndex([own, other, empty, other], own);
+		expect(text).toContain("# Other projects' knowledge");
+		expect(text.match(/## /g)?.length).toBe(1);
+		expect(text).toContain(`## ${other.split("/").pop()} (2 entries)`);
+		expect(text).toContain("- [warning] Never merge —");
+		expect(text).toContain(`- [lesson] ${lesson.title} — ${root}/lessons/`);
+		expect(text.indexOf("Never merge")).toBeLessThan(text.indexOf(lesson.title));
+		expect(allProjectsKnowledgeIndex([own, empty], own)).toBe("");
 	});
 });
