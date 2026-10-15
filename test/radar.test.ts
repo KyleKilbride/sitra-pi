@@ -136,9 +136,11 @@ describe("radar snapshot and frame", () => {
 		});
 		expect(snap.towerName).toBe("Ron");
 		expect(snap.workers).toHaveLength(2);
-		expect(snap.workers[0]?.visualState).toBe("working");
-		expect(snap.workers[0]?.teammates).toHaveLength(1);
-		expect(snap.workers[1]?.visualState).toBe("error_loop");
+		const w1 = snap.workers.find((w) => w.lead.id === "lead-1");
+		const w2 = snap.workers.find((w) => w.lead.id === "lead-2");
+		expect(w1?.visualState).toBe("working");
+		expect(w1?.teammates).toHaveLength(1);
+		expect(w2?.visualState).toBe("error_loop");
 		expect(snap.pendingProposals).toBe(1);
 		expect(snap.runs[0]?.done).toBe(true);
 		expect(snap.mail[0]?.peer).toBe("operator/main");
