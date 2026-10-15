@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
+	detectSessionAlerts,
 	drainInbox,
 	findSession,
 	formatSessionsReport,
@@ -141,6 +142,52 @@ describe("session registry", () => {
 			{ role: "assistant", text: "Reading parser.ts now. [tool: read]" },
 			{ role: "tool", text: "read error: ENOENT: no such file" },
 		]);
+	});
+
+	test("flags workers that are waiting on the person, stopped unexpectedly, stalled, or looping on tool errors", () => {
+		const now = Date.parse("2026-10-15T14:20:00.000Z");
+		const waiting: SessionRecord = {
+			...baseLead,
+			id: "w-wait",
+			status: "waiting_for_user",
+			waitingFor: "waiting for your answer",
+			updatedAt: "2026-10-15T14:19:00.000Z",
+		};
+		const crashed: SessionRecord = {
+			...baseLead,
+			id: "w-crash",
+			branch: "feat/crash",
+			status: "stopped",
+			updatedAt: "2026-10-15T14:18:00.000Z",
+		};
+		const looping: SessionRecord = {
+			...baseLead,
+			id: "w-loop",
+			branch: "feat/loop",
+			sessionFile: "/tmp/loop.jsonl",
+			status: "working",
+			updatedAt: "2026-10-15T14:19:30.000Z",
+		};
+		const stalled: SessionRecord = {
+			...baseLead,
+			id: "w-stall",
+			branch: "feat/stall",
+			status: "working",
+			updatedAt: "2026-10-15T14:05:00.000Z",
+		};
+		const alerts = detectSessionAlerts(
+			[waiting, crashed, looping, stalled],
+			(file) =>
+				file === "/tmp/loop.jsonl"
+					? [
+							{ role: "tool", text: "bash error: exit 1" },
+							{ role: "tool", text: "bash error: exit 1" },
+							{ role: "tool", text: "bash error: exit 1" },
+						]
+					: [],
+			now,
+		);
+		expect(alerts.map((a) => a.kind)).toEqual(["waiting_for_user", "stopped", "repeated_errors", "stalled"]);
 	});
 });
 

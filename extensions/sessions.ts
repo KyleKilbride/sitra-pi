@@ -42,6 +42,83 @@ export interface InboxMessage {
 	createdAt: string;
 }
 
+export interface SessionAlert {
+	key: string;
+	sessionId: string;
+	kind: "waiting_for_user" | "stopped" | "repeated_errors" | "stalled";
+	summary: string;
+}
+
+const STALL_MS = 10 * 60_000;
+
+function sessionLabel(record: SessionRecord): string {
+	const project = basename(record.repo || record.cwd);
+	return record.branch ? `${project} (${record.branch})` : project;
+}
+
+export function detectSessionAlerts(
+	records: readonly SessionRecord[],
+	readTail?: (sessionFile: string) => TranscriptItem[],
+	nowMs = Date.now(),
+): SessionAlert[] {
+	const alerts: SessionAlert[] = [];
+	for (const r of records) {
+		if (r.role === "tower") continue;
+		const where = sessionLabel(r);
+		if (r.status === "waiting_for_user") {
+			alerts.push({
+				key: `waiting:${r.id}:${r.updatedAt}`,
+				sessionId: r.id,
+				kind: "waiting_for_user",
+				summary: `${where} is waiting for your answer${r.task ? ` (task: ${r.task})` : ""}.`,
+			});
+			continue;
+		}
+		if (r.status === "stopped" && r.role === "lead") {
+			alerts.push({
+				key: `stopped:${r.id}`,
+				sessionId: r.id,
+				kind: "stopped",
+				summary: `${where} stopped unexpectedly (process ${r.pid} is no longer running).`,
+			});
+			continue;
+		}
+		if (r.sessionFile && readTail) {
+			const tail = readTail(r.sessionFile);
+			let streak = 0;
+			let lastError = "";
+			for (let i = tail.length - 1; i >= 0; i--) {
+				if (tail[i]?.role === "tool") {
+					streak++;
+					if (!lastError) lastError = tail[i]?.text ?? "";
+				} else {
+					break;
+				}
+			}
+			if (streak >= 3) {
+				alerts.push({
+					key: `errors:${r.id}:${r.updatedAt}`,
+					sessionId: r.id,
+					kind: "repeated_errors",
+					summary: `${where} hit ${streak} tool errors in a row (${lastError}) and may be stuck.`,
+				});
+				continue;
+			}
+		}
+		const ageMs = nowMs - Date.parse(r.updatedAt);
+		if (r.status === "working" && Number.isFinite(ageMs) && ageMs >= STALL_MS) {
+			const mins = Math.round(ageMs / 60_000);
+			alerts.push({
+				key: `stalled:${r.id}:${r.updatedAt}`,
+				sessionId: r.id,
+				kind: "stalled",
+				summary: `${where} has been in the same step for ${mins}m${r.task ? ` (task: ${r.task})` : ""}.`,
+			});
+		}
+	}
+	return alerts;
+}
+
 export function sendInboxMessage(
 	profileDir: string,
 	msg: Omit<InboxMessage, "id" | "createdAt"> & { id?: string; createdAt?: string },

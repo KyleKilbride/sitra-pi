@@ -8,6 +8,7 @@ import { basename, join } from "node:path";
 import { Type } from "typebox";
 import { knowledgeRepo } from "./kb.ts";
 import {
+	detectSessionAlerts,
 	drainInbox,
 	findSession,
 	formatSessionsReport,
@@ -106,6 +107,10 @@ export default function sitraTower(pi: Pi): void {
 	let currentTask: string | undefined;
 	let isBusy = false;
 	let lastCtx: Ctx | undefined;
+	const seenAlerts = new Set<string>();
+
+	const readFileTail = (sessionFile: string) =>
+		existsSync(sessionFile) ? readTranscriptTail(readFileSync(sessionFile, "utf8"), 8) : [];
 
 	const syncRecord = (ctx: Ctx, patch: Partial<SessionRecord>): void => {
 		lastCtx = ctx;
@@ -150,14 +155,31 @@ export default function sitraTower(pi: Pi): void {
 		const target = role === "tower" ? "tower" : currentId;
 		if (!target) return;
 		const messages = drainInbox(profileDir, target);
-		if (messages.length === 0) return;
-		const text =
-			role === "tower"
-				? messages.map((m) => `Reply from worker ${m.from} (${m.fromSessionId}): ${m.text}`).join("\n\n")
-				: messages
-						.map((m) => `Message from ${m.from} (tower): ${m.text}\n(Reply when ready with the reply_tower tool.)`)
-						.join("\n\n");
-		pi.sendMessage({ customType: "sitra-inbox", content: text, display: true }, { triggerTurn: true });
+		if (messages.length > 0) {
+			const text =
+				role === "tower"
+					? messages.map((m) => `Reply from worker ${m.from} (${m.fromSessionId}): ${m.text}`).join("\n\n")
+					: messages
+							.map((m) => `Message from ${m.from} (tower): ${m.text}\n(Reply when ready with the reply_tower tool.)`)
+							.join("\n\n");
+			pi.sendMessage({ customType: "sitra-inbox", content: text, display: true }, { triggerTurn: true });
+			return;
+		}
+		if (role === "tower") {
+			const alerts = detectSessionAlerts(listSessions(profileDir), readFileTail);
+			const fresh = alerts.filter((a) => !seenAlerts.has(a.key));
+			if (fresh.length === 0) return;
+			for (const a of fresh) seenAlerts.add(a.key);
+			const body = fresh.map((a) => `- [${a.kind}] ${a.summary}`).join("\n");
+			pi.sendMessage(
+				{
+					customType: "sitra-alert",
+					content: `Session alert:\n${body}`,
+					display: true,
+				},
+				{ triggerTurn: true },
+			);
+		}
 	};
 
 	const inboxTimer =
@@ -251,9 +273,14 @@ export default function sitraTower(pi: Pi): void {
 		parameters: Type.Object({}),
 		async execute() {
 			const sessions = listSessions(profileDir);
+			const alerts = detectSessionAlerts(sessions, readFileTail);
+			for (const a of alerts) seenAlerts.add(a.key);
+			const report = formatSessionsReport(sessions);
+			const alertSection =
+				alerts.length > 0 ? `\n\nAlerts:\n${alerts.map((a) => `- [${a.kind}] ${a.summary}`).join("\n")}` : "";
 			return {
-				content: [{ type: "text", text: formatSessionsReport(sessions) }],
-				details: { sessions },
+				content: [{ type: "text", text: `${report}${alertSection}` }],
+				details: { sessions, alerts },
 			};
 		},
 	});
