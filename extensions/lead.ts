@@ -19,7 +19,8 @@ export function leadRules(name?: string): string {
 - **Never leave them in the dark.** Before anything that takes more than a couple of minutes, say in one line what's starting. When a step finishes or the picture changes, tell them in two lines.
 - **Never block.** Tests, evals, builds and installs run with run_in_pane, in a pane they can watch. Don't sleep or poll; check the run with check_run when you have nothing else to do or when they ask.
 - **${Who}'s limits travel with the work.** No full unit-test or eval suites unless they asked for them; CI runs the rest. Put that, the goal and what "done" means into every teammate's task.
-- **Teammates:** scout (digging and history), builder (one per pull request, ever), app-tester (uses the app in a browser), reviewer (diffs, tests, evals). Steer them only through the subagent tools; never type into their panes. Do small steps yourself.
+- **You do the building.** Write the code yourself, own the branch and the pull request. Hand the builder only small, fully specified pieces (specific files, clear instructions, little decision-making) that can run while you keep going.
+- **Teammates:** scout (digging and history), builder (narrow targeted edits), app-tester (uses the app in Chrome and reads its real state), reviewer (diffs, tests, evals). Steer them only through the subagent tools; never type into their panes.
 - **Read big files in parts** (grep, line ranges), never whole.
 - **Knowledge:** read the approved project knowledge before acting on what it covers. Propose new project facts with kb_propose. Keep pi-memory for ${who}'s personal preferences only, not for work state.
 `;

@@ -50,8 +50,8 @@ step. It tells you what's starting and what finished.
 | Teammate | Does | Where |
 |---|---|---|
 | scout | Read-only digging: files, git history, owners | Background; the lead gets its summary |
-| builder | Makes one change. One builder per PR; never pushes or merges | Its own pane |
-| app-tester | Uses the real app in a browser (Playwright MCP) and reports what it saw | Its own pane |
+| builder | Small, fully specified edits handed off by the lead, which does most building itself; never pushes or merges | Its own pane |
+| app-tester | Uses the real app in your Chrome (chrome-devtools MCP), reads the app's real state, and reports what it saw | Its own pane |
 | reviewer | Checks the diff, tests and evals; can't edit | Its own pane |
 
 When a teammate finishes, its pane closes and its report goes back to the lead. You can ask for one directly ("send
@@ -95,14 +95,17 @@ splits it: agents **propose**, you **approve**. Approved knowledge is plain mark
 - [`@juicesharp/rpiv-todo`](https://www.npmjs.com/package/@juicesharp/rpiv-todo): task list
 - [`pi-powerline-footer`](https://www.npmjs.com/package/pi-powerline-footer): status line
 - [`pi-memory`](https://www.npmjs.com/package/pi-memory): personal preferences only, not project facts
-- [Playwright MCP](https://github.com/microsoft/playwright-mcp): the app-tester's browser
+- [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp): the app-tester's browser, attached to your running Chrome
 
 The homebrew parts are small: the knowledge base, `run_in_pane`, the lead's rules and `sitra init`.
 
 ## Good to know
 
-- The scout runs on `anthropic/claude-sonnet-5-5`. If you use another provider, change `model:` in
-  `~/.sitra/profile/agents/scout.md`.
+- Teammate models: scout and builder run on `google/gemini-4-argon`, the reviewer on `openai/gpt-6.1-sol` (high
+  thinking), the app-tester on `anthropic/claude-sonnet-5-5`. Each may only be switched to the models in its
+  `allowed-models:` line. If you use other providers, change `model:` in `~/.sitra/profile/agents/<name>.md`.
+- The app-tester needs Chrome 144 or later, running, with remote debugging turned on at
+  `chrome://inspect/#remote-debugging`.
 - Your profile is yours to edit: `~/.sitra/profile/AGENTS.md` (how agents work with you) and `agents/*.md` (the
   teammates). `sitra init` won't overwrite them.
 - Installs respect a 7-day release cooldown (`.npmrc`, `pnpm-workspace.yaml`) as a supply-chain guard.

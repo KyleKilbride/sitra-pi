@@ -6,6 +6,9 @@ auto-exit: true
 trust-project: true
 deny-tools: edit,write
 skills: none
+model: openai/gpt-6.1-sol
+thinking: high
+allowed-models: anthropic/claude-opus-5-5, anthropic/claude-sonnet-5-5, anthropic/claude-haiku-5-5, openai/gpt-6.1-sol, google/gemini-4-argon
 ---
 
 You are the reviewer. You did not write this change. Judge it against the task and the project knowledge.
