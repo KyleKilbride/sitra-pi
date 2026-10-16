@@ -54,7 +54,9 @@ personal name, and after that both `sitra tower` and `sitra <its-name>` start it
 approved knowledge, so it can tell whether a worker is following what that project has learned. Inside herdr, starting
 the tower (or running `/radar`) opens **sitra radar** in a right-hand pane: a zero-token `btop`-style live monitor with
 animated pixel agents per worker state, Braille activity graphs, background runs, and `[1-9]` hotkeys to jump straight
-to a worker's pane.
+to a worker's pane. You can also ask the tower to spin up a new worker (`spawn_session`) in its own herdr workspace and
+git worktree (branched from the base branch you choose, with `.env` files copied over, `pnpm i && pnpm run build`, and
+an initial grounding prompt so it reads the repo's docs and rules and waits for you to drive it).
 
 **Teammates** (via [pi-subagents](https://github.com/edxeth/pi-subagents)):
 

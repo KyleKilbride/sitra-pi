@@ -3,8 +3,21 @@
  * `<PI_CODING_AGENT_DIR>/sitra-sessions/<id>.json` so the tower can see every session across all projects and worktrees.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import {
+	chmodSync,
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { knowledgeRepo } from "./kb.ts";
+import { shellQuote } from "./runs.ts";
 
 export type SessionRole = "lead" | "teammate" | "tower";
 export type SessionStatus = "idle" | "working" | "waiting_for_user" | "stopped";
@@ -434,4 +447,116 @@ export function readTranscriptTail(jsonl: string, maxItems = 8): TranscriptItem[
 		}
 	}
 	return items.slice(-maxItems);
+}
+
+export interface PreparedWorktree {
+	primaryRepo: string;
+	worktreePath: string;
+	branch: string;
+	baseRef: string;
+	copiedEnvFiles: string[];
+}
+
+export function groundingPrompt(userName?: string, extraInstructions?: string): string {
+	const who = userName?.trim() || "the user";
+	const extra = extraInstructions?.trim() ? ` Additional context from ${who}: ${extraInstructions.trim()}` : "";
+	return `Read AGENTS.md, CLAUDE.md, any project steering index, and the approved project knowledge so you are grounded in this codebase and how ${who} works. Do not edit code or start a task yet.${extra} Reply in two short lines confirming which docs and rules you loaded and that you are ready for ${who} to drive.`;
+}
+
+export function spawnPaneCommand(grounding: string): string {
+	return `pnpm i && pnpm run build && sitra ${shellQuote(grounding)}`;
+}
+
+const SKIP_ENV_DIRS = new Set(["node_modules", "dist", "build", "coverage", "out"]);
+
+export function findRepoEnvFiles(primaryRepo: string): string[] {
+	const found: string[] = [];
+	const walk = (rel: string, depth: number) => {
+		if (depth > 3) return;
+		const dir = rel ? join(primaryRepo, rel) : primaryRepo;
+		try {
+			for (const e of readdirSync(dir, { withFileTypes: true })) {
+				const name = e.name;
+				const sub = rel ? `${rel}/${name}` : name;
+				if (e.isDirectory()) {
+					if (name.startsWith(".") || SKIP_ENV_DIRS.has(name)) continue;
+					walk(sub, depth + 1);
+				} else if (
+					e.isFile() &&
+					/^\.env(\.[a-zA-Z0-9._-]+)?$/.test(name) &&
+					!/\.(example|sample|template)$/i.test(name)
+				) {
+					found.push(sub);
+				}
+			}
+		} catch {
+			return;
+		}
+	};
+	walk("", 0);
+	return found.sort();
+}
+
+export function prepareWorktree(options: {
+	repo: string;
+	branch: string;
+	base: string;
+	slug?: string;
+}): PreparedWorktree {
+	const primaryRepo = knowledgeRepo(options.repo);
+	const branch = options.branch.trim();
+	const rawSlug = options.slug?.trim() || branch.replace(/^[^/]+\//, "");
+	const slug = rawSlug.replace(/[^a-zA-Z0-9._-]/g, "-");
+	if (!branch || !slug) throw new Error("A branch name is required to create a worktree.");
+
+	const git = (...args: string[]) =>
+		execFileSync("git", args, { cwd: primaryRepo, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+	const refExists = (ref: string): boolean => {
+		try {
+			git("show-ref", "--verify", "--quiet", ref);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+
+	const baseBranch = options.base.trim().replace(/^origin\//, "");
+	try {
+		git("fetch", "origin", baseBranch);
+	} catch {
+		// Offline or local-only repo without origin; fall back to local refs.
+	}
+	const baseRef = refExists(`refs/remotes/origin/${baseBranch}`) ? `origin/${baseBranch}` : options.base.trim();
+
+	const worktreePath = join(primaryRepo, ".worktrees", slug);
+	if (!existsSync(worktreePath)) {
+		mkdirSync(join(primaryRepo, ".worktrees"), { recursive: true });
+		if (refExists(`refs/heads/${branch}`)) {
+			git("worktree", "add", worktreePath, branch);
+		} else {
+			git("worktree", "add", "--no-track", "-b", branch, worktreePath, baseRef);
+		}
+	}
+
+	const envFiles = findRepoEnvFiles(primaryRepo);
+	const copiedEnvFiles: string[] = [];
+	for (const rel of envFiles) {
+		const src = join(primaryRepo, rel);
+		const dst = join(worktreePath, rel);
+		mkdirSync(dirname(dst), { recursive: true });
+		copyFileSync(src, dst);
+		chmodSync(dst, 0o600);
+		copiedEnvFiles.push(rel);
+	}
+	if (!copiedEnvFiles.includes("caller/.env") && existsSync(join(primaryRepo, "caller", ".env.example"))) {
+		const dst = join(worktreePath, "caller", ".env.example");
+		const target = join(worktreePath, "caller", ".env");
+		if (!existsSync(target) && existsSync(dst)) {
+			copyFileSync(dst, target);
+			chmodSync(target, 0o600);
+			copiedEnvFiles.push("caller/.env");
+		}
+	}
+
+	return { primaryRepo, worktreePath, branch, baseRef, copiedEnvFiles };
 }
