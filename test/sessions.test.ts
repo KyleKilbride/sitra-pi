@@ -664,10 +664,17 @@ describe("tower edge cases", () => {
 		const prepared = prepareWorktree({
 			repo,
 			branch: "krskl/flights-date-refresh",
-			base: "sre",
+			base: "origin/sre",
 		});
 		expect(prepared.worktreePath).toBe(join(repo, ".worktrees", "flights-date-refresh"));
 		expect(prepared.baseRef).toBe("sre");
+		expect(() =>
+			prepareWorktree({
+				repo,
+				branch: "krskl/flights-date-refresh",
+				base: "sre",
+			}),
+		).toThrow(/already exists/);
 		expect(prepared.copiedEnvFiles).toEqual(["agent/.env", "ui/.env.local"]);
 		expect(readFileSync(join(prepared.worktreePath, "agent", ".env"), "utf8")).toBe("API_KEY=1\n");
 		expect(readFileSync(join(prepared.worktreePath, "ui", ".env.local"), "utf8")).toBe("UI_FLAG=1\n");

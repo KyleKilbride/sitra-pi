@@ -338,6 +338,7 @@ fi
 
 			const crashedCard = snap.workers.find((w) => w.lead.id === "lead-crashed");
 			expect(crashedCard?.visualState).toBe("stopped");
+			expect(crashedCard?.index).toBe(4);
 		} finally {
 			for (const [k, v] of Object.entries(savedEnv)) {
 				if (v === undefined) delete process.env[k];

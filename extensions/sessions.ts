@@ -308,11 +308,7 @@ export function listSessions(
 			}
 			if (record.sessionFile && existsSync(record.sessionFile)) {
 				const mtime = statSync(record.sessionFile).mtime.toISOString();
-				if (mtime > record.updatedAt) {
-					const driftMs = Date.parse(mtime) - Date.parse(record.updatedAt);
-					record.updatedAt = mtime;
-					if (driftMs >= 60_000) writeSession(profileDir, record);
-				}
+				if (mtime > record.updatedAt) record.updatedAt = mtime;
 			}
 			out.push(record);
 		} catch {
@@ -526,16 +522,21 @@ export function prepareWorktree(options: {
 	} catch {
 		// Offline or local-only repo without origin; fall back to local refs.
 	}
-	const baseRef = refExists(`refs/remotes/origin/${baseBranch}`) ? `origin/${baseBranch}` : options.base.trim();
+	const baseRef = refExists(`refs/remotes/origin/${baseBranch}`)
+		? `origin/${baseBranch}`
+		: refExists(`refs/heads/${baseBranch}`)
+			? baseBranch
+			: options.base.trim();
 
 	const worktreePath = join(primaryRepo, ".worktrees", slug);
-	if (!existsSync(worktreePath)) {
-		mkdirSync(join(primaryRepo, ".worktrees"), { recursive: true });
-		if (refExists(`refs/heads/${branch}`)) {
-			git("worktree", "add", worktreePath, branch);
-		} else {
-			git("worktree", "add", "--no-track", "-b", branch, worktreePath, baseRef);
-		}
+	if (existsSync(worktreePath)) {
+		throw new Error(`Worktree already exists at ${worktreePath}; choose a new branch or slug.`);
+	}
+	mkdirSync(join(primaryRepo, ".worktrees"), { recursive: true });
+	if (refExists(`refs/heads/${branch}`)) {
+		git("worktree", "add", worktreePath, branch);
+	} else {
+		git("worktree", "add", "--no-track", "-b", branch, worktreePath, baseRef);
 	}
 
 	const envFiles = findRepoEnvFiles(primaryRepo);

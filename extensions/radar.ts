@@ -831,8 +831,9 @@ export function collectRadarSnapshot(
 							? "stopped"
 							: "idle";
 			const insights = readTranscriptInsights(g.lead.sessionFile, nowMs, g.lead.status);
+			const nextIndex = Math.max(0, ...workers.map((w) => w.index)) + 1;
 			workers.push({
-				index: workers.length + 1,
+				index: nextIndex,
 				title: basename(g.lead.repo || g.lead.cwd),
 				...(g.lead.branch ? { subtitle: g.lead.branch } : {}),
 				lead: g.lead,
