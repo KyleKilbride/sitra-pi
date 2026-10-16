@@ -4,12 +4,13 @@
  * agent its tower rules and tools to inspect and message workers across projects.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Type } from "typebox";
 import { knowledgeRepo } from "./kb.ts";
 import {
 	auditSessionsFriction,
+	createTailReader,
 	detectSessionAlerts,
 	drainInbox,
 	findSession,
@@ -19,6 +20,7 @@ import {
 	listSessions,
 	moveInbox,
 	prepareWorktree,
+	readLastLines,
 	readTranscriptTail,
 	removeSession,
 	type SessionRecord,
@@ -179,8 +181,13 @@ export default function sitraTower(pi: Pi): void {
 		}
 	};
 
-	const readFileTail = (sessionFile: string) =>
-		existsSync(sessionFile) ? readTranscriptTail(readFileSync(sessionFile, "utf8"), 8) : [];
+	// The alert check runs every 2 seconds over every session, so it reads only the end of each transcript and skips
+	// transcripts that haven't changed. A whole-file read of one long session cost a quarter of a second each time.
+	const readAlertTail = createTailReader(200);
+	const readFileTail = (sessionFile: string) => readTranscriptTail(readAlertTail(sessionFile), 8);
+	// On-demand tools want more turns; every turn is at least one line, so ten lines per turn leaves plenty of room.
+	const readTurns = (sessionFile: string, turns: number) =>
+		readTranscriptTail(readLastLines(sessionFile, Math.max(200, turns * 10)), turns);
 
 	const allSessions = (): SessionRecord[] => {
 		const recorded = listSessions(profileDir);
@@ -463,10 +470,7 @@ export default function sitraTower(pi: Pi): void {
 					details: { found: false },
 				};
 			}
-			const tail =
-				match.sessionFile && existsSync(match.sessionFile)
-					? readTranscriptTail(readFileSync(match.sessionFile, "utf8"), maxItems)
-					: [];
+			const tail = match.sessionFile ? readTurns(match.sessionFile, maxItems) : [];
 			const header = [
 				`Session: ${match.id} (${match.role}${match.name ? `: ${match.name}` : ""})`,
 				`Status: ${match.status}${match.waitingFor ? ` — ${match.waitingFor}` : ""}`,
@@ -545,9 +549,7 @@ export default function sitraTower(pi: Pi): void {
 		parameters: Type.Object({}),
 		async execute() {
 			const sessions = allSessions();
-			const audit = auditSessionsFriction(sessions, (file) =>
-				existsSync(file) ? readTranscriptTail(readFileSync(file, "utf8"), 30) : [],
-			);
+			const audit = auditSessionsFriction(sessions, (file) => readTurns(file, 30));
 			const lines = [
 				`Sessions checked: ${audit.totalSessions}`,
 				...(audit.hotspots.length > 0
