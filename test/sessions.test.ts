@@ -1,4 +1,5 @@
-import { chmodSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
@@ -8,12 +9,15 @@ import {
 	drainInbox,
 	findSession,
 	formatSessionsReport,
+	groundingPrompt,
 	groupWorkerSessions,
 	listSessions,
+	prepareWorktree,
 	readTranscriptTail,
 	removeSession,
 	type SessionRecord,
 	sendInboxMessage,
+	spawnPaneCommand,
 	updateSession,
 	writeSession,
 } from "../extensions/sessions.ts";
@@ -612,6 +616,117 @@ describe("tower edge cases", () => {
 				?.execute("2", { query: "legacy", message: "status?" }, undefined, undefined, towerCtx);
 			expect((sent?.details as { sent?: boolean } | undefined)?.sent).toBe(false);
 			expect(drainInbox(profile, "01a11bfb-8764-730a-8028-998d5abed1ab")).toEqual([]);
+		} finally {
+			s.restore();
+		}
+	});
+
+	test("uses the transcript file's latest write time so a long active turn is not flagged as stalled", () => {
+		const profile = tmp();
+		const sessionFile = join(profile, "active.jsonl");
+		writeFileSync(sessionFile, '{"type":"message"}\n');
+		const fileMtimeMs = Date.now();
+		const staleStart = new Date(fileMtimeMs - 20 * 60_000).toISOString();
+		writeSession(profile, {
+			...baseLead,
+			id: "long-turn",
+			pid: process.pid,
+			sessionFile,
+			status: "working",
+			startedAt: staleStart,
+			updatedAt: staleStart,
+		});
+		const listed = listSessions(profile);
+		expect(Date.parse(listed[0]?.updatedAt ?? "")).toBeGreaterThan(Date.parse(staleStart));
+		expect(detectSessionAlerts(listed, undefined, fileMtimeMs)).toEqual([]);
+	});
+
+	test("prepares a new worktree from the chosen base branch, copies primary .env files, and spawns a single-pane herdr workspace", async () => {
+		const repo = tmp();
+		const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
+		git("init", "-b", "staging");
+		git("config", "user.email", "sam@example.com");
+		git("config", "user.name", "Sam");
+		mkdirSync(join(repo, "agent"), { recursive: true });
+		mkdirSync(join(repo, "ui"), { recursive: true });
+		mkdirSync(join(repo, "node_modules", "pkg"), { recursive: true });
+		writeFileSync(join(repo, ".gitignore"), ".env*\n.worktrees/\nnode_modules/\n");
+		writeFileSync(join(repo, "package.json"), '{"name":"app"}\n');
+		git("add", ".");
+		git("commit", "-m", "initial staging");
+		git("branch", "sre");
+
+		writeFileSync(join(repo, "agent", ".env"), "API_KEY=1\n");
+		writeFileSync(join(repo, "ui", ".env.local"), "UI_FLAG=1\n");
+		writeFileSync(join(repo, "agent", ".env.example"), "API_KEY=\n");
+		writeFileSync(join(repo, "node_modules", "pkg", ".env"), "IGNORED=1\n");
+
+		const prepared = prepareWorktree({
+			repo,
+			branch: "krskl/flights-date-refresh",
+			base: "origin/sre",
+		});
+		expect(prepared.worktreePath).toBe(join(repo, ".worktrees", "flights-date-refresh"));
+		expect(prepared.baseRef).toBe("sre");
+		expect(() =>
+			prepareWorktree({
+				repo,
+				branch: "krskl/flights-date-refresh",
+				base: "sre",
+			}),
+		).toThrow(/already exists/);
+		expect(prepared.copiedEnvFiles).toEqual(["agent/.env", "ui/.env.local"]);
+		expect(readFileSync(join(prepared.worktreePath, "agent", ".env"), "utf8")).toBe("API_KEY=1\n");
+		expect(readFileSync(join(prepared.worktreePath, "ui", ".env.local"), "utf8")).toBe("UI_FLAG=1\n");
+
+		const prompt = groundingPrompt("Sam", "Focus on the flights date refresh flow.");
+		expect(prompt).toContain("AGENTS.md");
+		expect(prompt).toContain("Sam");
+		expect(prompt).toContain("Focus on the flights date refresh flow.");
+		const cmd = spawnPaneCommand(prompt);
+		expect(cmd).toContain("pnpm i && pnpm run build && sitra ");
+
+		const profile = tmp();
+		const bin = tmp();
+		const logFile = join(bin, "herdr-spawn.log");
+		writeFileSync(
+			join(bin, "herdr"),
+			`#!/bin/sh
+echo "$@" >> "${logFile}"
+if [ "$1" = "workspace" ] && [ "$2" = "create" ]; then
+  echo '{"result":{"workspace":{"workspace_id":"wNew","number":6},"tab":{"tab_id":"wNew:t1"},"root_pane":{"pane_id":"wNew:p1"}}}'
+fi
+`,
+		);
+		chmodSync(join(bin, "herdr"), 0o755);
+
+		const s = startSession({
+			PI_CODING_AGENT_DIR: profile,
+			SITRA_ROLE: "tower",
+			SITRA_USER_NAME: "Sam",
+			SITRA_NO_RADAR: "1",
+			HERDR_ENV: "1",
+			HERDR_PANE_ID: "w0:p1",
+			PATH: `${bin}:${process.env.PATH}`,
+		});
+		try {
+			const res = await s.tools.get("spawn_session")?.execute(
+				"1",
+				{
+					repo,
+					branch: "krskl/hotel-cards",
+					base: "staging",
+					label: "hotel-cards",
+					instructions: "Read the hotel card dispatcher docs.",
+				},
+				undefined,
+				undefined,
+				s.ctxFor("tower-1", repo),
+			);
+			expect((res?.details as { spawned?: boolean } | undefined)?.spawned).toBe(true);
+			const calls = readFileSync(logFile, "utf8").trim().split("\n");
+			expect(calls.some((c) => c.includes("workspace create") && c.includes("--label hotel-cards"))).toBe(true);
+			expect(calls.some((c) => c.startsWith("pane run wNew:p1 pnpm i && pnpm run build && sitra "))).toBe(true);
 		} finally {
 			s.restore();
 		}

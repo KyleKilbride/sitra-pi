@@ -9,7 +9,8 @@ import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { profileDir, readConfig, sitraHome } from "../cli/config.ts";
 import { type ExecResult, runInit } from "../cli/init.ts";
-import { ensureTowerName, isTowerCommand, piArgs, piEnv } from "../cli/launch.ts";
+import { ensureTowerName, isRadarCommand, isTowerCommand, launchCommand, piEnv } from "../cli/launch.ts";
+import { runRadarTui } from "../extensions/radar.ts";
 
 const repoRoot = dirname(dirname(realpathSync(fileURLToPath(import.meta.url))));
 const [first, ...rest] = process.argv.slice(2);
@@ -55,25 +56,31 @@ if (first === "init") {
 		console.error("sitra isn't set up yet. Run: sitra init");
 		process.exit(1);
 	}
-	if (!process.env.HERDR_ENV) {
-		console.error(
-			"Not inside herdr: teammates and long runs won't get their own panes. Start herdr first for the full setup.",
-		);
-	}
 	let config = readConfig(sitra);
-	const tower = isTowerCommand(first, config);
-	if (tower && !config.tower?.trim()) {
-		const rl = stdin.isTTY ? createInterface({ input: stdin, output: stdout }) : undefined;
-		config = await ensureTowerName(sitra, config, async (q) => (rl ? await rl.question(`${q} `) : ""));
-		rl?.close();
-		console.log(
-			`${config.tower} is on watch. Next time, either \`sitra tower\` or \`sitra ${config.tower?.toLowerCase()}\` starts it.`,
-		);
+	if (isRadarCommand(first, rest, config)) {
+		runRadarTui(profileDir(sitra), { towerName: config.tower, closePaneOnExit: rest.includes("--tui") });
+	} else {
+		if (!process.env.HERDR_ENV) {
+			console.error(
+				"Not inside herdr: teammates and long runs won't get their own panes. Start herdr first for the full setup.",
+			);
+		}
+		const tower = isTowerCommand(first, config);
+		if (tower && !config.tower?.trim()) {
+			const rl = stdin.isTTY ? createInterface({ input: stdin, output: stdout }) : undefined;
+			config = await ensureTowerName(sitra, config, async (q) => (rl ? await rl.question(`${q} `) : ""));
+			rl?.close();
+			console.log(
+				`${config.tower} is on watch. Next time, either \`sitra tower\` or \`sitra ${config.tower?.toLowerCase()}\` starts it.`,
+			);
+		}
+		const args = tower || first === undefined ? rest : [first, ...rest];
+		const role = tower ? "tower" : "lead";
+		const plan = launchCommand(config, args, role);
+		const run = spawnSync(plan.command, plan.args, {
+			stdio: "inherit",
+			env: piEnv(sitra, config, process.env, role),
+		});
+		process.exit(run.status ?? 1);
 	}
-	const args = tower || first === undefined ? rest : [first, ...rest];
-	const run = spawnSync("pi", piArgs(config, args), {
-		stdio: "inherit",
-		env: piEnv(sitra, config, process.env, tower ? "tower" : "lead"),
-	});
-	process.exit(run.status ?? 1);
 }

@@ -7,6 +7,19 @@ export function piArgs(config: Config, args: readonly string[]): string[] {
 	return ["--no-skills", ...config.skills.flatMap((s) => ["--skill", s]), ...args];
 }
 
+export function launchCommand(
+	config: Config,
+	args: readonly string[],
+	role: "lead" | "tower" = "lead",
+): { command: string; args: string[] } {
+	const fullArgs = piArgs(config, args);
+	if (role === "tower" && config.towerCommand && config.towerCommand.length > 0) {
+		const [command = "pi", ...prefix] = config.towerCommand;
+		return { command, args: [...prefix, ...fullArgs] };
+	}
+	return { command: "pi", args: fullArgs };
+}
+
 export function piEnv(
 	sitra: string,
 	config: Config,
@@ -29,6 +42,16 @@ export function piEnv(
 		delete base.SITRA_TOWER_NAME;
 	}
 	return base;
+}
+
+/**
+ * Whether the CLI arguments start the btop-style radar TUI (`sitra radar` or `sitra radar --tui`).
+ * If the person named their tower "Radar", plain `sitra radar` starts their tower and `sitra radar --tui` starts the TUI.
+ */
+export function isRadarCommand(first: string | undefined, rest: readonly string[] = [], config?: Config): boolean {
+	if (first?.trim().toLowerCase() !== "radar") return false;
+	if (rest.includes("--tui")) return true;
+	return config?.tower?.trim().toLowerCase() !== "radar";
 }
 
 /** Whether the first CLI argument starts the tower: `sitra tower` or `sitra <its personal name>` (case-insensitive). */

@@ -15,13 +15,16 @@ import {
 	findSession,
 	formatSessionsReport,
 	gitBranch,
+	groundingPrompt,
 	listSessions,
 	moveInbox,
+	prepareWorktree,
 	readTranscriptTail,
 	removeSession,
 	type SessionRecord,
 	type SessionRole,
 	sendInboxMessage,
+	spawnPaneCommand,
 	updateSession,
 	writeSession,
 } from "./sessions.ts";
@@ -34,7 +37,7 @@ export function towerRules(userName?: string, towerName?: string): string {
 	return `# You are ${tower}: ${who}'s tower (their number 2)
 
 - **Your job:** watch every sitra session across all projects and worktrees, keep outside communication from muddying the workers, tell ${who} when someone needs their input or looks off track, and help improve sitra itself.
-- **Workers stay ${who}'s.** ${Who} starts and steers worker sessions directly. Never edit a project's application code behind a worker's back. Only edit sitra itself when ${who} asks for a sitra improvement.
+- **Workers stay ${who}'s.** ${Who} drives worker sessions directly. Use \`spawn_session\` when ${who} asks to open a new worker space (it creates the worktree off the base branch ${who} chose, copies \`.env\` files, opens a single-tab single-pane herdr space, runs \`pnpm i && pnpm run build\`, and starts \`sitra\` with its initial docs/rules grounding prompt). Never edit a project's application code behind a worker's back. Only edit sitra itself when ${who} asks for a sitra improvement.
 - **Check live state first, and label every claim.** Call \`list_sessions\` and \`read_session\` before answering about any worker. Label every claim about what happened or why: \`verified\` (from session transcript or state), \`observed\` (from status or timing), or \`guess\`.
 - **Messaging workers (\`message_session\`):** messages go into the worker's inbox and are delivered only between steps, never mid-task. Only message a worker when you have a clear reason (an update request or something ${who} approved) so workers aren't flooded.
 - **What to flag for ${who}:**
@@ -48,6 +51,9 @@ export function towerRules(userName?: string, towerName?: string): string {
 interface Ctx {
 	cwd: string;
 	isIdle?: () => boolean;
+	ui?: {
+		notify?(message: string, level?: "info" | "warning" | "error"): void;
+	};
 	sessionManager?: {
 		getSessionId?(): string | undefined;
 		getSessionFile?(): string | undefined;
@@ -82,6 +88,13 @@ interface Pi {
 			details: unknown;
 		}>;
 	}): void;
+	registerCommand?(
+		name: string,
+		command: {
+			description: string;
+			handler(args: string, ctx: Ctx): Promise<void>;
+		},
+	): void;
 	events: {
 		on(channel: string, handler: (data: { active?: boolean }) => void): void;
 	};
@@ -89,6 +102,8 @@ interface Pi {
 		message: { customType: string; content: string; display: boolean },
 		options: { triggerTurn: boolean; deliverAs?: "followUp" | "steer" | "nextTurn" },
 	): void;
+	getActiveTools?(): string[];
+	setActiveTools?(tools: string[]): void;
 }
 
 function summarizeTask(prompt: string | undefined): string | undefined {
@@ -111,7 +126,58 @@ export default function sitraTower(pi: Pi): void {
 	let currentTask: string | undefined;
 	let isBusy = false;
 	let lastCtx: Ctx | undefined;
+	let radarPane: string | undefined;
 	const seenAlerts = new Set<string>();
+
+	const herdr = (args: string[]) =>
+		execFileSync("herdr", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+	const inspectPane = (id: string): { alive: boolean; runningRadar: boolean } => {
+		try {
+			const info = herdr(["pane", "get", id]);
+			const title = /"terminal_title":"([^"]*)"/.exec(info)?.[1]?.toLowerCase() ?? "";
+			return { alive: true, runningRadar: title.includes("radar") };
+		} catch {
+			return { alive: false, runningRadar: false };
+		}
+	};
+	const openRadarPane = (cwd: string, focus = false): string | undefined => {
+		if (process.env.HERDR_ENV !== "1" || !process.env.HERDR_PANE_ID) return undefined;
+		try {
+			if (radarPane) {
+				const state = inspectPane(radarPane);
+				if (state.alive) {
+					if (!state.runningRadar) {
+						herdr(["pane", "run", radarPane, "sitra radar --tui"]);
+					}
+					if (focus) {
+						herdr(["pane", "focus", "--current", "--direction", "right"]);
+					}
+					return radarPane;
+				}
+			}
+			const split = herdr([
+				"pane",
+				"split",
+				"--current",
+				"--direction",
+				"right",
+				"--ratio",
+				"0.42",
+				"--no-focus",
+				"--cwd",
+				cwd,
+			]);
+			radarPane = /"pane_id":"([^"]+)"/.exec(split)?.[1];
+			if (!radarPane) return undefined;
+			herdr(["pane", "run", radarPane, "sitra radar --tui"]);
+			if (focus) {
+				herdr(["pane", "focus", "--current", "--direction", "right"]);
+			}
+			return radarPane;
+		} catch {
+			return undefined;
+		}
+	};
 
 	const readFileTail = (sessionFile: string) =>
 		existsSync(sessionFile) ? readTranscriptTail(readFileSync(sessionFile, "utf8"), 8) : [];
@@ -256,6 +322,9 @@ export default function sitraTower(pi: Pi): void {
 	pi.on("session_start", (_event, ctx) => {
 		isBusy = false;
 		syncRecord(ctx, { status: "idle" });
+		if (role === "tower" && process.env.SITRA_NO_RADAR !== "1") {
+			openRadarPane(ctx.cwd);
+		}
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {
@@ -266,6 +335,12 @@ export default function sitraTower(pi: Pi): void {
 		}
 		syncRecord(ctx, { status: "working" });
 		if (role === "tower") {
+			if (pi.getActiveTools && pi.setActiveTools) {
+				const active = pi.getActiveTools();
+				const towerTools = ["list_sessions", "read_session", "message_session", "audit_sessions", "spawn_session"];
+				const missing = towerTools.filter((t) => !active.includes(t));
+				if (missing.length > 0) pi.setActiveTools([...active, ...missing]);
+			}
 			event.systemPromptOptions.sections["sitra-tower"] = towerRules(
 				process.env.SITRA_USER_NAME,
 				process.env.SITRA_TOWER_NAME,
@@ -290,6 +365,14 @@ export default function sitraTower(pi: Pi): void {
 
 	const cleanup = () => {
 		if (inboxTimer) clearInterval(inboxTimer);
+		if (radarPane) {
+			try {
+				herdr(["pane", "close", radarPane]);
+			} catch {
+				// Already closed.
+			}
+			radarPane = undefined;
+		}
 		if (!currentId) return;
 		removeSession(profileDir, currentId);
 		currentId = undefined;
@@ -326,6 +409,17 @@ export default function sitraTower(pi: Pi): void {
 	}
 
 	if (role !== "tower") return;
+
+	pi.registerCommand?.("radar", {
+		description: "Open (or focus) the live btop-style sitra radar in a right-hand herdr pane",
+		async handler(_args, ctx) {
+			const pane = openRadarPane(ctx.cwd, true);
+			ctx.ui?.notify?.(
+				pane ? `Radar open in herdr pane ${pane}.` : "Run `sitra radar` in a terminal pane to open the radar.",
+				"info",
+			);
+		},
+	});
 
 	pi.registerTool({
 		name: "list_sessions",
@@ -463,6 +557,80 @@ export default function sitraTower(pi: Pi): void {
 			return {
 				content: [{ type: "text", text: lines.join("\n") }],
 				details: audit,
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "spawn_session",
+		label: "Spawn a new sitra worker workspace",
+		description:
+			"Create a new git worktree from the chosen base branch (e.g. staging or sre), copy the primary repo's .env files, open a new single-tab single-pane herdr workspace, and run `pnpm i && pnpm run build && sitra <grounding>` in that pane.",
+		promptSnippet:
+			"spawn_session: open a new herdr space in a fresh worktree with .env files copied, pnpm i && build, and initial grounding instructions",
+		parameters: Type.Object({
+			branch: Type.String({ description: "New git branch name for the worktree (e.g. krskl/flights-fix)." }),
+			base: Type.String({ description: "Base branch to branch from (e.g. staging or sre)." }),
+			label: Type.Optional(Type.String({ description: "Workspace label in herdr (defaults to the worktree slug)." })),
+			repo: Type.Optional(
+				Type.String({ description: "Repository path (defaults to the current working directory's repo)." }),
+			),
+			instructions: Type.Optional(
+				Type.String({ description: "Optional initial focus or grounding notes for the new sitra worker." }),
+			),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			if (process.env.HERDR_ENV !== "1") {
+				return {
+					content: [{ type: "text", text: "Not inside herdr: cannot open a new herdr workspace." }],
+					details: { spawned: false, reason: "not_in_herdr" },
+				};
+			}
+			const repo = typeof params.repo === "string" && params.repo.trim() ? params.repo.trim() : ctx.cwd;
+			const branch = String(params.branch ?? "").trim();
+			const base = String(params.base ?? "").trim();
+			const extra = typeof params.instructions === "string" ? params.instructions : undefined;
+
+			const prepared = prepareWorktree({ repo, branch, base });
+			const label = (typeof params.label === "string" && params.label.trim()) || basename(prepared.worktreePath);
+
+			const createdRaw = herdr(["workspace", "create", "--cwd", prepared.worktreePath, "--label", label, "--no-focus"]);
+			const created = JSON.parse(createdRaw) as {
+				result?: {
+					workspace?: { workspace_id?: string; number?: number };
+					root_pane?: { pane_id?: string };
+				};
+			};
+			const workspaceId = created.result?.workspace?.workspace_id;
+			const workspaceNumber = created.result?.workspace?.number;
+			const paneId = created.result?.root_pane?.pane_id;
+			if (!paneId) {
+				throw new Error(`herdr workspace create did not return a root_pane: ${createdRaw.slice(0, 200)}`);
+			}
+
+			const prompt = groundingPrompt(process.env.SITRA_USER_NAME, extra);
+			const cmd = spawnPaneCommand(prompt);
+			herdr(["pane", "run", paneId, cmd]);
+
+			return {
+				content: [
+					{
+						type: "text",
+						text: [
+							`Spawned workspace ${workspaceNumber ? `#${workspaceNumber} ` : ""}"${label}" (${workspaceId ?? paneId}).`,
+							`Worktree: ${prepared.worktreePath} (branch ${prepared.branch} from ${prepared.baseRef})`,
+							`Copied .env files: ${prepared.copiedEnvFiles.length > 0 ? prepared.copiedEnvFiles.join(", ") : "none"}`,
+							`Running in pane ${paneId}: pnpm i && pnpm run build && sitra <grounding>`,
+						].join("\n"),
+					},
+				],
+				details: {
+					spawned: true,
+					workspaceId,
+					workspaceNumber,
+					paneId,
+					...prepared,
+				},
 			};
 		},
 	});
