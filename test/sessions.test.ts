@@ -1,10 +1,20 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	chmodSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
 	auditSessionsFriction,
+	createTailReader,
 	detectSessionAlerts,
 	drainInbox,
 	findSession,
@@ -13,6 +23,7 @@ import {
 	groupWorkerSessions,
 	listSessions,
 	prepareWorktree,
+	readLastLines,
 	readTranscriptTail,
 	removeSession,
 	type SessionRecord,
@@ -729,6 +740,108 @@ fi
 			expect(calls.some((c) => c.startsWith("pane run wNew:p1 pnpm i && pnpm run build && sitra "))).toBe(true);
 		} finally {
 			s.restore();
+		}
+	});
+});
+
+describe("reading the end of big transcripts", () => {
+	test("returns the last complete lines, reading backwards in chunks smaller than a line", () => {
+		const dir = tmp();
+		const file = join(dir, "t.jsonl");
+		const lines = Array.from({ length: 1000 }, (_, i) => `line-${i}-${"x".repeat(i % 37)}`);
+		writeFileSync(file, `${lines.join("\n")}\n`);
+		expect(readLastLines(file, 5, { chunkBytes: 16 })).toBe(lines.slice(-5).join("\n"));
+		writeFileSync(file, lines.join("\n"));
+		expect(readLastLines(file, 5, { chunkBytes: 16 })).toBe(lines.slice(-5).join("\n"));
+		expect(readLastLines(file, 5000, { chunkBytes: 64 })).toBe(lines.join("\n"));
+
+		const long = `{"text":"${"y".repeat(500)}"}`;
+		writeFileSync(file, `short\n${long}\n`);
+		expect(readLastLines(file, 1, { chunkBytes: 64 })).toBe(long);
+		// A cap on how much is read: a last line bigger than the cap is skipped rather than returned cut in half.
+		expect(readLastLines(file, 1, { chunkBytes: 64, maxBytes: 100 })).toBe("");
+		expect(readLastLines(join(dir, "missing.jsonl"), 5)).toBe("");
+	});
+
+	test("a tail reader skips reading again until the file's size or modified time changes", () => {
+		const dir = tmp();
+		const file = join(dir, "t.jsonl");
+		const fixed = new Date("2026-10-16T10:00:00.000Z");
+		writeFileSync(file, "a\nb\n");
+		utimesSync(file, fixed, fixed);
+		const read = createTailReader(10);
+		expect(read(file)).toBe("a\nb");
+		writeFileSync(file, "c\nd\n");
+		utimesSync(file, fixed, fixed);
+		expect(read(file)).toBe("a\nb");
+		writeFileSync(file, "c\nd\ne\n");
+		expect(read(file)).toBe("c\nd\ne");
+	});
+});
+
+describe("tower alert check", () => {
+	test("spots a worker looping on tool errors at the end of a long transcript, and sees new errors as they land", () => {
+		const profile = tmp();
+		const transcript = join(profile, "looping.jsonl");
+		const filler = JSON.stringify({
+			type: "message",
+			message: { role: "assistant", content: [{ type: "text", text: "x".repeat(200) }] },
+		});
+		const fail = JSON.stringify({
+			type: "message",
+			message: { role: "toolResult", toolName: "bash", isError: true, content: "exit 1" },
+		});
+		writeFileSync(
+			transcript,
+			`${Array.from({ length: 5000 }, () => filler).join("\n")}\n${[fail, fail, fail].join("\n")}\n`,
+		);
+		const t1 = new Date("2026-10-16T10:00:00.000Z");
+		utimesSync(transcript, t1, t1);
+		writeSession(profile, {
+			...baseLead,
+			id: "lead-loop",
+			pid: process.pid,
+			sessionFile: transcript,
+			status: "working",
+		});
+
+		const saved = {
+			PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
+			SITRA_ROLE: process.env.SITRA_ROLE,
+			SITRA_NO_RADAR: process.env.SITRA_NO_RADAR,
+		};
+		process.env.PI_CODING_AGENT_DIR = profile;
+		process.env.SITRA_ROLE = "tower";
+		process.env.SITRA_NO_RADAR = "1";
+		vi.useFakeTimers();
+		const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
+		const sent: string[] = [];
+		try {
+			sitraTower({
+				on: (ev, fn) => handlers.set(ev, fn as never),
+				registerTool: () => {},
+				events: { on: () => {} },
+				sendMessage: (m) => sent.push(m.content),
+			});
+			vi.advanceTimersByTime(2_000);
+			expect(sent).toHaveLength(1);
+			expect(sent[0]).toContain("3 tool errors in a row");
+			vi.advanceTimersByTime(2_000);
+			expect(sent).toHaveLength(1);
+
+			appendFileSync(transcript, `${fail}\n`);
+			const t2 = new Date("2026-10-16T10:05:00.000Z");
+			utimesSync(transcript, t2, t2);
+			vi.advanceTimersByTime(2_000);
+			expect(sent).toHaveLength(2);
+			expect(sent[1]).toContain("4 tool errors in a row");
+		} finally {
+			handlers.get("session_shutdown")?.({}, { cwd: "/work" });
+			vi.useRealTimers();
+			for (const [k, v] of Object.entries(saved)) {
+				if (v === undefined) delete process.env[k];
+				else process.env[k] = v;
+			}
 		}
 	});
 });

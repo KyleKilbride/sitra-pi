@@ -5,11 +5,15 @@
 import { execFileSync } from "node:child_process";
 import {
 	chmodSync,
+	closeSync,
 	copyFileSync,
 	existsSync,
+	fstatSync,
 	mkdirSync,
+	openSync,
 	readdirSync,
 	readFileSync,
+	readSync,
 	renameSync,
 	rmSync,
 	statSync,
@@ -398,6 +402,81 @@ function extractText(content: unknown): string {
 	const body = texts.join(" ");
 	const suffix = tools.length > 0 ? `[tool: ${tools.join(", ")}]` : "";
 	return [body, suffix].filter(Boolean).join(" ");
+}
+
+/**
+ * The last `maxLines` complete lines of a file, read backwards from the end in chunks so a 100 MB transcript costs
+ * the same as a small one. Reads at most `maxBytes`; a line cut off by that cap is dropped, never returned in half.
+ * A missing or unreadable file gives "".
+ */
+export function readLastLines(
+	file: string,
+	maxLines: number,
+	options?: { chunkBytes?: number; maxBytes?: number },
+): string {
+	const chunkBytes = options?.chunkBytes ?? 64 * 1024;
+	const maxBytes = options?.maxBytes ?? 8 * 1024 * 1024;
+	let fd: number;
+	try {
+		fd = openSync(file, "r");
+	} catch {
+		return "";
+	}
+	try {
+		let pos = fstatSync(fd).size;
+		const chunks: Buffer[] = [];
+		let read = 0;
+		let newlines = 0;
+		// One newline more than the lines wanted proves the oldest wanted line starts inside what was read.
+		while (pos > 0 && read < maxBytes && newlines <= maxLines) {
+			const len = Math.min(chunkBytes, pos, maxBytes - read);
+			pos -= len;
+			const buf = Buffer.alloc(len);
+			readSync(fd, buf, 0, len, pos);
+			chunks.unshift(buf);
+			read += len;
+			for (let i = buf.indexOf(10); i !== -1; i = buf.indexOf(10, i + 1)) newlines++;
+		}
+		let text = Buffer.concat(chunks).toString("utf8");
+		if (pos > 0) {
+			// Started mid-line: drop the partial first line.
+			const firstBreak = text.indexOf("\n");
+			text = firstBreak === -1 ? "" : text.slice(firstBreak + 1);
+		}
+		const lines = text.split("\n");
+		if (lines[lines.length - 1] === "") lines.pop();
+		return lines.slice(-maxLines).join("\n");
+	} catch {
+		return "";
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/**
+ * A `readLastLines` that remembers each file's tail and reads it again only when the file's size or modified time
+ * changes, so a refresh loop over idle transcripts touches nothing but `stat`.
+ */
+export function createTailReader(
+	maxLines: number,
+	options?: { chunkBytes?: number; maxBytes?: number },
+): (file: string) => string {
+	const cache = new Map<string, { size: number; mtimeMs: number; text: string }>();
+	return (file) => {
+		let size: number;
+		let mtimeMs: number;
+		try {
+			({ size, mtimeMs } = statSync(file));
+		} catch {
+			cache.delete(file);
+			return "";
+		}
+		const hit = cache.get(file);
+		if (hit && hit.size === size && hit.mtimeMs === mtimeMs) return hit.text;
+		const text = readLastLines(file, maxLines, options);
+		cache.set(file, { size, mtimeMs, text });
+		return text;
+	};
 }
 
 export function readTranscriptTail(jsonl: string, maxItems = 8): TranscriptItem[] {

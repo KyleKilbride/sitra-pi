@@ -1,11 +1,13 @@
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { rememberProject, writeProposal } from "../extensions/kb.ts";
 import {
 	brailleSparkline,
 	collectRadarSnapshot,
+	createRefreshScheduler,
+	frameUpdate,
 	renderRadarFrame,
 	renderSprite,
 	type VisualState,
@@ -345,5 +347,81 @@ fi
 				else process.env[k] = v;
 			}
 		}
+	});
+});
+
+describe("radar refresh cost", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	test("reads transcripts only through the tail reader it is given", () => {
+		const profile = tmp();
+		const transcript = join(profile, "huge.jsonl");
+		writeFileSync(transcript, "not the tail\n");
+		writeSession(profile, {
+			id: "lead-huge",
+			role: "lead",
+			pid: process.pid,
+			cwd: "/work/app",
+			repo: "/work/app",
+			sessionFile: transcript,
+			status: "working",
+			startedAt: "2026-10-16T10:00:00.000Z",
+			updatedAt: "2026-10-16T10:00:00.000Z",
+		});
+		const asked: string[] = [];
+		const tail = JSON.stringify({
+			type: "message",
+			message: { role: "assistant", content: [{ type: "text", text: "Only the tail was read." }] },
+		});
+		const snap = collectRadarSnapshot(profile, {
+			nowMs: Date.parse("2026-10-16T10:01:00.000Z"),
+			readLines: (file) => {
+				asked.push(file);
+				return tail;
+			},
+		});
+		expect(asked.length).toBeGreaterThan(0);
+		expect(asked.every((f) => f === transcript)).toBe(true);
+		expect(snap.workers[0]?.lastLine).toBe("Only the tail was read.");
+	});
+
+	test("bursts of refresh requests run at most once per interval, with one trailing refresh", () => {
+		vi.useFakeTimers();
+		let runs = 0;
+		const scheduler = createRefreshScheduler(() => runs++, 1000);
+		scheduler.request();
+		expect(runs).toBe(1);
+		for (let i = 0; i < 50; i++) {
+			vi.advanceTimersByTime(2);
+			scheduler.request();
+		}
+		expect(runs).toBe(1);
+		vi.advanceTimersByTime(1000);
+		expect(runs).toBe(2);
+		vi.advanceTimersByTime(5000);
+		expect(runs).toBe(2);
+		scheduler.request();
+		expect(runs).toBe(3);
+		scheduler.request();
+		scheduler.cancel();
+		vi.advanceTimersByTime(5000);
+		expect(runs).toBe(3);
+	});
+
+	test("redraws only the screen lines that changed", () => {
+		const first = frameUpdate(undefined, ["a", "b", "c"]);
+		expect(first).toContain("\x1b[1;1Ha\x1b[K");
+		expect(first).toContain("\x1b[3;1Hc\x1b[K");
+		expect(frameUpdate(["a", "b", "c"], ["a", "b", "c"])).toBe("");
+		const one = frameUpdate(["a", "b", "c"], ["a", "B", "c"]);
+		expect(one).toContain("\x1b[2;1HB\x1b[K");
+		expect(one).not.toContain("\x1b[1;1H");
+		expect(one).not.toContain("\x1b[3;1H");
+		const shorter = frameUpdate(["a", "b", "c"], ["a"]);
+		expect(shorter).toContain("\x1b[2;1H\x1b[2K");
+		expect(shorter).toContain("\x1b[3;1H\x1b[2K");
+		expect(shorter).not.toContain("\x1b[1;1H");
 	});
 });

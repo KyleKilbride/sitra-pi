@@ -8,10 +8,12 @@ import { basename, join } from "node:path";
 import { knowledgeRepo, knowledgeRoot, listKnownProjects, listProposals } from "./kb.ts";
 import { readRun } from "./runs.ts";
 import {
+	createTailReader,
 	detectSessionAlerts,
 	gitBranch,
 	groupWorkerSessions,
 	listSessions,
+	readLastLines,
 	readTranscriptTail,
 	type SessionAlert,
 	type SessionRecord,
@@ -467,7 +469,11 @@ function cleanMarkdown(text: string): string {
 		.trim();
 }
 
+/** How many transcript lines the radar reads from the end of each session file; nothing older is ever needed. */
+const TRANSCRIPT_TAIL_LINES = 200;
+
 function readTranscriptInsights(
+	readLines: (file: string) => string,
 	sessionFile: string | undefined,
 	nowMs: number,
 	status: string,
@@ -483,7 +489,7 @@ function readTranscriptInsights(
 		return { activity: buckets };
 	}
 	try {
-		const raw = readFileSync(sessionFile, "utf8");
+		const raw = readLines(sessionFile);
 		const tail = readTranscriptTail(raw, 6);
 		const last = tail[tail.length - 1];
 		const lastAction = last ? `${last.role}: ${last.text}` : undefined;
@@ -572,7 +578,8 @@ function collectRuns(profileDir: string): RunSummary[] {
 			.slice(0, 4);
 		return files.map((file) => {
 			const full = join(dir, file);
-			const status = readRun(readFileSync(full, "utf8"), 3);
+			// The exit marker is the log's last line, so the end of the log is all that's needed.
+			const status = readRun(readLastLines(full, 10), 3);
 			const label = file.replace(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-/, "").replace(/\.log$/, "");
 			const mtime = statSync(full).mtime.toISOString();
 			return {
@@ -711,13 +718,14 @@ function queryHerdrWorkspaces(
 
 export function collectRadarSnapshot(
 	profileDir: string,
-	options?: { nowMs?: number; towerName?: string; includeHerdr?: boolean },
+	options?: { nowMs?: number; towerName?: string; includeHerdr?: boolean; readLines?: (file: string) => string },
 ): RadarSnapshot {
 	const nowMs = options?.nowMs ?? Date.now();
 	const towerName = options?.towerName?.trim() || process.env.SITRA_TOWER_NAME?.trim() || "Tower";
 	const baseSessions = listSessions(profileDir);
 	const towerRecord = baseSessions.find((s) => s.role === "tower");
-	const readTail = (file: string) => (existsSync(file) ? readTranscriptTail(readFileSync(file, "utf8"), 8) : []);
+	const readLines = options?.readLines ?? createTailReader(TRANSCRIPT_TAIL_LINES);
+	const readTail = (file: string) => (existsSync(file) ? readTranscriptTail(readLines(file), 8) : []);
 	const alerts = detectSessionAlerts(baseSessions, readTail, nowMs);
 	const errorLoopIds = new Set(alerts.filter((a) => a.kind === "repeated_errors").map((a) => a.sessionId));
 	const groups = groupWorkerSessions(baseSessions);
@@ -796,7 +804,7 @@ export function collectRadarSnapshot(
 						: status === "stopped"
 							? "stopped"
 							: "idle";
-			const insights = readTranscriptInsights(sessionFile, nowMs, status);
+			const insights = readTranscriptInsights(readLines, sessionFile, nowMs, status);
 			const teammates = matchedGroup?.teammates ?? [];
 			const activeHelpers = Math.max(ws.activeSubagents, teammates.filter((t) => t.status === "working").length);
 			workers.push({
@@ -830,7 +838,7 @@ export function collectRadarSnapshot(
 						: g.lead.status === "stopped"
 							? "stopped"
 							: "idle";
-			const insights = readTranscriptInsights(g.lead.sessionFile, nowMs, g.lead.status);
+			const insights = readTranscriptInsights(readLines, g.lead.sessionFile, nowMs, g.lead.status);
 			const nextIndex = Math.max(0, ...workers.map((w) => w.index)) + 1;
 			workers.push({
 				index: nextIndex,
@@ -859,7 +867,7 @@ export function collectRadarSnapshot(
 						: g.lead.status === "stopped"
 							? "stopped"
 							: "idle";
-			const insights = readTranscriptInsights(g.lead.sessionFile, nowMs, g.lead.status);
+			const insights = readTranscriptInsights(readLines, g.lead.sessionFile, nowMs, g.lead.status);
 			workers.push({
 				index: i + 1,
 				title: basename(g.lead.repo || g.lead.cwd),
@@ -1104,6 +1112,48 @@ export function renderRadarFrame(
 	return allLines.slice(0, rows).join("\n");
 }
 
+/**
+ * Runs `refresh` at most once per `minIntervalMs`. The first request after a quiet spell runs at once; requests that
+ * arrive while waiting fold into one trailing run, so a burst of file changes costs two refreshes, not hundreds.
+ */
+export function createRefreshScheduler(
+	refresh: () => void,
+	minIntervalMs: number,
+): { request(): void; cancel(): void } {
+	let lastRun = Number.NEGATIVE_INFINITY;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const run = () => {
+		timer = undefined;
+		lastRun = Date.now();
+		refresh();
+	};
+	return {
+		request() {
+			if (timer) return;
+			const wait = lastRun + minIntervalMs - Date.now();
+			if (wait <= 0) run();
+			else timer = setTimeout(run, wait);
+		},
+		cancel() {
+			if (timer) clearTimeout(timer);
+			timer = undefined;
+		},
+	};
+}
+
+/**
+ * The terminal output that turns screen `prev` into `next`: only changed rows are rewritten, and rows the new frame
+ * no longer uses are cleared. With no `prev` (start, resize) every row is drawn. "" when nothing changed.
+ */
+export function frameUpdate(prev: readonly string[] | undefined, next: readonly string[]): string {
+	let out = "";
+	for (let r = 0; r < next.length; r++) {
+		if (!prev || prev[r] !== next[r]) out += `\x1b[${r + 1};1H${next[r]}\x1b[K`;
+	}
+	for (let r = next.length; r < (prev?.length ?? 0); r++) out += `\x1b[${r + 1};1H\x1b[2K`;
+	return out ? `\x1b[?2026h${out}\x1b[?2026l` : "";
+}
+
 function focusWorker(card: WorkerCard | undefined): void {
 	if (!card) return;
 	try {
@@ -1120,28 +1170,31 @@ function focusWorker(card: WorkerCard | undefined): void {
 export function runRadarTui(profileDir: string, options?: { towerName?: string; closePaneOnExit?: boolean }): void {
 	let tick = 0;
 	let selectedIndex = 0;
-	let lastSnap = collectRadarSnapshot(profileDir, { towerName: options?.towerName, includeHerdr: true });
+	const readLines = createTailReader(TRANSCRIPT_TAIL_LINES);
+	const snapshot = () =>
+		collectRadarSnapshot(profileDir, { towerName: options?.towerName, includeHerdr: true, readLines });
+	let lastSnap = snapshot();
+	let shown: string[] | undefined;
 
-	const render = (refreshData: boolean) => {
-		if (refreshData) {
-			lastSnap = collectRadarSnapshot(profileDir, { towerName: options?.towerName, includeHerdr: true });
-			if (selectedIndex >= lastSnap.workers.length) {
-				selectedIndex = Math.max(0, lastSnap.workers.length - 1);
-			}
-		}
+	const draw = () => {
 		const cols = process.stdout.columns || 84;
 		const rows = process.stdout.rows || 32;
 		const frameLines = renderRadarFrame(lastSnap, { cols, rows, tick, selectedIndex }).split("\n");
-		let out = "\x1b[?2026h";
-		for (let r = 0; r < frameLines.length; r++) {
-			out += `\x1b[${r + 1};1H${frameLines[r]}\x1b[K`;
-		}
-		out += "\x1b[J\x1b[?2026l";
-		process.stdout.write(out);
+		const out = frameUpdate(shown, frameLines);
+		shown = frameLines;
+		if (out) process.stdout.write(out);
 	};
+	const refresh = createRefreshScheduler(() => {
+		lastSnap = snapshot();
+		if (selectedIndex >= lastSnap.workers.length) {
+			selectedIndex = Math.max(0, lastSnap.workers.length - 1);
+		}
+		draw();
+	}, 1000);
+	const render = (refreshData: boolean) => (refreshData ? refresh.request() : draw());
 
 	process.stdout.write("\x1b]0;sitra radar\x07\x1b[?1049h\x1b[?25l\x1b[2J");
-	render(false);
+	draw();
 
 	const watchers: ReturnType<typeof watch>[] = [];
 	for (const dir of [profileDir, sessionsDir(profileDir), join(profileDir, "runs")]) {
@@ -1155,17 +1208,20 @@ export function runRadarTui(profileDir: string, options?: { towerName?: string; 
 
 	const timer = setInterval(() => {
 		tick++;
-		render(tick % 4 === 0);
+		if (tick % 4 === 0) refresh.request();
+		draw();
 	}, 450);
 
 	const onResize = () => {
 		process.stdout.write("\x1b[2J");
-		render(false);
+		shown = undefined;
+		draw();
 	};
 	process.stdout.on("resize", onResize);
 
 	const cleanup = () => {
 		clearInterval(timer);
+		refresh.cancel();
 		for (const w of watchers) w.close();
 		process.stdout.off("resize", onResize);
 		if (process.stdin.isTTY) process.stdin.setRawMode(false);
