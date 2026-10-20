@@ -25,7 +25,7 @@ machine.
 
 Anything else in the folder (research notes, evals, tools) is ignored by sitra.
 
-## Entry format (sitra-kb-v1 plus three fields)
+## Entry format (sitra-kb-v1 plus four fields)
 
 ```yaml
 ---
@@ -37,12 +37,35 @@ evidence: "link, file:line or command output"
 summary: "One plain sentence: what to do and when."         # new: shown in search results
 tags: ["evals", "debugging"]                                   # new: what it's about
 links: ["kinds/decisions/2026-10-19-some-rule.md"]             # new: related entries, paths from the Grimoire folder
+when: ["command:gh pr create", "tool:bash + command:pnpm test"] # new: actions that bring this entry up (below)
 ---
 
 Body: what to know and why, in a few sentences.
 ```
 
 Values are one line each, JSON style. Old `/kb` entries parse unchanged; the new fields are optional.
+
+## Rules tied to actions (`when`)
+
+Most mistakes happen partway through the work, at a concrete action: opening a pull request, running a test suite,
+editing an eval, starting a helper. An entry with `when` triggers reaches the agent at exactly that moment.
+
+- A trigger is one or more conditions joined by ` + `, all of which must hold:
+  - `command:<words>`: a shell command in the call starts with these words. Every command of a chain (`&&`, `;`, `|`)
+    counts; leading `VAR=value`, `env`, `time`, `timeout N` and the like are skipped, and so are flags the trigger
+    doesn't name (`pnpm -s exec vitest` matches `command:pnpm exec vitest`).
+  - `path:<glob>`: a file the call reads or writes matches, relative to the working folder or absolute; a pattern with
+    no `/` matches the file name. Files written from the shell (`> f`, `>> f`, `tee f`, `sed -i`) count.
+  - `tool:<name>`: the tool, with names shared across tools (`bash`, `read`, `edit`, `write`, `subagent`).
+- **Pause once.** The first matching action in a session is paused, and the agent gets the rules word for word with
+  "run it again unchanged if it follows them". The repeat goes through, and those rules don't pause that session again.
+  A pause costs one model step; on 142 real sessions a well-trimmed set paused a median of once per session.
+- **Every tool, one matcher.** `extensions/triggers.ts` is shared by Pi's `tool_call` handler (helpers included) and
+  the Claude Code and Codex `PreToolUse` hooks that `sitra grimoire install` adds. Hooks remember what a session has
+  seen in `<grimoire>/.sitra/shown/`. About 2 ms per call in Pi and 60 ms per hook process.
+- **Keep triggers narrow.** A rule that would pause nearly every session belongs in the root instead.
+- **Measure it.** `sitra grimoire eval <cases.jsonl>` replays real tool calls (`id`, `harness`, `cwd`, `calls`,
+  `expect` per line) and reports which corrections a trigger would have caught and how many pauses it costs.
 
 ## What an agent gets
 
@@ -112,8 +135,9 @@ when the root or the loading changes.
 
 - **Per-message injection.** Measured above: mostly the wrong entries. Revisit with a better signal than the opening
   message.
-- **Rules at the moment of action.** Most corrections are about what an agent did partway through: opening a pull
-  request, running a whole test suite, editing shared code. A rule tied to that action (a tool-call hook in Pi, Claude
-  Code or Codex) could land exactly when it matters. That's the most promising next step.
+- **A per-step picker** (a fast decision model such as TypeSafe's Jev, used as their docs advise: one Choice over the
+  rules, then a check of the shortlist) for judgment mistakes no trigger can see. On 34 labelled corrections it found
+  the right rule in its top 3 about 10 times, against 15 for the best general model, in a quarter of a second. Optional,
+  behind one interface, off by default.
 - **Embeddings or a search service.** Search is BM25 for now; a different ranker can sit behind the same function
   without changing the files.

@@ -10,6 +10,7 @@ import {
 	hooksWithGrimoire,
 	hooksWithoutGrimoire,
 	runGrimoireCli,
+	sessionShown,
 } from "../cli/grimoire.ts";
 import { renderEntry, writeClaudeRoot } from "../extensions/grimoire.ts";
 
@@ -78,8 +79,8 @@ describe("installing the hooks", () => {
 				Stop: [{ hooks: [{ type: "command", command: "notify" }] }],
 			},
 		};
-		const once = hooksWithGrimoire(theirs, `${HOOK} claude ${DIR}`);
-		const twice = hooksWithGrimoire(once, `${HOOK} claude ${DIR}`);
+		const once = hooksWithGrimoire(theirs, { session: `${HOOK} claude ${DIR}` });
+		const twice = hooksWithGrimoire(once, { session: `${HOOK} claude ${DIR}` });
 		expect(twice).toEqual(once);
 		expect(once.model).toBe("opus");
 		expect(once.hooks.Stop).toEqual(theirs.hooks.Stop);
@@ -90,7 +91,7 @@ describe("installing the hooks", () => {
 			hooks: [{ type: "command", command: `${HOOK} claude ${DIR}`, timeout: 10 }],
 		});
 
-		const codex = hooksWithGrimoire({}, `${HOOK} codex ${DIR}`, { additionalContextLimit: 12000 });
+		const codex = hooksWithGrimoire({}, { session: `${HOOK} codex ${DIR}`, additionalContextLimit: 12000 });
 		expect(codex.hooks.SessionStart?.[0]?.hooks[0]).toEqual({
 			type: "command",
 			command: `${HOOK} codex ${DIR}`,
@@ -120,9 +121,9 @@ describe("installing the hooks", () => {
 				Stop: [{ hooks: [{ type: "command", command: 'printf "Remember: grimoire hook needs review"' }] }],
 			},
 		};
-		const removed = hooksWithoutGrimoire(hooksWithGrimoire(theirs, `${HOOK} claude ${DIR}`));
+		const removed = hooksWithoutGrimoire(hooksWithGrimoire(theirs, { session: `${HOOK} claude ${DIR}` }));
 		expect(removed).toEqual(theirs);
-		expect(hooksWithoutGrimoire(hooksWithGrimoire({}, `${HOOK} claude ${DIR}`))).toEqual({ hooks: {} });
+		expect(hooksWithoutGrimoire(hooksWithGrimoire({}, { session: `${HOOK} claude ${DIR}` }))).toEqual({ hooks: {} });
 	});
 
 	test("CLAUDE.md gets one managed block importing the root file, replaced where it is, and removed cleanly", () => {
@@ -140,7 +141,9 @@ describe("installing the hooks", () => {
 
 	test("settings that aren't a JSON object with hook lists are refused, not rewritten", () => {
 		for (const bad of ["a string", 3, [], { hooks: [] }, { hooks: { SessionStart: {} } }, { hooks: { Stop: [3] } }]) {
-			expect(() => hooksWithGrimoire(bad as never, `${HOOK} claude ${DIR}`)).toThrow(/not a settings object/);
+			expect(() => hooksWithGrimoire(bad as never, { session: `${HOOK} claude ${DIR}` })).toThrow(
+				/not a settings object/,
+			);
 		}
 	});
 });
@@ -162,5 +165,181 @@ describe("running the hook from another tool", () => {
 		expect(text).toContain(`Approved entries (3, in ${dir})`);
 		expect(text).toContain(`--dir '${dir}'`);
 		expect(readFileSync(join(dir, ".sitra", "root.md"), "utf8")).toContain("# How Sam works");
+	});
+});
+
+describe("rules tied to actions in Claude Code and Codex", () => {
+	function withDraftRule(): string {
+		const dir = grimoireWith("# root\n", 0);
+		mkdirSync(join(dir, "kinds", "decisions"), { recursive: true });
+		writeFileSync(
+			join(dir, "kinds", "decisions", "2026-10-20-drafts.md"),
+			renderEntry({
+				kind: "decision",
+				title: "Open pull requests as drafts",
+				body: "Always pass --draft.",
+				date: "2026-10-20",
+				when: ["command:gh pr create"],
+			}),
+		);
+		return dir;
+	}
+	const runHook = (dir: string, tool: "claude" | "codex", payload: unknown) => {
+		const out: string[] = [];
+		const code = runGrimoireCli(["hook", tool, "tool", "--dir", dir], {
+			home: tmp(),
+			env: {},
+			repoRoot: "/opt/sitra",
+			cwd: "/work",
+			readStdin: () => JSON.stringify(payload),
+			log: (l) => out.push(l),
+		});
+		return { code, out: out.join("\n") };
+	};
+
+	test("the tool hook denies a matching action once per session with the rule as the reason, then stays quiet", () => {
+		const dir = withDraftRule();
+		const payload = (session: string, command: string) => ({
+			session_id: session,
+			cwd: "/work",
+			hook_event_name: "PreToolUse",
+			tool_name: "Bash",
+			tool_input: { command },
+		});
+		expect(runHook(dir, "claude", payload("s1", "gh pr view 2")).out).toBe("");
+		const first = JSON.parse(runHook(dir, "claude", payload("s1", "gh pr create --fill")).out);
+		expect(first.hookSpecificOutput.permissionDecision).toBe("deny");
+		expect(first.hookSpecificOutput.permissionDecisionReason).toContain("Always pass --draft.");
+		expect(runHook(dir, "claude", payload("s1", "gh pr create --fill")).out).toBe("");
+		expect(JSON.parse(runHook(dir, "codex", payload("s2", "gh pr create")).out).hookSpecificOutput.hookEventName).toBe(
+			"PreToolUse",
+		);
+	});
+
+	test("anything unexpected means no opinion: odd payloads, a broken Grimoire folder", () => {
+		const dir = withDraftRule();
+		const quiet = (payload: string, where = dir) => {
+			const out: string[] = [];
+			const code = runGrimoireCli(["hook", "claude", "tool", "--dir", where], {
+				home: tmp(),
+				env: {},
+				repoRoot: "/opt/sitra",
+				cwd: "/work",
+				readStdin: () => payload,
+				log: (l) => out.push(l),
+			});
+			return code === 0 && out.join("") === "";
+		};
+		for (const p of ["not json", "null", "3", '{"tool_name":1}', '{"tool_name":"Bash","tool_input":"x"}']) {
+			expect(quiet(p)).toBe(true);
+		}
+		expect(quiet(JSON.stringify({ session_id: 7, tool_name: "Bash", tool_input: { command: "gh pr create" } }))).toBe(
+			false,
+		);
+		const broken = withDraftRule();
+		writeFileSync(join(broken, ".sitra"), "not a folder");
+		expect(
+			quiet(JSON.stringify({ session_id: "s", tool_name: "Bash", tool_input: { command: "gh pr create" } }), broken),
+		).toBe(true);
+	});
+
+	test("parallel hook processes in one session each remember what they showed", async () => {
+		const { execFile } = await import("node:child_process");
+		const { promisify } = await import("node:util");
+		const dir = withDraftRule();
+		writeFileSync(
+			join(dir, "kinds", "decisions", "2026-10-20-suite.md"),
+			renderEntry({
+				kind: "decision",
+				title: "No full suites",
+				body: "Ask first.",
+				date: "2026-10-20",
+				when: ["command:pnpm test"],
+			}),
+		);
+		const bin = join(process.cwd(), "bin", "sitra.ts");
+		const call = async (command: string) => {
+			const child = promisify(execFile)("node", [bin, "grimoire", "hook", "claude", "tool", "--dir", dir], {});
+			child.child.stdin?.end(
+				JSON.stringify({ session_id: "par", cwd: "/work", tool_name: "Bash", tool_input: { command } }),
+			);
+			return (await child).stdout.trim();
+		};
+		const [a, b] = await Promise.all([call("gh pr create"), call("pnpm test")]);
+		expect(a).toContain("deny");
+		expect(b).toContain("deny");
+		const [a2, b2] = await Promise.all([call("gh pr create"), call("pnpm test")]);
+		expect(a2).toBe("");
+		expect(b2).toBe("");
+	}, 30_000);
+
+	test("two hook processes that read the session's notes at the same moment both keep what they showed", () => {
+		const dir = withDraftRule();
+		const first = sessionShown(dir, "race");
+		const second = sessionShown(dir, "race");
+		expect(first.has("kinds/a.md")).toBe(false);
+		expect(second.has("kinds/b.md")).toBe(false);
+		expect(second.claim("kinds/b.md")).toBe(true);
+		expect(first.claim("kinds/a.md")).toBe(true);
+		expect(first.claim("kinds/b.md")).toBe(false);
+		const later = sessionShown(dir, "race");
+		expect(later.has("kinds/a.md") && later.has("kinds/b.md")).toBe(true);
+	});
+
+	test("an active session's memory survives the clean-up of old sessions", async () => {
+		const { utimesSync, readdirSync } = await import("node:fs");
+		const dir = withDraftRule();
+		const payload = (session: string, command: string) => ({
+			session_id: session,
+			cwd: "/work",
+			tool_name: "Bash",
+			tool_input: { command },
+		});
+		runHook(dir, "claude", payload("old", "gh pr create"));
+		const shown = join(dir, ".sitra", "shown");
+		const old = new Date(Date.now() - 5 * 86_400_000);
+		for (const f of readdirSync(shown)) utimesSync(join(shown, f), old, old);
+		expect(runHook(dir, "claude", payload("old", "ls")).out).toBe("");
+		runHook(dir, "claude", payload("new", "gh pr create"));
+		expect(runHook(dir, "claude", payload("old", "gh pr create")).out).toBe("");
+	});
+
+	test("sitra grimoire install wires both hooks into Claude Code and Codex", () => {
+		const home = tmp();
+		mkdirSync(join(home, ".claude"));
+		mkdirSync(join(home, ".codex"));
+		const dir = withDraftRule();
+		runGrimoireCli(["install", "--dir", dir], {
+			home,
+			env: {},
+			repoRoot: "/opt/sitra",
+			cwd: "/work",
+			readStdin: () => "",
+			log: () => {},
+		});
+		const claude = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8"));
+		expect(claude.hooks.PreToolUse[0].hooks[0].command).toMatch(/grimoire hook claude tool --dir /);
+		expect(claude.hooks.PreToolUse[0].matcher).toContain("Bash");
+		const codex = JSON.parse(readFileSync(join(home, ".codex", "hooks.json"), "utf8"));
+		expect(codex.hooks.PreToolUse[0].hooks[0].command).toMatch(/grimoire hook codex tool --dir /);
+		expect(codex.hooks.PreToolUse[0].matcher).toContain("apply_patch");
+	});
+
+	test("install adds a PreToolUse hook next to the session hook, and uninstall removes both", () => {
+		const both = hooksWithGrimoire(
+			{},
+			{ session: `${HOOK} claude ${DIR}`, tool: `${HOOK} claude tool ${DIR}`, toolMatcher: "Bash|Edit" },
+		);
+		expect(both.hooks.PreToolUse).toEqual([
+			{ matcher: "Bash|Edit", hooks: [{ type: "command", command: `${HOOK} claude tool ${DIR}`, timeout: 10 }] },
+		]);
+		expect(
+			hooksWithGrimoire(both, {
+				session: `${HOOK} claude ${DIR}`,
+				tool: `${HOOK} claude tool ${DIR}`,
+				toolMatcher: "Bash|Edit",
+			}),
+		).toEqual(both);
+		expect(hooksWithoutGrimoire(both)).toEqual({ hooks: {} });
 	});
 });

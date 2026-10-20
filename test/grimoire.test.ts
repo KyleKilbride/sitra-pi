@@ -33,6 +33,7 @@ const lesson = {
 	summary: "Open the failing cases before saying anything about a red eval run.",
 	tags: ["evals", "debugging"],
 	links: ["kinds/decisions/2026-10-01-evals-are-not-truth.md"],
+	when: ["command:pnpm test", "path:evals/**"],
 };
 
 function put(dir: string, file: string, entry: Omit<Entry, "file">): void {

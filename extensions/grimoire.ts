@@ -24,6 +24,8 @@ export interface Entry {
 	tags?: string[];
 	/** Related entries, as paths from the Grimoire folder. */
 	links?: string[];
+	/** Actions that bring this entry in front of the agent: `command:<words>`, `path:<glob>` or `tool:<name>`. */
+	when?: string[];
 	/** Path from the Grimoire folder, e.g. `kinds/lessons/2026-10-08-read-evals.md`. */
 	file: string;
 }
@@ -62,7 +64,7 @@ export function slug(title: string): string {
 	);
 }
 
-const FIELDS = ["kind", "title", "date", "proposedBy", "evidence", "summary", "tags", "links"] as const;
+const FIELDS = ["kind", "title", "date", "proposedBy", "evidence", "summary", "tags", "links", "when"] as const;
 
 export function renderEntry(entry: Omit<Entry, "file">): string {
 	const lines = ["---"];
@@ -114,6 +116,7 @@ export function parseEntry(raw: string, file: string): Entry | undefined {
 	const summary = str("summary");
 	const tags = list(meta.tags);
 	const links = list(meta.links);
+	const when = list(meta.when);
 	return {
 		kind: kind as Kind,
 		title,
@@ -124,6 +127,7 @@ export function parseEntry(raw: string, file: string): Entry | undefined {
 		...(summary ? { summary } : {}),
 		...(tags ? { tags } : {}),
 		...(links ? { links } : {}),
+		...(when ? { when } : {}),
 		file,
 	};
 }
