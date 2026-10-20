@@ -11,6 +11,18 @@ export interface Config {
 	tower?: string;
 	/** Optional command prefix to launch the tower (e.g. a local connector wrapper) instead of plain `pi`. */
 	towerCommand?: string[];
+	/** Whether Grimoire learns from corrections in the background (default on). */
+	learn?: boolean;
+	/** The model the background learner asks (default `google/gemini-4-argon`). */
+	learnModel?: string;
+}
+
+/** The environment that carries the learning settings to Pi sessions and hooks. */
+export function learnEnv(config: Config): Record<string, string> {
+	return {
+		...(config.learn === false ? { SITRA_GRIMOIRE_LEARN: "0" } : {}),
+		...(config.learnModel?.trim() ? { SITRA_LEARN_MODEL: config.learnModel.trim() } : {}),
+	};
 }
 
 export function sitraHome(env: Record<string, string | undefined>, home: string): string {
@@ -30,6 +42,8 @@ export function readConfig(sitra: string): Config {
 		name: raw.name ?? "",
 		skills: raw.skills ?? [],
 		...(Array.isArray(raw.towerCommand) && raw.towerCommand.length > 0 ? { towerCommand: raw.towerCommand } : {}),
+		...(typeof raw.learn === "boolean" ? { learn: raw.learn } : {}),
+		...(typeof raw.learnModel === "string" && raw.learnModel.trim() ? { learnModel: raw.learnModel.trim() } : {}),
 	};
 	return raw.tower?.trim() ? { ...base, tower: raw.tower.trim() } : base;
 }

@@ -1,6 +1,6 @@
 /** How `sitra` starts Pi: its own profile, the person's name for the lead's rules, and an optional skill allowlist. */
 import { join } from "node:path";
-import { type Config, profileDir, writeConfig } from "./config.ts";
+import { type Config, learnEnv, profileDir, writeConfig } from "./config.ts";
 
 export function piArgs(config: Config, args: readonly string[]): string[] {
 	if (config.skills.length === 0) return [...args];
@@ -32,6 +32,7 @@ export function piEnv(
 		PI_CODING_AGENT_DIR: profile,
 		PI_MEMORY_DIR: join(profile, "memory"),
 		SITRA_USER_NAME: config.name,
+		...learnEnv(config),
 	};
 	if (role === "tower") {
 		base.SITRA_ROLE = "tower";

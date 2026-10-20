@@ -21,11 +21,13 @@ import {
 	writeClaudeRoot,
 	writeProposal,
 } from "./grimoire.ts";
-import { mainCheckout } from "./sessions.ts";
-import { actionFromPi, entriesForAction, pauseMessage } from "./triggers.ts";
+import { captureMoment, learningOn, recordPause, recordPauseFollowUp } from "./learn.ts";
+import { mainCheckout, readLastLines } from "./sessions.ts";
+import { actionFromPi, entriesForAction, parseTrigger, pauseMessage } from "./triggers.ts";
 
 interface Ctx {
 	cwd: string;
+	sessionManager?: { getSessionFile?(): string | undefined; getSessionId?(): string };
 	hasUI: boolean;
 	ui: {
 		notify(message: string, type?: "info" | "warning" | "error"): void;
@@ -97,6 +99,11 @@ export default function sitraKnowledge(pi: Pi): void {
 		ctx.ui.setStatus("sitra-grimoire", parts.join(" · "));
 	};
 
+	/** The agent turn tool calls belong to, so calls sent together aren't mistaken for a reaction to a pause. */
+	let turn = 0;
+	(pi.on as unknown as (e: "turn_start", h: () => void) => void)("turn_start", () => {
+		turn++;
+	});
 	/** Rules tied to actions already shown in this session; each pauses one action, once. */
 	let shown = new Set<string>();
 
@@ -105,6 +112,13 @@ export default function sitraKnowledge(pi: Pi): void {
 		try {
 			if (typeof event?.toolName !== "string") return undefined;
 			const g = dir();
+			const session = ctx?.sessionManager?.getSessionId?.() ?? `pi-${process.pid}`;
+			const call = { tool: event.toolName, input: event.input && typeof event.input === "object" ? event.input : {} };
+			try {
+				recordPauseFollowUp(g, session, call, { turn: String(turn) });
+			} catch {
+				// Measuring never gets in the way of a rule.
+			}
 			const tied = listEntries(g).filter((e) => e.when?.length);
 			if (tied.length === 0) return undefined;
 			const input = event.input && typeof event.input === "object" ? event.input : {};
@@ -113,6 +127,17 @@ export default function sitraKnowledge(pi: Pi): void {
 			const { text, included } = pauseMessage(matched, g);
 			if (included.length === 0) return undefined;
 			for (const e of included) shown.add(e.file);
+			try {
+				recordPause(
+					g,
+					session,
+					included.map((e) => e.file),
+					call,
+					{ turn: String(turn) },
+				);
+			} catch {
+				// Measuring never gets in the way of a rule.
+			}
 			return { block: true, reason: text };
 		} catch {
 			return undefined;
@@ -133,16 +158,49 @@ export default function sitraKnowledge(pi: Pi): void {
 		status(ctx);
 	});
 
-	pi.on("before_agent_start", (event) => {
+	pi.on("before_agent_start", (event, ctx) => {
+		// Nothing here may stop a turn: each step fails on its own.
+		const e = event as { messageType?: string; prompt?: string };
+		const person = !process.env.PI_SUBAGENT_NAME && e.messageType === "user" && typeof e.prompt === "string";
+		if (person && learningOn(process.env)) {
+			// Every message the person sends is a moment Grimoire may learn from; a detached learner decides it.
+			try {
+				const file = ctx?.sessionManager?.getSessionFile?.();
+				captureMoment(dir(), process.env, {
+					harness: "pi",
+					cwd: ctx?.cwd ?? process.cwd(),
+					message: e.prompt as string,
+					transcript: file ? readLastLines(file, 400, { maxBytes: 1_000_000 }) : "",
+				});
+			} catch {
+				// Learning never gets in the way of the turn.
+			}
+		}
+		if (person && ctx?.ui) {
+			// Background learning and other sessions write proposals; keep the review count current.
+			try {
+				status(ctx);
+			} catch {
+				// A status line is never worth a failed turn.
+			}
+		}
 		// A resumed conversation restores the tool list it was saved with, so one saved before Grimoire never sees
 		// these tools. Helpers keep the list their agent definition chose.
-		if (!process.env.PI_SUBAGENT_NAME && pi.getActiveTools && pi.setActiveTools) {
-			const active = pi.getActiveTools();
-			const missing = GRIMOIRE_TOOLS.filter((t) => !active.includes(t));
-			if (missing.length > 0) pi.setActiveTools([...active, ...missing]);
+		try {
+			if (!process.env.PI_SUBAGENT_NAME && pi.getActiveTools && pi.setActiveTools) {
+				const active = pi.getActiveTools();
+				const missing = GRIMOIRE_TOOLS.filter((t) => !active.includes(t));
+				if (missing.length > 0) pi.setActiveTools([...active, ...missing]);
+			}
+		} catch {
+			// Tools stay as they were.
 		}
-		const g = dir();
-		event.systemPromptOptions.sections.grimoire = grimoireSection(g, loadRoot(g), listEntries(g), { who: who() });
+		try {
+			const g = dir();
+			event.systemPromptOptions.sections.grimoire = grimoireSection(g, loadRoot(g), listEntries(g), { who: who() });
+		} catch {
+			// An unreadable Grimoire leaves the prompt without it rather than failing the turn.
+		}
 	});
 
 	pi.registerTool({
@@ -166,6 +224,12 @@ export default function sitraKnowledge(pi: Pi): void {
 			links: Type.Optional(
 				Type.Array(Type.String(), { description: "Related entries, as paths like kinds/lessons/<file>.md." }),
 			),
+			when: Type.Optional(
+				Type.Array(Type.String(), {
+					description:
+						'Actions that should bring this rule up, if the mistake happens at one: "command:<leading words of a shell command>", "path:<glob of files touched>" or "tool:<tool name>"; join conditions with " + ".',
+				}),
+			),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const p = params as {
@@ -176,8 +240,15 @@ export default function sitraKnowledge(pi: Pi): void {
 				evidence?: string;
 				tags?: string[];
 				links?: string[];
+				when?: string[];
 			};
-			const file = writeProposal(dir(), { ...p, proposedBy: "agent", date: new Date().toISOString() });
+			const when = p.when?.filter((w) => parseTrigger(w));
+			const file = writeProposal(dir(), {
+				...p,
+				...(when?.length ? { when } : { when: undefined }),
+				proposedBy: "agent",
+				date: new Date().toISOString(),
+			});
 			status(ctx);
 			return {
 				content: [
@@ -230,6 +301,7 @@ export default function sitraKnowledge(pi: Pi): void {
 				"",
 				p.body,
 				...(p.tags ? ["", `Tags: ${p.tags.join(", ")}`] : []),
+				...(p.when ? ["", `Pauses the agent when: ${p.when.join("; ")}`] : []),
 				...(p.evidence ? ["", `Evidence: ${p.evidence}`] : []),
 			];
 			const choice = await ctx.ui.select(lines.join("\n"), [

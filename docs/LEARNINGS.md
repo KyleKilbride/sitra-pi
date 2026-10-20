@@ -36,3 +36,6 @@ how agents run, hand back, or wait.
   opening message (by keyword search, or by a model reading the catalogue) found the rule that was later broken only
   1 time in 3, and 9 of 10 picks were wrong. The always-loaded root covered most cases. Put rules that apply to all
   work in the root; don't auto-inject entries per message.
+- **Background checks should pick accuracy over speed.** To spot when the person corrects an agent, a mid-size model
+  (4.7 s) caught 54 of 59 real corrections with 1 false alarm, where fast decision models (0.1-0.2 s) caught about 40.
+  The check runs after the message, in the background, so its speed costs nothing.
