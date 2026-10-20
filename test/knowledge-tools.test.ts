@@ -166,3 +166,57 @@ test("the turn-start handler never throws, and the review count refreshes even w
 	vi.stubEnv("SITRA_GRIMOIRE_LEARN", "1");
 	expect(() => handlers.get("before_agent_start")?.(event(), ctx)).not.toThrow();
 });
+
+test("the status line shows today's tally, and /grimoire walks through repeats after proposals", async () => {
+	const { mkdtempSync, realpathSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const { recordMoment, repeats } = await import("../extensions/learn.ts");
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "sitra-tally-")));
+	vi.stubEnv("SITRA_GRIMOIRE", dir);
+	vi.stubEnv("PI_SUBAGENT_NAME", "");
+	vi.stubEnv("SITRA_GRIMOIRE_LEARN", "0");
+	recordMoment(dir, {
+		id: "r1",
+		at: new Date().toISOString(),
+		harness: "pi",
+		cwd: "/work/app",
+		message: "you said you'd start it and did nothing",
+		agentReply: "",
+		calls: [],
+		verdict: "correction",
+		skipped: "Already covered by 'Own the thread'",
+	});
+	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
+	const sent: string[] = [];
+	sitraKnowledge({
+		on: (n: string, h: (e: unknown, c: unknown) => unknown) => handlers.set(n, h),
+		registerTool() {},
+		registerCommand: (n: string, c: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(n, c),
+		sendUserMessage: (m: string) => sent.push(m),
+	} as never);
+	const statuses: string[] = [];
+	const asked: string[] = [];
+	const ctx = {
+		cwd: dir,
+		hasUI: true,
+		ui: {
+			setStatus: (_k: string, t: string) => statuses.push(t),
+			notify() {},
+			select: async (title: string) => {
+				asked.push(title);
+				return "Ask the agent how to make it land";
+			},
+		},
+	};
+	handlers.get("session_start")?.({}, ctx);
+	expect(statuses.at(-1)).toContain("today: 0 caught · 0 learned · 1 repeat");
+	await commands.get("grimoire")?.handler("", ctx);
+	expect(asked[0]).toContain("you said you'd start it and did nothing");
+	expect(asked[0]).toContain("Own the thread");
+	expect(sent[0]).toContain("Own the thread");
+	expect(sent[0]).toMatch(/never edit/i);
+	expect(repeats(dir)).toEqual([]);
+	expect(statuses.at(-1)).toContain("1 repeat");
+});

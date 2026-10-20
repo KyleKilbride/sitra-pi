@@ -617,3 +617,89 @@ export function releaseMoment(dir: string, id: string): void {
 		// Already gone.
 	}
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The tally on the status line, and repeats: corrections Grimoire already had a rule for.
+// ---------------------------------------------------------------------------------------------------------------------
+
+function readMoments(dir: string): Moment[] {
+	if (!existsSync(momentsDir(dir))) return [];
+	return readdirSync(momentsDir(dir))
+		.sort()
+		.flatMap((f) => {
+			try {
+				return [JSON.parse(readFileSync(join(momentsDir(dir), f), "utf8")) as Moment];
+			} catch {
+				return [];
+			}
+		});
+}
+
+export interface Tally {
+	/** Rule pauses after which the agent changed course: mistakes stopped before they happened. */
+	caught: number;
+	/** Corrections that became new proposals. */
+	learned: number;
+	/** Corrections Grimoire already had a rule for: the rule didn't reach the agent in time. */
+	repeats: number;
+}
+
+/** Today's tally (local day of `now`). */
+export function tally(dir: string, now = new Date()): Tally {
+	const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+	const today = (iso: string | undefined) => {
+		const t = Date.parse(iso ?? "");
+		return Number.isFinite(t) && t >= start && t <= now.getTime();
+	};
+	let caught = 0;
+	try {
+		for (const line of readFileSync(join(dir, ".sitra", "pauses.jsonl"), "utf8").split("\n")) {
+			try {
+				const r = JSON.parse(line) as { at?: string; outcome?: string };
+				if (r.outcome === "changed" && today(r.at)) caught++;
+			} catch {
+				// Partial line.
+			}
+		}
+	} catch {
+		// No pauses yet.
+	}
+	let learned = 0;
+	let repeats = 0;
+	for (const m of readMoments(dir)) {
+		if (m.verdict !== "correction" || !today(m.at)) continue;
+		if (m.proposal) learned++;
+		else if (m.skipped) repeats++;
+	}
+	return { caught, learned, repeats };
+}
+
+export interface Repeat {
+	id: string;
+	at: string;
+	message: string;
+	/** What the learner said already covers it. */
+	covered: string;
+	harness: Moment["harness"];
+	cwd: string;
+}
+
+/** Repeats the person hasn't looked at yet, oldest first. */
+export function repeats(dir: string): Repeat[] {
+	return readMoments(dir)
+		.filter((m) => m.verdict === "correction" && m.skipped && !(m as Moment & { repeatSeen?: boolean }).repeatSeen)
+		.sort((a, b) => a.at.localeCompare(b.at))
+		.map((m) => ({
+			id: m.id,
+			at: m.at,
+			message: m.message,
+			covered: m.skipped as string,
+			harness: m.harness,
+			cwd: m.cwd,
+		}));
+}
+
+export function markRepeatSeen(dir: string, id: string): void {
+	const m = readMoment(dir, id);
+	if (m) recordMoment(dir, { ...m, repeatSeen: true } as Moment);
+}

@@ -21,7 +21,15 @@ import {
 	writeClaudeRoot,
 	writeProposal,
 } from "./grimoire.ts";
-import { captureMoment, learningOn, recordPause, recordPauseFollowUp } from "./learn.ts";
+import {
+	captureMoment,
+	learningOn,
+	markRepeatSeen,
+	recordPause,
+	recordPauseFollowUp,
+	repeats,
+	tally,
+} from "./learn.ts";
 import { mainCheckout, readLastLines } from "./sessions.ts";
 import { actionFromPi, entriesForAction, parseTrigger, pauseMessage } from "./triggers.ts";
 
@@ -96,6 +104,10 @@ export default function sitraKnowledge(pi: Pi): void {
 		if (waiting) parts.push(`${waiting} to review (/grimoire)`);
 		if (loadRoot(g).truncated) parts.push("root over its limit");
 		if (oldKnowledgeBase(ctx.cwd)) parts.push("old /kb here: sitra grimoire import");
+		const t = tally(g);
+		if (t.caught || t.learned || t.repeats) {
+			parts.push(`today: ${t.caught} caught · ${t.learned} learned · ${t.repeats} repeat${t.repeats === 1 ? "" : "s"}`);
+		}
 		ctx.ui.setStatus("sitra-grimoire", parts.join(" · "));
 	};
 
@@ -290,10 +302,12 @@ export default function sitraKnowledge(pi: Pi): void {
 		if (unreadable.length > 0) {
 			ctx.ui.notify(`${unreadable.length} proposal(s) can't be read as entries: ${unreadable.join(", ")}`, "warning");
 		}
-		if (proposals.length === 0) {
+		const waitingRepeats = repeats(g);
+		if (proposals.length === 0 && waitingRepeats.length === 0) {
 			ctx.ui.notify(`No proposals. ${listEntries(g).length} approved entries in ${g}.`, "info");
 			return;
 		}
+		let stopped = false;
 		for (const [i, p] of proposals.entries()) {
 			const lines = [
 				`(${i + 1}/${proposals.length}) [${p.kind}] ${p.title}`,
@@ -317,7 +331,31 @@ export default function sitraKnowledge(pi: Pi): void {
 			}
 			if (choice === "Accept") decide(g, p.file, "accept");
 			else if (choice === "Reject") decide(g, p.file, "reject");
-			else if (choice !== "Skip") break;
+			else if (choice !== "Skip") {
+				stopped = true;
+				break;
+			}
+		}
+		for (const [i, r] of (stopped ? [] : waitingRepeats).entries()) {
+			const title = [
+				`Repeat (${i + 1}/${waitingRepeats.length}): you corrected an agent on something Grimoire already had.`,
+				"",
+				`You said: "${r.message}"`,
+				"",
+				`Already covered: ${r.covered}`,
+				"",
+				"The rule existed but didn't reach the agent in time. A trigger (when it applies) or a place in the root may fix that.",
+			].join("\n");
+			const choice = await ctx.ui.select(title, ["Ask the agent how to make it land", "Dismiss", "Stop reviewing"]);
+			if (choice === "Ask the agent how to make it land") {
+				markRepeatSeen(g, r.id);
+				pi.sendUserMessage(
+					`Grimoire already had a rule for this, but an agent still got it wrong and I had to correct it. I said: "${r.message}". What covers it: ${r.covered}. Suggest how to make that rule reach the agent at the right moment: a "when" trigger (command:, path: or tool:) if the mistake happens at a recognisable action, a sharper wording, or moving it into the root. Show me the exact change, and propose it with grimoire_propose if it's new. Never edit files in root/ or kinds/ yourself.`,
+				);
+				break;
+			}
+			if (choice === "Dismiss") markRepeatSeen(g, r.id);
+			else break;
 		}
 		status(ctx);
 	};
