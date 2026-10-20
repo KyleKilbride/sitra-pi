@@ -135,6 +135,10 @@ their own `grimoire_propose` calls.
   On 183 labelled real messages (59 corrections) it caught 54 corrections with 1 false alarm; Claude Haiku 52 with 7;
   fast decision models (OpenAI Decisions, TypeSafe Jev) about 40-43 with 4. It runs in the background, so accuracy
   matters more than speed.
+- **Tally:** the status line shows `today: N caught · N learned · N repeats`. Caught: a rule paused an agent and its
+  next turn changed course. Learned: a correction became a new proposal. Repeats: a correction Grimoire already had a
+  rule for, which means the rule didn't reach the agent in time. `/grimoire` walks through repeats after proposals:
+  dismiss one, or ask the agent how to make that rule land (a trigger, sharper wording, or the root).
 - **Off switch:** `"learn": false` in `~/.sitra/config.json` (or `SITRA_GRIMOIRE_LEARN=0`).
 - **Privacy:** moments stay in `<grimoire>/.sitra/moments/`. A message judged not to be a correction keeps only its
   verdict. To decide and draft, the learner sends the message, the agent's last reply and (for corrections) its recent

@@ -488,3 +488,53 @@ describe("fixes from review", () => {
 		]);
 	});
 });
+
+describe("the daily tally and repeats", () => {
+	const at = (h: number) => new Date(2026, 9, 20, h).toISOString();
+	test("caught counts pauses that changed the agent's course; learned and repeats come from corrections; only today", async () => {
+		const { tally, repeats, markRepeatSeen } = await import("../extensions/learn.ts");
+		const { appendFileSync } = await import("node:fs");
+		const dir = tmp();
+		mkdirSync(join(dir, ".sitra"), { recursive: true });
+		const pause = (h: number, outcome: string) =>
+			appendFileSync(
+				join(dir, ".sitra", "pauses.jsonl"),
+				`${JSON.stringify({ at: at(h), file: "kinds/a.md", outcome })}\n`,
+			);
+		pause(9, "changed");
+		pause(10, "repeated");
+		appendFileSync(
+			join(dir, ".sitra", "pauses.jsonl"),
+			`${JSON.stringify({ at: new Date(2026, 9, 19, 23).toISOString(), file: "x", outcome: "changed" })}\n`,
+		);
+		const m = { harness: "pi" as const, cwd: "/w", message: "no", agentReply: "", calls: [] };
+		recordMoment(dir, { ...m, id: "a", at: at(9), verdict: "correction", proposal: "proposals/x.md" });
+		recordMoment(dir, {
+			...m,
+			id: "b",
+			at: at(11),
+			message: "you said you'd start it",
+			verdict: "correction",
+			skipped: "Already covered by 'Own the thread'",
+		});
+		recordMoment(dir, { ...m, id: "c", at: at(12), verdict: "other" });
+		recordMoment(dir, {
+			...m,
+			id: "d",
+			at: new Date(2026, 9, 19, 12).toISOString(),
+			verdict: "correction",
+			skipped: "old",
+		});
+		const now = new Date(2026, 9, 20, 18);
+		expect(tally(dir, now)).toEqual({ caught: 1, learned: 1, repeats: 1 });
+		expect(repeats(dir).map((r) => r.id)).toEqual(["d", "b"]);
+		expect(repeats(dir).find((r) => r.id === "b")).toMatchObject({
+			message: "you said you'd start it",
+			covered: "Already covered by 'Own the thread'",
+		});
+		markRepeatSeen(dir, "b");
+		expect(repeats(dir).map((r) => r.id)).toEqual(["d"]);
+		expect(tally(dir, now).repeats).toBe(1);
+		expect(tally(tmp(), now)).toEqual({ caught: 0, learned: 0, repeats: 0 });
+	});
+});
