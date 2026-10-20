@@ -203,3 +203,8 @@ test("offers to load Grimoire in Claude Code and Codex when they're set up, and 
 	await runInit(neither.deps);
 	expect(neither.asked).not.toContain("Load your Grimoire in Claude Code and Codex too?");
 });
+
+test("every pinned package is an exact version or commit, and web access ships by default", () => {
+	for (const p of PACKAGES) expect(p).toMatch(/@(\d+\.\d+\.\d+|[0-9a-f]{40})$/);
+	expect(PACKAGES).toContain("npm:pi-web-access@0.40.0");
+});
