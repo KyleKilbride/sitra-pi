@@ -845,3 +845,53 @@ describe("tower alert check", () => {
 		}
 	});
 });
+
+describe("alerts fire once per event, not once per re-save", () => {
+	test("a worker waiting on one question keeps the same alert while its record is re-saved", () => {
+		const profile = tmp();
+		writeSession(profile, { ...baseLead, id: "w-q", status: "working", updatedAt: "2026-10-20T18:00:00.000Z" });
+		updateSession(profile, "w-q", {
+			status: "waiting_for_user",
+			waitingFor: "waiting for your answer",
+			updatedAt: "2026-10-20T18:11:00.000Z",
+		});
+		const first = detectSessionAlerts(listSessions(profile, () => true)).map((a) => a.key);
+		updateSession(profile, "w-q", { status: "waiting_for_user", updatedAt: "2026-10-20T18:15:00.000Z" });
+		updateSession(profile, "w-q", { cwd: "/repo", updatedAt: "2026-10-20T18:20:00.000Z" });
+		const later = detectSessionAlerts(listSessions(profile, () => true)).map((a) => a.key);
+		expect(first).toHaveLength(1);
+		expect(later).toEqual(first);
+	});
+
+	test("a new question after the worker moved on is a new alert", () => {
+		const profile = tmp();
+		writeSession(profile, { ...baseLead, id: "w-q2", status: "working", updatedAt: "2026-10-20T18:00:00.000Z" });
+		updateSession(profile, "w-q2", { status: "waiting_for_user", updatedAt: "2026-10-20T18:11:00.000Z" });
+		const first = detectSessionAlerts(listSessions(profile, () => true)).map((a) => a.key);
+		updateSession(profile, "w-q2", { status: "working", updatedAt: "2026-10-20T18:12:00.000Z" });
+		updateSession(profile, "w-q2", { status: "waiting_for_user", updatedAt: "2026-10-20T18:30:00.000Z" });
+		const second = detectSessionAlerts(listSessions(profile, () => true)).map((a) => a.key);
+		expect(second).toHaveLength(1);
+		expect(second).not.toEqual(first);
+	});
+
+	test("the same streak of the same tool error keeps one alert as the record is re-saved", () => {
+		const errors = () => [
+			{ role: "tool" as const, text: "bash error: exit 1", error: true },
+			{ role: "tool" as const, text: "bash error: exit 1", error: true },
+			{ role: "tool" as const, text: "bash error: exit 1", error: true },
+		];
+		const now = Date.parse("2026-10-20T18:20:00.000Z");
+		const looping = (updatedAt: string): SessionRecord => ({
+			...baseLead,
+			id: "w-loop2",
+			sessionFile: "/tmp/loop2.jsonl",
+			status: "working",
+			updatedAt,
+		});
+		const a = detectSessionAlerts([looping("2026-10-20T18:19:00.000Z")], errors, now).map((x) => x.key);
+		const b = detectSessionAlerts([looping("2026-10-20T18:19:40.000Z")], errors, now).map((x) => x.key);
+		expect(a).toHaveLength(1);
+		expect(b).toEqual(a);
+	});
+});
