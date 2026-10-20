@@ -78,6 +78,10 @@ exits. When the run ends, the lead gets the result as a message and picks up fro
 
 **Grimoire** (`/grimoire`): see below.
 
+**Long conversations stay sharp** ([docs/SHARPEN.md](docs/SHARPEN.md)): old tool output is stubbed before each model
+call (the saved session keeps it), helpers get the person's latest request, and a long session hands over to a fresh
+context with a structured summary (`/handover` on demand).
+
 **A lean prompt.** Context files from folders above the repo are dropped. To load only some skills, list them in
 `~/.sitra/config.json`:
 

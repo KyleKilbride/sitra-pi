@@ -4,7 +4,7 @@
  * `/grimoire-reflect` asks the agent what this session taught that future agents need. `/kb` still works and points here.
  */
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { Type } from "typebox";
 import {
 	decide,
@@ -81,6 +81,12 @@ interface ToolCall {
 	input: Record<string, unknown>;
 }
 
+/** Whether `path` is `dir` itself or inside it (not merely sharing a name prefix). */
+const inside = (dir: string, path: string) => {
+	const rel = relative(resolve(dir), path);
+	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+};
+
 const GRIMOIRE_TOOLS = ["grimoire_propose", "grimoire_search"];
 
 const REFLECT =
@@ -118,6 +124,9 @@ export default function sitraKnowledge(pi: Pi): void {
 	});
 	/** Rules tied to actions already shown in this session; each pauses one action, once. */
 	let shown = new Set<string>();
+	/** Whether the agent has opened or searched Grimoire this session, and whether the first-change look happened. */
+	let looked = false;
+	let lookAsked = false;
 
 	pi.on("tool_call", (event, ctx) => {
 		// Anything unexpected (an odd event, a Grimoire it can't read) means no opinion: never block a tool by mistake.
@@ -131,7 +140,26 @@ export default function sitraKnowledge(pi: Pi): void {
 			} catch {
 				// Measuring never gets in the way of a rule.
 			}
-			const tied = listEntries(g).filter((e) => e.when?.length);
+			const raw = event.input && typeof event.input === "object" ? (event.input as Record<string, unknown>) : {};
+			if (
+				event.toolName === "grimoire_search" ||
+				(event.toolName === "read" &&
+					typeof raw.path === "string" &&
+					inside(g, resolve(ctx?.cwd ?? process.cwd(), raw.path)))
+			) {
+				looked = true;
+			}
+			const entries = listEntries(g);
+			const firstChange = ["edit", "write", "subagent"].includes(event.toolName);
+			if (firstChange && !looked && !lookAsked && entries.length > 0 && process.env.SITRA_GRIMOIRE_LOOK !== "0") {
+				// Models under-use memory unless nudged (Anthropic's memory tool insists on a look before acting).
+				lookAsked = true;
+				return {
+					block: true,
+					reason: `Paused once before your first change in this session: check the Grimoire catalogue in your prompt. If an entry might touch this work, read it (its path is listed) or use grimoire_search. Then run this again unchanged, or adjust it.`,
+				};
+			}
+			const tied = entries.filter((e) => e.when?.length);
 			if (tied.length === 0) return undefined;
 			const input = event.input && typeof event.input === "object" ? event.input : {};
 			const matched = entriesForAction(tied, actionFromPi(event.toolName, input), ctx.cwd, shown);
@@ -157,6 +185,8 @@ export default function sitraKnowledge(pi: Pi): void {
 	});
 
 	pi.on("session_start", (_event, ctx) => {
+		looked = false;
+		lookAsked = false;
 		shown = new Set();
 		// Claude Code imports the root from this file once `sitra grimoire install` has run; keep it current.
 		const g = dir();

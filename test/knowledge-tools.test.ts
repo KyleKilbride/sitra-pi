@@ -220,3 +220,48 @@ test("the status line shows today's tally, and /grimoire walks through repeats a
 	expect(repeats(dir)).toEqual([]);
 	expect(statuses.at(-1)).toContain("1 repeat");
 });
+
+test("the first change in a session waits until the agent has looked at Grimoire, once", async () => {
+	const { mkdtempSync, mkdirSync, writeFileSync, realpathSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const { renderEntry } = await import("../extensions/grimoire.ts");
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "sitra-look-")));
+	mkdirSync(join(dir, "kinds", "lessons"), { recursive: true });
+	writeFileSync(
+		join(dir, "kinds", "lessons", "l.md"),
+		renderEntry({ kind: "lesson", title: "L", body: "b", date: "2026-10-20" }),
+	);
+	vi.stubEnv("SITRA_GRIMOIRE", dir);
+	vi.stubEnv("PI_SUBAGENT_NAME", "");
+	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	sitraKnowledge({
+		on: (n: string, h: (e: unknown, c: unknown) => unknown) => handlers.set(n, h),
+		registerTool() {},
+		registerCommand() {},
+		sendUserMessage() {},
+	} as never);
+	const ctx = { cwd: "/w", hasUI: false, ui: { setStatus() {}, notify() {} } };
+	const call = (toolName: string, input: object) =>
+		handlers.get("tool_call")?.({ toolName, input }, ctx) as { block?: boolean; reason?: string } | undefined;
+	expect(call("read", { path: "/w/src/a.ts" })).toBeUndefined();
+	const first = call("edit", { path: "/w/src/a.ts" });
+	expect(first?.block).toBe(true);
+	expect(first?.reason).toMatch(/grimoire/i);
+	expect(call("edit", { path: "/w/src/a.ts" })).toBeUndefined();
+	handlers.get("session_start")?.({}, ctx);
+	expect(call("read", { path: join(dir, "kinds", "lessons", "l.md") })).toBeUndefined();
+	expect(call("write", { path: "/w/b.ts" })).toBeUndefined();
+	handlers.get("session_start")?.({}, ctx);
+	const inGrimoire = { cwd: dir, hasUI: false, ui: { setStatus() {}, notify() {} } };
+	expect(
+		handlers.get("tool_call")?.({ toolName: "read", input: { path: "kinds/lessons/l.md" } }, inGrimoire),
+	).toBeUndefined();
+	expect(handlers.get("tool_call")?.({ toolName: "edit", input: { path: "/w/x.ts" } }, inGrimoire)).toBeUndefined();
+	handlers.get("session_start")?.({}, ctx);
+	expect(call("read", { path: `${dir}-not-grimoire/a.txt` })).toBeUndefined();
+	expect(call("edit", { path: "/w/x.ts" })?.block).toBe(true);
+	handlers.get("session_start")?.({}, ctx);
+	vi.stubEnv("SITRA_GRIMOIRE_LOOK", "0");
+	expect(call("edit", { path: "/w/a.ts" })).toBeUndefined();
+});

@@ -13,6 +13,8 @@ sitra is a Pi package plus a small CLI. One package, no workspace. Read this bef
 | `extensions/runs.ts` | Pure helpers for `run_in_pane`: the bash command that logs output and the exit code, and reading a log back. |
 | `extensions/sessions.ts` | Session registry, inbox messages, alerts, and friction audit across worker sessions. No Pi imports. |
 | `extensions/tower.ts` | Pi extension: records every session, delivers between-step inbox messages, and gives the tower its tools and `/radar`. |
+| `extensions/sharpen.ts` | Keeping long conversations sharp: stubbing old tool output, helper hand-off briefs, the handover threshold and instructions. No Pi imports. |
+| `extensions/sharpen-pi.ts` | Pi wiring for it: the `context` handler, subagent task briefs, early handover and `/handover`. |
 | `extensions/radar.ts` | Zero-token `btop`-style radar TUI: half-block pixel sprites per worker state, Braille sparklines, runs, `/kb` count, and optional peer mail. |
 | `cli/` | `sitra init`, `sitra grimoire` (Claude Code / Codex hooks, import) and the launcher's pure parts: versions, config (`~/.sitra`), profile scaffolding, Pi arguments and environment. |
 | `bin/sitra.ts` | The `sitra` command: wires `cli/` to the real terminal, filesystem and processes. Keep logic out of it. |

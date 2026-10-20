@@ -287,7 +287,7 @@ export function grimoireSection(
 	out.push(
 		"",
 		`## Approved entries (${entries.length}, in ${dir})`,
-		`Before working on something an entry below touches, read that entry in full. Search for anything else with ${search}.`,
+		`Before each step, check whether an entry below touches what you are about to do; if one might, read it in full before acting. Don't guess what ${who} would want: look it up (${search}) or ask.`,
 	);
 	if (entries.length > 0) out.push("", catalogue(entries, options.catalogueChars, search));
 	out.push(
