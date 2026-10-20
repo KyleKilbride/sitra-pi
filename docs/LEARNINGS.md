@@ -31,4 +31,8 @@ how agents run, hand back, or wait.
 
 ## Knowledge
 - An empty knowledge base helps no one. If proposals are never reviewed, agents relearn the same things. Review with
-  `/kb` early; "Accept this and all the rest" exists for a backlog.
+  `/grimoire` early; "Accept this and all the rest" exists for a backlog.
+- **You can't predict from a task which rule an agent will break.** On 38 real corrections, picking entries from the
+  opening message (by keyword search, or by a model reading the catalogue) found the rule that was later broken only
+  1 time in 3, and 9 of 10 picks were wrong. The always-loaded root covered most cases. Put rules that apply to all
+  work in the root; don't auto-inject entries per message.

@@ -2,7 +2,8 @@
 
 A visible, collaborative agent setup on [Pi](https://pi.dev) (the coding agent) and [herdr](https://herdr.dev)
 (a terminal multiplexer for agents). You talk to one **lead**; it hands work to **teammates** that open in panes you
-can watch. Long runs never block, and each repo keeps a **knowledge base** that grows only with your approval.
+can watch. Long runs never block, and every agent (Pi, Claude Code and Codex) starts with **Grimoire**, one
+knowledge base of yours that grows only with your approval.
 
 ## Why
 
@@ -50,8 +51,8 @@ without asking per step. It tells you what's starting and what finished.
 **The tower** (`sitra tower`) is your number 2: a separate session that watches every running sitra session across all
 your projects and worktrees (`list_sessions`, `read_session`), flags when someone is waiting on you or looks off
 track, and keeps outside communication from muddying the workers. On its very first launch it asks you to give it a
-personal name, and after that both `sitra tower` and `sitra <its-name>` start it. It also reads every project's
-approved knowledge, so it can tell whether a worker is following what that project has learned. Inside herdr, starting
+personal name, and after that both `sitra tower` and `sitra <its-name>` start it. It reads the same Grimoire as the
+workers, so it can tell whether a worker is following what you've approved. Inside herdr, starting
 the tower (or running `/radar`) opens **sitra radar** in a right-hand pane: a zero-token `btop`-style live monitor with
 animated pixel agents per worker state, Braille activity graphs, background runs, and `[1-9]` hotkeys to jump straight
 to a worker's pane. You can also ask the tower to spin up a new worker (`spawn_session`) in its own herdr workspace and
@@ -75,7 +76,7 @@ instead.
 logged. Each agent gets one run pane that it reuses (a new run queues behind one still going), closed when the agent
 exits. When the run ends, the lead gets the result as a message and picks up from there. No sleep or poll loops.
 
-**Knowledge base** (`/kb`): see below.
+**Grimoire** (`/grimoire`): see below.
 
 **A lean prompt.** Context files from folders above the repo are dropped. To load only some skills, list them in
 `~/.sitra/config.json`:
@@ -84,23 +85,30 @@ exits. When the run ends, the lead gets the result as a message and picks up fro
 
 An empty list means Pi's normal skill discovery.
 
-## The knowledge base
+## Grimoire: one approved brain for every agent
 
 Agents forget between sessions, and agents that write their own memory confidently record wrong things. sitra
-splits it: agents **propose**, you **approve**. Approved knowledge is plain markdown in the repo.
+splits it: agents **propose**, you **approve**. Grimoire is one folder of plain markdown, yours across every repo and
+every tool.
 
-    <repo>/.pi/knowledge/
-      proposals/      waiting for your review
-      warnings/  decisions/  lessons/  facts/  setups/    approved, by kind
-      rejected/       kept, so you can see what was turned down
+    ~/.sitra/profile/grimoire/
+      root/        always loaded: who you are, what you build, the decisions that shape it, how you work
+      kinds/       approved entries: warnings/ decisions/ lessons/ facts/ setups/
+      proposals/   waiting for your review
+      rejected/    kept, so you can see what was turned down
 
-- One knowledge base per repo: sessions in any git worktree of the repo use the main checkout's `.pi/knowledge`.
-- Agents propose with the `kb_propose` tool. It only ever writes to `proposals/`.
-- You review with `/kb`, one at a time: Accept, Reject, Skip, "Accept this and all the rest", or Stop.
-- Before every turn, a short index of approved entries (titles and paths, warnings first) goes into every agent's
-  prompt, teammates included.
-- `/kb-reflect` asks the agent to look back over the session and propose what's worth keeping.
-- The status line shows `kb 12 · 3 to review (/kb)`.
+- Every agent, teammates included, starts with the root and a one-line catalogue of approved entries (kind, title,
+  summary, path), and opens the entries that apply.
+- Agents propose with `grimoire_propose` (only ever into `proposals/`) and look things up with `grimoire_search`.
+- You review with `/grimoire`, one at a time: Accept, Reject, Skip, "Accept this and all the rest", or Stop.
+- `/grimoire-reflect` asks the agent what the session taught that future agents need.
+- **Claude Code and Codex too:** `sitra grimoire install` (also offered by `sitra init`) loads the same Grimoire there.
+  `sitra grimoire uninstall` takes it out again.
+- **Coming from `/kb`:** `sitra grimoire import` copies a repo's old `.pi/knowledge` into `proposals/`, skipping what
+  Grimoire already has. `/kb` still works and opens `/grimoire`.
+- The status line shows `grimoire 34 · 3 to review (/grimoire)`. `sitra grimoire status` shows the sizes.
+
+Details, sizes and the reasons behind them: [docs/GRIMOIRE.md](docs/GRIMOIRE.md).
 
 ## Built on
 
@@ -112,7 +120,7 @@ splits it: agents **propose**, you **approve**. Approved knowledge is plain mark
 - [`pi-memory`](https://www.npmjs.com/package/pi-memory): personal preferences only, not project facts
 - [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp): the app-tester's browser, attached to your running Chrome
 
-The homebrew parts are small: the knowledge base, `run_in_pane`, the lead's rules and `sitra init`.
+The homebrew parts are small: Grimoire, `run_in_pane`, the lead's rules and `sitra init`.
 
 ## Good to know
 

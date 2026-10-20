@@ -1,24 +1,27 @@
 /**
- * sitra knowledge: every agent starts with the repo's approved knowledge (.pi/knowledge), can propose
- * new entries with `kb_propose`, and only you turn a proposal into knowledge (`/kb`). `/kb-reflect`
- * asks the agent to look back over the session and propose what future agents should know.
+ * sitra's Pi wiring for Grimoire: every agent starts with the root and a one-line catalogue of approved entries, can
+ * search (`grimoire_search`) and propose (`grimoire_propose`), and only the person approves (`/grimoire`).
+ * `/grimoire-reflect` asks the agent what this session taught that future agents need. `/kb` still works and points here.
  */
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
 import {
-	allProjectsKnowledgeIndex,
 	decide,
+	grimoireDir,
+	grimoireSection,
+	importedRepos,
 	KINDS,
 	type Kind,
-	knowledgeIndex,
-	knowledgeRepo,
-	knowledgeRoot,
 	listEntries,
-	listKnownProjects,
 	listProposals,
-	rememberProject,
+	loadRoot,
+	searchEntries,
+	unreadableProposals,
+	writeClaudeRoot,
 	writeProposal,
-} from "./kb.ts";
+} from "./grimoire.ts";
+import { mainCheckout } from "./sessions.ts";
 
 interface Ctx {
 	cwd: string;
@@ -28,6 +31,11 @@ interface Ctx {
 		select(title: string, options: string[]): Promise<string | undefined>;
 		setStatus(key: string, text: string | undefined): void;
 	};
+}
+
+interface ToolResult {
+	content: { type: "text"; text: string }[];
+	details: unknown;
 }
 
 interface Pi {
@@ -44,67 +52,97 @@ interface Pi {
 		parameters: unknown;
 		execute(
 			id: string,
-			params: { kind: Kind; title: string; body: string; evidence?: string },
+			params: Record<string, unknown>,
 			signal: AbortSignal | undefined,
 			onUpdate: unknown,
 			ctx: Ctx,
-		): Promise<{ content: { type: "text"; text: string }[]; details: unknown }>;
+		): Promise<ToolResult>;
 	}): void;
 	registerCommand(name: string, command: { description: string; handler(args: string, ctx: Ctx): Promise<void> }): void;
 	sendUserMessage(content: string): void;
 }
 
+const REFLECT =
+	"Look back over this session. What did we learn that a future agent must know: a mistake and what would have caught it, how something really works, a decision and its reason, or a change to the agent setup? Check Grimoire first (the catalogue in your prompt, or grimoire_search) and skip anything it already says. Propose at most 3 entries with grimoire_propose, each with evidence. For a lesson, say what failed, the verified cause, the fix, whether it held, and what would catch it next time. Then stop.";
+
 export default function sitraKnowledge(pi: Pi): void {
-	const status = (ctx: Ctx) => {
-		const root = knowledgeRoot(knowledgeRepo(ctx.cwd));
-		const proposals = listProposals(root).length;
-		ctx.ui.setStatus("sitra-kb", `kb ${listEntries(root).length}${proposals ? ` · ${proposals} to review (/kb)` : ""}`);
+	const dir = () => grimoireDir(process.env);
+	const who = () => process.env.SITRA_USER_NAME?.trim() || "the person you work with";
+
+	/** A repo whose old `/kb` folder hasn't been moved into Grimoire yet. */
+	const oldKnowledgeBase = (cwd: string): string | undefined => {
+		const repo = mainCheckout(cwd);
+		return existsSync(join(repo, ".pi", "knowledge")) && !importedRepos(dir()).includes(repo) ? repo : undefined;
 	};
 
-	const profileDir = () => process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
+	const status = (ctx: Ctx) => {
+		const g = dir();
+		const approved = listEntries(g).length;
+		const waiting = listProposals(g).length;
+		const parts = [`grimoire ${approved}`];
+		if (waiting) parts.push(`${waiting} to review (/grimoire)`);
+		if (loadRoot(g).truncated) parts.push("root over its limit");
+		if (oldKnowledgeBase(ctx.cwd)) parts.push("old /kb here: sitra grimoire import");
+		ctx.ui.setStatus("sitra-grimoire", parts.join(" · "));
+	};
 
 	pi.on("session_start", (_event, ctx) => {
-		try {
-			rememberProject(profileDir(), knowledgeRepo(ctx.cwd));
-		} catch {
-			// Knowing every project only helps the tower; never block a session on it.
+		// Claude Code imports the root from this file once `sitra grimoire install` has run; keep it current.
+		const g = dir();
+		if (existsSync(join(g, ".sitra", "root.md"))) {
+			try {
+				writeClaudeRoot(g);
+			} catch {
+				// Claude Code's copy is a convenience; never block a Pi session on it.
+			}
 		}
 		status(ctx);
 	});
 
-	pi.on("before_agent_start", (event, ctx) => {
-		const repo = knowledgeRepo(ctx.cwd);
-		const root = knowledgeRoot(repo);
-		event.systemPromptOptions.sections["project-knowledge"] = knowledgeIndex(listEntries(root), root);
-		if (process.env.SITRA_ROLE === "tower") {
-			const others = allProjectsKnowledgeIndex(listKnownProjects(profileDir()), repo);
-			if (others) event.systemPromptOptions.sections["all-projects-knowledge"] = others;
-		}
+	pi.on("before_agent_start", (event) => {
+		const g = dir();
+		event.systemPromptOptions.sections.grimoire = grimoireSection(g, loadRoot(g), listEntries(g), { who: who() });
 	});
 
 	pi.registerTool({
-		name: "kb_propose",
-		label: "Propose knowledge",
+		name: "grimoire_propose",
+		label: "Propose to Grimoire",
 		description:
-			"Propose an entry for this repo's knowledge base: something future agents must know (a lesson, a fact about how the app really works, a decision and its reason, a warning, or a change to the agent setup). The human reviews every proposal; nothing is saved as knowledge until they accept it. Include evidence: a file:line, a command and its output, or a link.",
-		promptSnippet: "kb_propose: propose a knowledge-base entry for the human to approve",
+			"Propose an entry for Grimoire, the shared approved knowledge every agent starts with: something future agents must know (a lesson from a mistake, a fact about how things really work, a decision and its reason, a warning, or a change to the agent setup). The person reviews every proposal; nothing counts as knowledge until they accept it. Include evidence: a file:line, a command and its output, or a link.",
+		promptSnippet: "grimoire_propose: propose a Grimoire entry for the person to approve",
 		parameters: Type.Object({
 			kind: Type.Union(KINDS.map((k) => Type.Literal(k))),
 			title: Type.String({ description: "One line, specific." }),
-			body: Type.String({ description: "What to know and why, in a few sentences." }),
+			summary: Type.String({ description: "One plain sentence: what to do and when." }),
+			body: Type.String({
+				description:
+					"What to know and why, in a few sentences. For a lesson: what failed, the verified cause, the fix, whether it held, what would catch it next time.",
+			}),
 			evidence: Type.Optional(
 				Type.String({ description: "Where this was observed: file:line, command output, link." }),
 			),
+			tags: Type.Optional(Type.Array(Type.String(), { description: "A few words for what it's about." })),
+			links: Type.Optional(
+				Type.Array(Type.String(), { description: "Related entries, as paths like kinds/lessons/<file>.md." }),
+			),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const root = knowledgeRoot(knowledgeRepo(ctx.cwd));
-			const file = writeProposal(root, { ...params, proposedBy: "agent", date: new Date().toISOString() });
+			const p = params as {
+				kind: Kind;
+				title: string;
+				summary: string;
+				body: string;
+				evidence?: string;
+				tags?: string[];
+				links?: string[];
+			};
+			const file = writeProposal(dir(), { ...p, proposedBy: "agent", date: new Date().toISOString() });
 			status(ctx);
 			return {
 				content: [
 					{
 						type: "text",
-						text: `Proposed (${file}). The human will review it with /kb; don't treat it as knowledge until then.`,
+						text: `Proposed (${file}). ${who()} will review it with /grimoire; don't treat it as knowledge until then.`,
 					},
 				],
 				details: { file },
@@ -112,42 +150,82 @@ export default function sitraKnowledge(pi: Pi): void {
 		},
 	});
 
-	pi.registerCommand("kb", {
-		description: "Review knowledge proposals one at a time: accept, reject, or skip",
-		async handler(_args, ctx) {
-			const root = knowledgeRoot(knowledgeRepo(ctx.cwd));
-			const proposals = listProposals(root);
-			if (proposals.length === 0) {
-				ctx.ui.notify(`No proposals. ${listEntries(root).length} entries in ${root}.`, "info");
-				return;
-			}
-			for (const [i, p] of proposals.entries()) {
-				const title = `(${i + 1}/${proposals.length}) [${p.kind}] ${p.title}\n\n${p.body}${p.evidence ? `\n\nEvidence: ${p.evidence}` : ""}`;
-				const choice = await ctx.ui.select(title, [
-					"Accept",
-					"Reject",
-					"Skip",
-					"Accept this and all the rest",
-					"Stop reviewing",
-				]);
-				if (choice === "Accept this and all the rest") {
-					for (const rest of proposals.slice(i)) decide(root, rest.file, "accept");
-					break;
-				}
-				if (choice === "Accept") decide(root, p.file, "accept");
-				else if (choice === "Reject") decide(root, p.file, "reject");
-				else if (choice !== "Skip") break;
-			}
-			status(ctx);
+	pi.registerTool({
+		name: "grimoire_search",
+		label: "Search Grimoire",
+		description:
+			"Search Grimoire's approved entries by words. Returns one line per match (kind, title, summary, path); read the path for the full entry. Set proposals to true to also search unapproved proposals, which are leads, not rules.",
+		promptSnippet: "grimoire_search: find approved Grimoire entries about a topic",
+		parameters: Type.Object({
+			query: Type.String({ description: "Words for what you need, e.g. 'feature flags evals production'." }),
+			proposals: Type.Optional(Type.Boolean({ description: "Also search unapproved proposals." })),
+		}),
+		async execute(_id, params) {
+			const p = params as { query: string; proposals?: boolean };
+			const g = dir();
+			const approved = searchEntries(listEntries(g), p.query);
+			const text = p.proposals
+				? `${approved}\n\nUnapproved proposals (leads, not rules):\n${searchEntries(listProposals(g), p.query)}`
+				: approved;
+			return { content: [{ type: "text", text: `Paths are in ${g}.\n${text}` }], details: { query: p.query } };
 		},
 	});
 
-	pi.registerCommand("kb-reflect", {
-		description: "Ask the agent to look back over this session and propose what future agents should know",
-		async handler() {
-			pi.sendUserMessage(
-				"Look back over this session. What did we learn that a future agent working in this repo must know — about how the app really works, mistakes to avoid, decisions and their reasons, or changes to the agent setup itself? Propose at most 3 entries with kb_propose, each with evidence. Skip anything obvious or already in the project knowledge. Then stop.",
-			);
+	const review = async (ctx: Ctx) => {
+		const g = dir();
+		const proposals = listProposals(g);
+		const unreadable = unreadableProposals(g);
+		if (unreadable.length > 0) {
+			ctx.ui.notify(`${unreadable.length} proposal(s) can't be read as entries: ${unreadable.join(", ")}`, "warning");
+		}
+		if (proposals.length === 0) {
+			ctx.ui.notify(`No proposals. ${listEntries(g).length} approved entries in ${g}.`, "info");
+			return;
+		}
+		for (const [i, p] of proposals.entries()) {
+			const lines = [
+				`(${i + 1}/${proposals.length}) [${p.kind}] ${p.title}`,
+				...(p.summary ? ["", p.summary] : []),
+				"",
+				p.body,
+				...(p.tags ? ["", `Tags: ${p.tags.join(", ")}`] : []),
+				...(p.evidence ? ["", `Evidence: ${p.evidence}`] : []),
+			];
+			const choice = await ctx.ui.select(lines.join("\n"), [
+				"Accept",
+				"Reject",
+				"Skip",
+				"Accept this and all the rest",
+				"Stop reviewing",
+			]);
+			if (choice === "Accept this and all the rest") {
+				for (const rest of proposals.slice(i)) decide(g, rest.file, "accept");
+				break;
+			}
+			if (choice === "Accept") decide(g, p.file, "accept");
+			else if (choice === "Reject") decide(g, p.file, "reject");
+			else if (choice !== "Skip") break;
+		}
+		status(ctx);
+	};
+
+	pi.registerCommand("grimoire", {
+		description: "Review Grimoire proposals one at a time: accept, reject, or skip",
+		handler: async (_args, ctx) => review(ctx),
+	});
+	pi.registerCommand("grimoire-reflect", {
+		description: "Ask the agent what this session taught that future agents need, as Grimoire proposals",
+		handler: async () => pi.sendUserMessage(REFLECT),
+	});
+	pi.registerCommand("kb", {
+		description: "Renamed to /grimoire",
+		async handler(_args, ctx) {
+			ctx.ui.notify("/kb is now /grimoire: one approved knowledge base for every repo and tool.", "info");
+			await review(ctx);
 		},
+	});
+	pi.registerCommand("kb-reflect", {
+		description: "Renamed to /grimoire-reflect",
+		handler: async () => pi.sendUserMessage(REFLECT),
 	});
 }

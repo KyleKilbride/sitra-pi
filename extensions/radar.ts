@@ -5,7 +5,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync, watch } from "node:fs";
 import { basename, join } from "node:path";
-import { knowledgeRepo, knowledgeRoot, listKnownProjects, listProposals } from "./kb.ts";
+import { grimoireDir, listProposals } from "./grimoire.ts";
 import { readRun } from "./runs.ts";
 import {
 	createTailReader,
@@ -13,6 +13,7 @@ import {
 	gitBranch,
 	groupWorkerSessions,
 	listSessions,
+	mainCheckout,
 	readLastLines,
 	readTranscriptTail,
 	type SessionAlert,
@@ -787,7 +788,7 @@ export function collectRadarSnapshot(
 						role: "lead",
 						pid: process.pid,
 						cwd,
-						repo: knowledgeRepo(cwd),
+						repo: mainCheckout(cwd),
 						...(gitBranch(cwd) ? { branch: gitBranch(cwd) } : {}),
 						...(sessionFile ? { sessionFile } : {}),
 						...(ws.paneId ? { paneId: ws.paneId } : {}),
@@ -885,12 +886,10 @@ export function collectRadarSnapshot(
 	}
 
 	let pendingProposals = 0;
-	for (const repo of listKnownProjects(profileDir)) {
-		try {
-			pendingProposals += listProposals(knowledgeRoot(repo)).length;
-		} catch {
-			// Skip unreadable repos.
-		}
+	try {
+		pendingProposals = listProposals(grimoireDir({ ...process.env, PI_CODING_AGENT_DIR: profileDir })).length;
+	} catch {
+		// An unreadable Grimoire just shows nothing to review.
 	}
 
 	return {

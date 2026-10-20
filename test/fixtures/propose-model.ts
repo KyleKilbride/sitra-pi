@@ -12,9 +12,10 @@ export default function (pi) {
 				ctx.messages.some((m) => m.role === "toolResult")
 					? fauxAssistantMessage("done")
 					: fauxAssistantMessage(
-							fauxToolCall("kb_propose", {
+							fauxToolCall("grimoire_propose", {
 								kind: "warning",
 								title: "Never force-push a colleague's branch",
+								summary: "Ask before pushing to someone else's branch.",
 								body: "It happened on Oct 8.",
 								evidence: "POSTMORTEM section 3",
 							}),

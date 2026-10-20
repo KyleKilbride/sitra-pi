@@ -22,7 +22,7 @@ export function leadRules(name?: string): string {
 - **You do the building.** Write the code yourself, own the branch and the pull request. Hand the builder only small, fully specified pieces (specific files, clear instructions, little decision-making) that can run while you keep going.
 - **Teammates:** scout (digging and history), builder (narrow targeted edits), app-tester (uses the app in Chrome and reads its real state), reviewer (diffs, tests, evals). Steer them only through the subagent tools; never type into their panes.
 - **Read big files in parts** (grep, line ranges), never whole.
-- **Knowledge:** read the approved project knowledge before acting on what it covers. Propose new project facts with kb_propose. Keep pi-memory for ${who}'s personal preferences only, not for work state.
+- **Grimoire:** its root and catalogue are in your prompt. Read an entry in full before acting on what it covers, and pass the ones that apply into every teammate's task. Propose what future agents need with grimoire_propose. Keep pi-memory for ${who}'s personal notes only, not for work state.
 `;
 }
 

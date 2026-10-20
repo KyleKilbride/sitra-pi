@@ -20,7 +20,6 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { knowledgeRepo } from "./kb.ts";
 import { shellQuote } from "./runs.ts";
 
 export type SessionRole = "lead" | "teammate" | "tower";
@@ -236,6 +235,23 @@ function defaultPidAlive(pid: number): boolean {
 		return true;
 	} catch {
 		return false;
+	}
+}
+
+/**
+ * The main checkout of the repo this folder is in, even from inside a linked worktree, so every worktree of a repo
+ * counts as the same project. Outside git, the folder itself.
+ */
+export function mainCheckout(cwd: string): string {
+	const git = (...args: string[]) =>
+		execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+	try {
+		// The shared `.git` of all worktrees lives in the main checkout. Submodules and unusual layouts keep their
+		// own top level.
+		const common = git("rev-parse", "--path-format=absolute", "--git-common-dir");
+		return basename(common) === ".git" ? dirname(common) : git("rev-parse", "--show-toplevel");
+	} catch {
+		return cwd;
 	}
 }
 
@@ -535,7 +551,7 @@ export interface PreparedWorktree {
 export function groundingPrompt(userName?: string, extraInstructions?: string): string {
 	const who = userName?.trim() || "the user";
 	const extra = extraInstructions?.trim() ? ` Additional context from ${who}: ${extraInstructions.trim()}` : "";
-	return `Read AGENTS.md, CLAUDE.md, any project steering index, and the approved project knowledge so you are grounded in this codebase and how ${who} works. Do not edit code or start a task yet.${extra} Reply in two short lines confirming which docs and rules you loaded and that you are ready for ${who} to drive.`;
+	return `Read AGENTS.md, CLAUDE.md, any project steering index, and Grimoire (the root and catalogue in your prompt) so you are grounded in this codebase and how ${who} works. Do not edit code or start a task yet.${extra} Reply in two short lines confirming which docs and rules you loaded and that you are ready for ${who} to drive.`;
 }
 
 export function spawnPaneCommand(grounding: string): string {
@@ -578,7 +594,7 @@ export function prepareWorktree(options: {
 	base: string;
 	slug?: string;
 }): PreparedWorktree {
-	const primaryRepo = knowledgeRepo(options.repo);
+	const primaryRepo = mainCheckout(options.repo);
 	const branch = options.branch.trim();
 	const rawSlug = options.slug?.trim() || branch.replace(/^[^/]+\//, "");
 	const slug = rawSlug.replace(/[^a-zA-Z0-9._-]/g, "-");

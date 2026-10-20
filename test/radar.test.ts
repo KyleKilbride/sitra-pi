@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { rememberProject, writeProposal } from "../extensions/kb.ts";
+import { writeProposal } from "../extensions/grimoire.ts";
 import {
 	brailleSparkline,
 	collectRadarSnapshot,
@@ -48,11 +48,9 @@ describe("half-block pixel sprites", () => {
 });
 
 describe("radar snapshot and frame", () => {
-	test("collects workers, teammates, error loops, runs, kb proposals and peer mail into a bounded frame", () => {
+	test("collects workers, teammates, error loops, runs, Grimoire proposals and peer mail into a bounded frame", () => {
 		const profile = tmp();
-		const repo = tmp();
-		rememberProject(profile, repo);
-		writeProposal(join(repo, ".pi", "knowledge"), {
+		writeProposal(join(profile, "grimoire"), {
 			kind: "lesson",
 			title: "Always check live state",
 			body: "Read session state before reporting.",

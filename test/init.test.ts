@@ -182,3 +182,24 @@ test("installs run quietly, and a failed one says what went wrong and how to ret
 	expect(failure).toContain("npm error 404 Not Found");
 	expect(failure).toContain("pi install npm:pi-memory@0.4.2");
 });
+
+test("offers to load Grimoire in Claude Code and Codex when they're set up, and leaves them alone when declined", async () => {
+	const yes = machine({ answers: { [askName]: "Sam" } });
+	mkdirSync(join(yes.home, ".claude"));
+	mkdirSync(join(yes.home, ".codex"));
+	await runInit(yes.deps);
+	expect(yes.asked).toContain("Load your Grimoire in Claude Code and Codex too?");
+	const claude = JSON.parse(readFileSync(join(yes.home, ".claude", "settings.json"), "utf8"));
+	expect(claude.hooks.SessionStart[0].hooks[0].command).toContain("grimoire hook claude");
+	const codex = JSON.parse(readFileSync(join(yes.home, ".codex", "hooks.json"), "utf8"));
+	expect(codex.hooks.SessionStart[0].hooks[0].command).toContain("grimoire hook codex");
+
+	const no = machine({ answers: { [askName]: "Sam" }, confirms: false });
+	mkdirSync(join(no.home, ".claude"));
+	await runInit(no.deps);
+	expect(existsSync(join(no.home, ".claude", "settings.json"))).toBe(false);
+
+	const neither = machine({ answers: { [askName]: "Sam" } });
+	await runInit(neither.deps);
+	expect(neither.asked).not.toContain("Load your Grimoire in Claude Code and Codex too?");
+});

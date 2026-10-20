@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { profileDir, readConfig, sitraHome, writeConfig } from "./config.ts";
+import { installGrimoireHooks } from "./grimoire.ts";
 import { fillTemplate, scaffoldProfile } from "./profile.ts";
 import { atLeast, parseVersion } from "./versions.ts";
 
@@ -177,6 +178,10 @@ export async function runInit(deps: InitDeps): Promise<InitResult> {
 	}
 	writeQuestionGuidance(deps, who);
 	linkCommand(deps, needsYou);
+	const otherTools = ["claude", "codex"].some((t) => existsSync(join(deps.home, `.${t}`)));
+	if (otherTools && (await deps.confirm("Load your Grimoire in Claude Code and Codex too?"))) {
+		installGrimoireHooks(deps, join(profile, "grimoire"));
+	}
 
 	needsYou.push(
 		signedIn ? "Start sitra inside herdr." : "Start sitra inside herdr and sign in to your model provider with /login.",
