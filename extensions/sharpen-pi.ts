@@ -6,7 +6,15 @@
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { HANDOVER_INSTRUCTIONS, handoverThreshold, helperBrief, type Msg, stubToolResults } from "./sharpen.ts";
+import {
+	HANDOVER_INSTRUCTIONS,
+	handoverPrompt,
+	handoverSummary,
+	handoverThreshold,
+	helperBrief,
+	type Msg,
+	stubToolResults,
+} from "./sharpen.ts";
 
 interface Ctx {
 	hasUI?: boolean;
@@ -14,6 +22,18 @@ interface Ctx {
 	getContextUsage?(): { tokens: number | null; contextWindow: number } | undefined;
 	compact?(options?: { customInstructions?: string }): void;
 	sessionManager?: { getBranch?(): { type?: string; message?: Msg }[]; getSessionId?(): string };
+	model?: unknown;
+	signal?: AbortSignal;
+	modelRegistry?: {
+		complete(model: unknown, context: { messages: unknown[] }, options?: Record<string, unknown>): Promise<Msg>;
+	};
+}
+
+interface TurnEnd {
+	message?: Msg;
+	messageEntryId?: string;
+	outcome?: string;
+	context?: { contextMessages?: Msg[] };
 }
 
 interface Pi {
@@ -34,6 +54,41 @@ function branchMessages(ctx: Ctx): Msg[] {
 function withBrief(task: unknown, brief: string): unknown {
 	if (typeof task !== "string" || task.includes(BRIEF_MARK)) return task;
 	return `${task}\n\n${brief}`;
+}
+
+/** Asks the session's model for a handover of `messages`; throws when no usable summary comes back. */
+async function writeHandover(ctx: Ctx, messages: Msg[], signal?: AbortSignal): Promise<string> {
+	if (!ctx.model || !ctx.modelRegistry) throw new Error("no model");
+	const reply = await ctx.modelRegistry.complete(
+		ctx.model,
+		{
+			messages: [{ role: "user", content: [{ type: "text", text: handoverPrompt(messages) }], timestamp: Date.now() }],
+		},
+		{ maxTokens: 8_000, signal },
+	);
+	const text = Array.isArray(reply?.content)
+		? (reply.content as { type?: string; text?: string }[])
+				.filter((p) => p?.type === "text")
+				.map((p) => p.text)
+				.join("\n")
+				.trim()
+		: "";
+	if (!text || reply.stopReason === "error" || reply.stopReason === "aborted") throw new Error("no summary came back");
+	return handoverSummary(text, messages);
+}
+
+function saveHandover(summary: string, ctx: Ctx): void {
+	try {
+		const dir = join(process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent"), "handovers");
+		mkdirSync(dir, { recursive: true });
+		const id = ctx.sessionManager?.getSessionId?.() ?? "session";
+		writeFileSync(
+			join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${id.replace(/[^\w.-]/g, "_")}.md`),
+			`${summary}\n`,
+		);
+	} catch {
+		// The handover is in the session either way; the file is a convenience.
+	}
 }
 
 export default function sitraSharpen(pi: Pi): void {
@@ -104,20 +159,93 @@ export default function sitraSharpen(pi: Pi): void {
 	});
 
 	pi.on("session_compact", (event: { compactionEntry?: { summary?: string } }, ctx) => {
+		const summary = event?.compactionEntry?.summary;
+		if (on() && summary) saveHandover(summary, ctx);
+	});
+
+	/**
+	 * Mid-run: a turn that ends with tool calls past the line is followed by a handover compaction, and the run carries
+	 * on from it. This is what keeps a long autonomous run (a loop step) sharp: the run-end handover never fires there,
+	 * and Pi's own compaction waits until the window is nearly full. The latest call and its results stay whole.
+	 */
+	pi.on("turn_end", async (event: TurnEnd, ctx) => {
 		try {
-			const summary = event?.compactionEntry?.summary;
-			if (!on() || !summary) return;
-			const dir = join(process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent"), "handovers");
-			mkdirSync(dir, { recursive: true });
-			const id = ctx.sessionManager?.getSessionId?.() ?? "session";
-			writeFileSync(
-				join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${id.replace(/[^\w.-]/g, "_")}.md`),
-				`${summary}\n`,
+			if (!on() || event?.outcome !== "completed" || !event.messageEntryId || !event.message) return undefined;
+			const working =
+				Array.isArray(event.message.content) &&
+				event.message.content.some((p: { type?: string }) => p?.type === "toolCall");
+			if (!working) return undefined;
+			const usage = ctx.getContextUsage?.();
+			if (!usage?.tokens || !usage.contextWindow) return undefined;
+			const over = usage.tokens >= handoverThreshold(usage.contextWindow);
+			if (!over) armed = true;
+			if (!over || !armed || !ctx.model || !ctx.modelRegistry) return undefined;
+			const messages = event.context?.contextMessages ?? [];
+			const cut = messages.lastIndexOf(event.message);
+			const earlier = cut >= 0 ? messages.slice(0, cut) : messages.slice(0, -1);
+			if (earlier.length < 4) return undefined;
+			armed = false;
+			ctx.ui?.notify(
+				`The run reached ${Math.round(usage.tokens / 1000)}k tokens. Handing over to a fresh context and carrying on.`,
+				"info",
 			);
+			let summary: string;
+			try {
+				summary = await writeHandover(ctx, earlier, ctx.signal);
+			} catch (error) {
+				ctx.ui?.notify(`sitra couldn't hand over (${String(error).slice(0, 120)}); carrying on as is.`, "warning");
+				return undefined;
+			}
+			saveHandover(summary, ctx);
+			return { entries: [{ type: "compaction", summary, firstKeptEntryId: event.messageEntryId }] };
 		} catch {
-			// The handover is in the session either way; the file is a convenience.
+			return undefined;
 		}
 	});
+
+	/**
+	 * Pi's own compaction (near the limit, or after an overflow) is the backstop when a handover didn't happen: it gets
+	 * the handover format and the person's requests verbatim too, as do sitra's own run-end handover and `/handover`.
+	 * A plain `/compact` and any failure stay with Pi.
+	 */
+	pi.on(
+		"session_before_compact",
+		async (
+			event: {
+				reason?: string;
+				customInstructions?: string;
+				signal?: AbortSignal;
+				preparation?: {
+					firstKeptEntryId?: string;
+					tokensBefore?: number;
+					previousSummary?: string;
+					messagesToSummarize?: Msg[];
+					turnPrefixMessages?: Msg[];
+				};
+			},
+			ctx,
+		) => {
+			try {
+				const prep = event?.preparation;
+				const ours =
+					event?.reason === "threshold" ||
+					event?.reason === "overflow" ||
+					event?.customInstructions === HANDOVER_INSTRUCTIONS;
+				if (!on() || !ours || !prep?.firstKeptEntryId) return undefined;
+				const messages: Msg[] = [
+					...(prep.previousSummary ? [{ role: "compactionSummary", summary: prep.previousSummary }] : []),
+					...(prep.messagesToSummarize ?? []),
+					...(prep.turnPrefixMessages ?? []),
+				];
+				const summary = await writeHandover(ctx, messages, event.signal);
+				return {
+					compaction: { summary, firstKeptEntryId: prep.firstKeptEntryId, tokensBefore: prep.tokensBefore ?? 0 },
+				};
+			} catch {
+				return undefined;
+			}
+		},
+	);
 
 	pi.registerCommand("handover", {
 		description: "Hand over to a fresh context now: a structured summary of goal, decisions and progress",

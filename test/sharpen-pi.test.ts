@@ -2,7 +2,7 @@ import { mkdtempSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { Msg } from "../extensions/sharpen.ts";
+import { HANDOVER_INSTRUCTIONS, type Msg } from "../extensions/sharpen.ts";
 import sitraSharpen from "../extensions/sharpen-pi.ts";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
@@ -186,5 +186,179 @@ describe("handing over", () => {
 			{ sessionManager: { getSessionId: () => "s1" } },
 		);
 		expect(readdirSync(join(dir, "handovers"))).toHaveLength(1);
+	});
+});
+
+describe("handing over mid-run", () => {
+	const assistantCall = (i: number): Msg => ({
+		role: "assistant",
+		content: [{ type: "toolCall", id: `c${i}`, name: "read", arguments: { path: `f${i}.ts` } }],
+	});
+	const result = (i: number): Msg => ({
+		role: "toolResult",
+		toolCallId: `c${i}`,
+		toolName: "read",
+		content: [{ type: "text", text: `contents of f${i}` }],
+	});
+	function run(steps: number): Msg[] {
+		const out: Msg[] = [user("Fix every parser in the repo. Don't run the full suite.")];
+		for (let i = 0; i < steps; i++) out.push(assistantCall(i), result(i));
+		return out;
+	}
+	function turnEnd(messages: Msg[], extra: Record<string, unknown> = {}) {
+		const last = messages.findLastIndex((m) => m.role === "assistant");
+		return {
+			type: "turn_end",
+			message: messages[last],
+			toolResults: messages.slice(last + 1).filter((m) => m.role === "toolResult"),
+			messageEntryId: "entry-last",
+			toolResultEntryIds: ["entry-result"],
+			outcome: "completed",
+			entries: [],
+			continue: false,
+			context: { contextMessages: messages, canContinue: true },
+			...extra,
+		};
+	}
+	function ctx(tokens: number, reply: string | Error = "1. Goal: fix the parsers") {
+		const calls: { prompt: string; options: Record<string, unknown> }[] = [];
+		const notes: string[] = [];
+		return {
+			calls,
+			notes,
+			ctx: {
+				hasUI: true,
+				ui: { notify: (m: string) => notes.push(m) },
+				model: { provider: "p", id: "m", contextWindow: 1_000_000 },
+				signal: undefined,
+				getContextUsage: () => ({ tokens, contextWindow: 1_000_000 }),
+				sessionManager: { getSessionId: () => "s1" },
+				modelRegistry: {
+					complete: async (_m: unknown, c: { messages: Msg[] }, options: Record<string, unknown>) => {
+						calls.push({ prompt: JSON.stringify(c.messages), options });
+						if (reply instanceof Error) throw reply;
+						return { role: "assistant", content: [{ type: "text", text: reply }] };
+					},
+				},
+			},
+		};
+	}
+	type Result = { entries?: { type: string; summary: string; firstKeptEntryId: string | null }[]; continue?: boolean };
+
+	test("past the line while still working, the turn ends with a handover compaction and the run carries on", async () => {
+		const dir = realpathSync(mkdtempSync(join(tmpdir(), "sitra-midrun-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", dir);
+		const { handlers } = fakePi();
+		const c = ctx(170_000);
+		const r = (await handlers.get("turn_end")?.(turnEnd(run(6)), c.ctx)) as Result;
+		expect(r.entries).toHaveLength(1);
+		const entry = r.entries?.[0];
+		expect(entry?.type).toBe("compaction");
+		expect(entry?.firstKeptEntryId).toBe("entry-last");
+		expect(entry?.summary).toContain("1. Goal: fix the parsers");
+		expect(entry?.summary).toContain("Don't run the full suite.");
+		expect(r.continue).toBeUndefined();
+		expect(c.calls).toHaveLength(1);
+		expect(c.calls[0]?.prompt).toMatch(/handover/i);
+		expect(c.calls[0]?.prompt).toContain("f2.ts");
+		expect(c.calls[0]?.prompt).not.toContain("f5.ts");
+		expect(c.notes.join(" ")).toMatch(/handing over/i);
+		expect(readdirSync(join(dir, "handovers"))).toHaveLength(1);
+	});
+
+	test("helpers hand over mid-run too, since loop steps are helpers", async () => {
+		vi.stubEnv("PI_CODING_AGENT_DIR", realpathSync(mkdtempSync(join(tmpdir(), "sitra-midrun-"))));
+		vi.stubEnv("PI_SUBAGENT_NAME", "builder");
+		const { handlers } = fakePi();
+		const r = (await handlers.get("turn_end")?.(turnEnd(run(6)), ctx(170_000).ctx)) as Result;
+		expect(r.entries).toHaveLength(1);
+	});
+
+	test("nothing happens below the line, on a final reply, after an error, with too little to summarise, or when off", async () => {
+		const { handlers } = fakePi();
+		const te = handlers.get("turn_end");
+		const below = ctx(100_000);
+		expect(await te?.(turnEnd(run(6)), below.ctx)).toBeUndefined();
+		const final = [...run(6), { role: "assistant", content: [{ type: "text", text: "done" }] } as Msg];
+		expect(await te?.(turnEnd(final), ctx(170_000).ctx)).toBeUndefined();
+		expect(await te?.(turnEnd(run(6), { outcome: "error" }), ctx(170_000).ctx)).toBeUndefined();
+		expect(await te?.(turnEnd(run(1)), ctx(170_000).ctx)).toBeUndefined();
+		vi.stubEnv("SITRA_SHARPEN", "0");
+		const off = ctx(170_000);
+		expect(await te?.(turnEnd(run(6)), off.ctx)).toBeUndefined();
+		expect(off.calls).toHaveLength(0);
+		expect(below.calls).toHaveLength(0);
+	});
+
+	test("one handover per crossing, and a failed summary leaves the run untouched and does not retry every turn", async () => {
+		vi.stubEnv("PI_CODING_AGENT_DIR", realpathSync(mkdtempSync(join(tmpdir(), "sitra-midrun-"))));
+		const { handlers } = fakePi();
+		const te = handlers.get("turn_end") as (event: unknown, ctx: unknown) => Promise<unknown>;
+		expect(((await te(turnEnd(run(6)), ctx(170_000).ctx)) as Result).entries).toHaveLength(1);
+		expect(await te(turnEnd(run(7)), ctx(175_000).ctx)).toBeUndefined();
+		expect(await te(turnEnd(run(8)), ctx(60_000).ctx)).toBeUndefined();
+		const failing = ctx(170_000, new Error("429"));
+		expect(await te(turnEnd(run(9)), failing.ctx)).toBeUndefined();
+		expect(failing.notes.join(" ")).toMatch(/couldn't hand over/i);
+		const again = ctx(172_000);
+		expect(await te(turnEnd(run(10)), again.ctx)).toBeUndefined();
+		expect(again.calls).toHaveLength(0);
+	});
+});
+
+describe("Pi's own compaction near the limit", () => {
+	const ctxWith = (reply: string | Error) => {
+		const prompts: string[] = [];
+		return {
+			prompts,
+			ctx: {
+				model: { provider: "p", id: "m" },
+				modelRegistry: {
+					complete: async (_m: unknown, c: { messages: Msg[] }) => {
+						prompts.push(JSON.stringify(c.messages));
+						if (reply instanceof Error) throw reply;
+						return { role: "assistant", content: [{ type: "text", text: reply }] };
+					},
+				},
+			},
+		};
+	};
+	const event = (reason: string) => ({
+		type: "session_before_compact",
+		reason,
+		signal: new AbortController().signal,
+		preparation: {
+			firstKeptEntryId: "keep-1",
+			tokensBefore: 980_000,
+			previousSummary: "old",
+			messagesToSummarize: [user("Fix every parser. Don't run the full suite.")],
+			turnPrefixMessages: [],
+		},
+	});
+
+	test("uses the handover format with the requests carried verbatim, as does sitra's own handover; plain /compact and failures are left to Pi", async () => {
+		const { handlers } = fakePi();
+		const ok = ctxWith("1. Goal: parsers");
+		const r = (await handlers.get("session_before_compact")?.(event("threshold"), ok.ctx)) as {
+			compaction: { summary: string; firstKeptEntryId: string; tokensBefore: number };
+		};
+		expect(ok.prompts[0]).toMatch(/handover/i);
+		expect(r.compaction.firstKeptEntryId).toBe("keep-1");
+		expect(r.compaction.tokensBefore).toBe(980_000);
+		expect(r.compaction.summary).toContain("1. Goal: parsers");
+		expect(r.compaction.summary).toContain("Don't run the full suite.");
+		expect(await handlers.get("session_before_compact")?.(event("overflow"), ok.ctx)).toBeDefined();
+		const manual = ctxWith("x");
+		expect(await handlers.get("session_before_compact")?.(event("manual"), manual.ctx)).toBeUndefined();
+		expect(manual.prompts).toHaveLength(0);
+		expect(
+			await handlers.get("session_before_compact")?.(event("threshold"), ctxWith(new Error("429")).ctx),
+		).toBeUndefined();
+		const ours = ctxWith("1. Goal: run-end");
+		const r2 = (await handlers.get("session_before_compact")?.(
+			{ ...event("manual"), customInstructions: HANDOVER_INSTRUCTIONS },
+			ours.ctx,
+		)) as { compaction: { summary: string } };
+		expect(r2.compaction.summary).toContain("Don't run the full suite.");
 	});
 });

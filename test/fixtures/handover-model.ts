@@ -9,12 +9,20 @@ export default function (pi) {
 		stopReason: "toolUse",
 	});
 	call.usage = { ...call.usage, input: 170_000, totalTokens: 170_000 };
-	faux.setResponses([
+	const script = [
 		fauxAssistantMessage("Noted."),
 		call,
 		fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limit exceeded" }),
 		fauxAssistantMessage("RECOVERED AFTER RETRY"),
-	]);
+	];
+	const text = (m) =>
+		typeof m?.content === "string" ? m.content : (m?.content ?? []).map((p) => p.text ?? "").join("");
+	// sitra's mid-run handover asks the model for a summary; answer it without using up the script.
+	const step = (context) =>
+		text(context.messages.at(-1)).startsWith("This summary is a handover")
+			? fauxAssistantMessage("1. Goal: test handover")
+			: script.shift();
+	faux.setResponses(Array.from({ length: 8 }, () => step));
 	pi.registerProvider(faux.provider);
 	pi.on("session_before_compact", (e) => ({
 		compaction: {
