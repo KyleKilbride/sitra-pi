@@ -163,6 +163,10 @@ export function listProposals(dir: string): Entry[] {
 	return readEntries(dir, "proposals");
 }
 
+export function listRejected(dir: string): Entry[] {
+	return readEntries(dir, "rejected");
+}
+
 /** Proposal files that aren't valid entries (unknown kind, no frontmatter), so a review can say so instead of hiding them. */
 export function unreadableProposals(dir: string): string[] {
 	const ok = new Set(listProposals(dir).map((p) => p.file));

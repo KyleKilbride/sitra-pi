@@ -97,3 +97,72 @@ test("a rule tied to an action pauses that action once per session with the rule
 	handlers.get("session_start")?.({}, ctx);
 	expect(call("gh pr create --draft")?.block).toBe(true);
 });
+
+test("a broken outcome log never stops a rule from pausing", async () => {
+	const { mkdtempSync, mkdirSync, writeFileSync, realpathSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const { renderEntry } = await import("../extensions/grimoire.ts");
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "sitra-when-")));
+	mkdirSync(join(dir, "kinds", "decisions"), { recursive: true });
+	writeFileSync(
+		join(dir, "kinds", "decisions", "d.md"),
+		renderEntry({
+			kind: "decision",
+			title: "Drafts",
+			body: "Pass --draft.",
+			date: "2026-10-20",
+			when: ["command:gh pr create"],
+		}),
+	);
+	mkdirSync(join(dir, ".sitra"), { recursive: true });
+	writeFileSync(join(dir, ".sitra", "pending-pause"), "not a folder");
+	vi.stubEnv("SITRA_GRIMOIRE", dir);
+	vi.stubEnv("PI_SUBAGENT_NAME", "");
+	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	sitraKnowledge({
+		on: (n: string, h: (e: unknown, c: unknown) => unknown) => handlers.set(n, h),
+		registerTool() {},
+		registerCommand() {},
+		sendUserMessage() {},
+	} as never);
+	const ctx = { cwd: dir, hasUI: false, ui: { setStatus() {}, notify() {} } };
+	const r = handlers.get("tool_call")?.(
+		{ type: "tool_call", toolCallId: "1", toolName: "bash", input: { command: "gh pr create" } },
+		ctx,
+	);
+	expect(r).toMatchObject({ block: true });
+});
+
+test("the turn-start handler never throws, and the review count refreshes even with learning off", async () => {
+	const { mkdtempSync, mkdirSync, writeFileSync, realpathSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const { renderEntry } = await import("../extensions/grimoire.ts");
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "sitra-turn-")));
+	vi.stubEnv("SITRA_GRIMOIRE", dir);
+	vi.stubEnv("PI_SUBAGENT_NAME", "");
+	vi.stubEnv("SITRA_GRIMOIRE_LEARN", "0");
+	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	sitraKnowledge({
+		on: (n: string, h: (e: unknown, c: unknown) => unknown) => handlers.set(n, h),
+		registerTool() {},
+		registerCommand() {},
+		sendUserMessage() {},
+	} as never);
+	const statuses: string[] = [];
+	const ctx = { cwd: dir, hasUI: true, ui: { setStatus: (_k: string, t: string) => statuses.push(t), notify() {} } };
+	mkdirSync(join(dir, "proposals"), { recursive: true });
+	writeFileSync(
+		join(dir, "proposals", "p.md"),
+		renderEntry({ kind: "lesson", title: "Learned", body: "b", date: "2026-10-20" }),
+	);
+	const event = () => ({ messageType: "user", prompt: "hello", systemPromptOptions: { sections: {} } });
+	handlers.get("before_agent_start")?.(event(), ctx);
+	expect(statuses.at(-1)).toContain("1 to review");
+	const broken = realpathSync(mkdtempSync(join(tmpdir(), "sitra-turn-")));
+	writeFileSync(join(broken, "proposals"), "not a folder");
+	vi.stubEnv("SITRA_GRIMOIRE", broken);
+	vi.stubEnv("SITRA_GRIMOIRE_LEARN", "1");
+	expect(() => handlers.get("before_agent_start")?.(event(), ctx)).not.toThrow();
+});

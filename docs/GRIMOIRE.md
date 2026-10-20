@@ -2,8 +2,8 @@
 
 Grimoire replaces the per-repo knowledge base (`/kb`, `.pi/knowledge`). It is one folder of plain markdown per person,
 shared by every agent they run (Pi, Claude Code, Codex), across every project. Agents propose; only the person
-approves. sitra ships the machinery and an empty starter; what goes in it is the person's own and never leaves their
-machine.
+approves. sitra ships the machinery and an empty starter; what goes in it is the person's own and stays in their
+private folder (agents and the background learner read it through the person's own model provider).
 
 ## Why it replaced `/kb`
 
@@ -115,6 +115,34 @@ cached prompt prefix survives from turn to turn.
 3. `/grimoire-reflect` asks the agent to look back over the session and propose at most three entries. Lessons follow
    the shape: what failed, the verified cause, the fix, whether it held, what would catch it next time.
 4. Agents never write to `root/` or `kinds/`.
+
+## Learning from corrections
+
+Nobody has to remember to reflect. Every message the person sends is recorded as a moment: their words, the agent's
+last reply and its last 12 tool calls (Pi through the extension; Claude Code and Codex through a `UserPromptSubmit`
+hook that `sitra grimoire install` adds). Recording takes a few milliseconds (2.5 ms median, 11 ms worst, on a
+97 MB transcript). A detached `sitra grimoire learn` then does the rest in the background:
+
+1. asks a model whether the message corrects the agent (only a bare YES counts);
+2. if it does, drafts the missing rule from the person's own words, with a `when` trigger when the mistake happened at
+   a recognisable action, and writes it to `proposals/` as `proposedBy: "sitra-learn"`, quoting the person as
+   evidence. If Grimoire already covers it, it records that instead of proposing a duplicate.
+
+The person only reviews `/grimoire`; the status line counts what's waiting. Agents can also put `when` triggers in
+their own `grimoire_propose` calls.
+
+- **Model:** `google/gemini-4-argon` by default (`learnModel` in `~/.sitra/config.json`, or `SITRA_LEARN_MODEL`).
+  On 183 labelled real messages (59 corrections) it caught 54 corrections with 1 false alarm; Claude Haiku 52 with 7;
+  fast decision models (OpenAI Decisions, TypeSafe Jev) about 40-43 with 4. It runs in the background, so accuracy
+  matters more than speed.
+- **Off switch:** `"learn": false` in `~/.sitra/config.json` (or `SITRA_GRIMOIRE_LEARN=0`).
+- **Privacy:** moments stay in `<grimoire>/.sitra/moments/`. A message judged not to be a correction keeps only its
+  verdict. To decide and draft, the learner sends the message, the agent's last reply and (for corrections) its recent
+  tool calls to the configured model, the same provider the person's agents already use.
+- **It measures itself.** Each recorded correction is a replay case: `sitra grimoire eval` (no file) replays them
+  through the triggers, and a case's expected entry is its proposal once accepted. After every trigger pause, the
+  agent's next call is recorded: a different call means the rule changed its course, the same call means it already
+  complied or ignored it. `sitra grimoire status` shows both per rule, so noisy triggers are visible.
 
 ## Moving off `/kb`
 

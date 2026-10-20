@@ -10,7 +10,7 @@ import { dirname } from "node:path";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
-import { profileDir, readConfig, sitraHome } from "../cli/config.ts";
+import { learnEnv, profileDir, readConfig, sitraHome } from "../cli/config.ts";
 import { runGrimoireCli } from "../cli/grimoire.ts";
 import { type ExecResult, runInit } from "../cli/init.ts";
 import { ensureTowerName, isRadarCommand, isTowerCommand, launchCommand, piEnv } from "../cli/launch.ts";
@@ -22,10 +22,16 @@ const sitra = sitraHome(process.env, homedir());
 
 if (first === "grimoire") {
 	// Hooks run inside Claude Code and Codex, without sitra's environment: take the name from sitra's config.
-	const name = process.env.SITRA_USER_NAME?.trim() || readConfig(sitra).name;
-	process.exitCode = runGrimoireCli(rest, {
+	const config = readConfig(sitra);
+	const name = process.env.SITRA_USER_NAME?.trim() || config.name;
+	process.exitCode = await runGrimoireCli(rest, {
 		home: homedir(),
-		env: { ...process.env, ...(name ? { SITRA_USER_NAME: name } : {}) },
+		env: {
+			PI_CODING_AGENT_DIR: profileDir(sitra),
+			...learnEnv(config),
+			...process.env,
+			...(name ? { SITRA_USER_NAME: name } : {}),
+		},
 		repoRoot,
 		cwd: process.cwd(),
 		readStdin: () => (stdin.isTTY ? "" : readFileSync(0, "utf8")),

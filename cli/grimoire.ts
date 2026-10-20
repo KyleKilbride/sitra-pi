@@ -4,6 +4,7 @@
  * imports aren't) and the catalogue through a SessionStart hook. Codex loads both through a SessionStart hook with a
  * raised `additionalContextLimit`. Pure functions here; files and processes are passed in.
  */
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	closeSync,
@@ -30,8 +31,20 @@ import {
 	searchEntries,
 	writeClaudeRoot,
 } from "../extensions/grimoire.ts";
+import {
+	captureMoment,
+	casesFromMoments,
+	claimMoment,
+	learnFromMoment,
+	learningOn,
+	pauseOutcomes,
+	recordPause,
+	recordPauseFollowUp,
+	releaseMoment,
+	undecidedMoments,
+} from "../extensions/learn.ts";
 import { shellQuote } from "../extensions/runs.ts";
-import { mainCheckout } from "../extensions/sessions.ts";
+import { mainCheckout, readLastLines } from "../extensions/sessions.ts";
 import {
 	actionFromHook,
 	entriesForAction,
@@ -116,6 +129,8 @@ export function hooksWithoutGrimoire<T extends HooksFile>(settings: T): T & { ho
 export interface GrimoireHooks {
 	/** The SessionStart command (root and catalogue). */
 	session: string;
+	/** The UserPromptSubmit command (records the moment for learning). */
+	prompt?: string;
 	/** The PreToolUse command (rules tied to actions), and which tools it watches. */
 	tool?: string;
 	toolMatcher?: string;
@@ -141,6 +156,12 @@ export function hooksWithGrimoire<T extends HooksFile>(
 		...clean.hooks,
 		SessionStart: [...(clean.hooks.SessionStart ?? []), { matcher: MATCHER, hooks: [session] }],
 	};
+	if (ours.prompt) {
+		hooks.UserPromptSubmit = [
+			...(clean.hooks.UserPromptSubmit ?? []),
+			{ hooks: [{ type: "command", command: ours.prompt, timeout: 10 }] },
+		];
+	}
 	if (ours.tool) {
 		const group: MatcherGroup = { hooks: [{ type: "command", command: ours.tool, timeout: 10 }] };
 		if (ours.toolMatcher) group.matcher = ours.toolMatcher;
@@ -197,11 +218,22 @@ export function toolHookOutput(dir: string, payload: string): string {
 	try {
 		const input: unknown = JSON.parse(payload);
 		if (!input || typeof input !== "object") return "";
-		const { session_id, cwd, tool_name, tool_input } = input as Record<string, unknown>;
+		const { session_id, cwd, tool_name, tool_input, turn_id } = input as Record<string, unknown>;
 		if (typeof tool_name !== "string" || !existsSync(dir)) return "";
 		const entries = listEntries(dir).filter((e) => e.when?.length);
 		if (entries.length === 0) return "";
-		const session = sessionShown(dir, String(session_id ?? "unknown"));
+		const sessionId = String(session_id ?? "unknown");
+		const when = typeof turn_id === "string" ? { turn: turn_id } : {};
+		const call = {
+			tool: tool_name,
+			input: tool_input && typeof tool_input === "object" ? (tool_input as Record<string, unknown>) : {},
+		};
+		try {
+			recordPauseFollowUp(dir, sessionId, call, when);
+		} catch {
+			// Measuring never gets in the way of a rule.
+		}
+		const session = sessionShown(dir, sessionId);
 		const action = actionFromHook(tool_name, tool_input);
 		const fresh = entriesForAction(entries, action, typeof cwd === "string" ? cwd : process.cwd()).filter(
 			(e) => !session.has(e.file),
@@ -210,6 +242,17 @@ export function toolHookOutput(dir: string, payload: string): string {
 		const claimed = pauseMessage(fresh, dir).included.filter((e) => session.claim(e.file));
 		session.cleanUp();
 		if (claimed.length === 0) return "";
+		try {
+			recordPause(
+				dir,
+				sessionId,
+				claimed.map((e) => e.file),
+				call,
+				when,
+			);
+		} catch {
+			// Measuring never gets in the way of a rule.
+		}
 		return JSON.stringify({
 			hookSpecificOutput: {
 				hookEventName: "PreToolUse",
@@ -252,6 +295,89 @@ export interface CliDeps {
 	cwd: string;
 	readStdin(): string;
 	log(line: string): void;
+	/** Asks a model (system, user) for the learner; defaults to a non-interactive `pi -p` run. */
+	ask?(system: string, user: string): Promise<string>;
+}
+
+/** The model the learner asks: `SITRA_LEARN_MODEL`, else Gemini 4 Argon (best on labelled corrections, see docs). */
+export const DEFAULT_LEARN_MODEL = "google/gemini-4-argon";
+
+/** One non-interactive Pi call with no extensions, tools or session: input closed, two-minute limit. */
+function askPi(env: Record<string, string | undefined>): (system: string, user: string) => Promise<string> {
+	const model = env.SITRA_LEARN_MODEL?.trim() || DEFAULT_LEARN_MODEL;
+	return (system, user) =>
+		new Promise((resolve, reject) => {
+			const child = spawn(
+				"pi",
+				[
+					"-p",
+					"--no-session",
+					"--no-extensions",
+					"--no-skills",
+					"--no-context-files",
+					"--no-tools",
+					"--no-mcp",
+					"--no-prompt-templates",
+					"--model",
+					model,
+					"--system-prompt",
+					system,
+					user,
+				],
+				{ env: { ...env, SITRA_LEARNING: "1" }, stdio: ["ignore", "pipe", "ignore"], timeout: 120_000 },
+			);
+			let out = "";
+			child.stdout.on("data", (d) => {
+				out += d;
+			});
+			child.on("error", reject);
+			child.on("close", (code) => (code === 0 ? resolve(out.trim()) : reject(new Error(`pi exited ${code}`))));
+		});
+}
+
+/** Decides undecided moments, oldest first, until `limit` have been claimed; claims keep parallel learners apart. */
+export async function learnAll(
+	dir: string,
+	ask: (s: string, u: string) => Promise<string>,
+	log: (l: string) => void,
+	limit = 10,
+): Promise<void> {
+	let done = 0;
+	for (const id of undecidedMoments(dir)) {
+		if (done >= limit) break;
+		if (!claimMoment(dir, id)) continue;
+		done++;
+		try {
+			const r = await learnFromMoment(dir, id, ask);
+			log(
+				`${id}: ${r.verdict}${r.proposal ? ` → ${r.proposal}` : ""}${r.skipped ? ` (skipped: ${r.skipped})` : ""}${r.error ? ` (${r.error})` : ""}`,
+			);
+		} finally {
+			releaseMoment(dir, id);
+		}
+	}
+}
+
+/** The UserPromptSubmit hook: record the moment and hand it to the learner. Silent, and never in the way. */
+function promptHook(
+	dir: string,
+	tool: "claude" | "codex",
+	payload: string,
+	env: Record<string, string | undefined>,
+): void {
+	try {
+		const input: unknown = JSON.parse(payload);
+		if (!input || typeof input !== "object") return;
+		const { prompt, transcript_path, cwd } = input as Record<string, unknown>;
+		if (typeof prompt !== "string" || !learningOn(env)) return;
+		const transcript =
+			typeof transcript_path === "string" && existsSync(transcript_path)
+				? readLastLines(transcript_path, 400, { maxBytes: 1_000_000 })
+				: "";
+		captureMoment(dir, env, { harness: tool, cwd: typeof cwd === "string" ? cwd : "", message: prompt, transcript });
+	} catch {
+		// Never block the person's message.
+	}
 }
 
 function readJson(file: string): HooksFile {
@@ -276,7 +402,7 @@ export function installGrimoireHooks(
 	remove = false,
 ): void {
 	const where = real(dir);
-	const hook = (tool: string, kind?: "tool") =>
+	const hook = (tool: string, kind?: "tool" | "prompt") =>
 		`${shellQuote(join(deps.repoRoot, "bin", "sitra.ts"))} grimoire hook ${tool}${kind ? ` ${kind}` : ""} --dir ${shellQuote(where)}`;
 	const claudeDir = join(deps.home, ".claude");
 	const codexDir = join(deps.home, ".codex");
@@ -293,6 +419,7 @@ export function installGrimoireHooks(
 				? hooksWithoutGrimoire(current)
 				: hooksWithGrimoire(current, {
 						session: hook("claude"),
+						prompt: hook("claude", "prompt"),
 						tool: hook("claude", "tool"),
 						toolMatcher: CLAUDE_TOOL_MATCHER,
 					}),
@@ -310,6 +437,7 @@ export function installGrimoireHooks(
 				? hooksWithoutGrimoire(current)
 				: hooksWithGrimoire(current, {
 						session: hook("codex"),
+						prompt: hook("codex", "prompt"),
 						tool: hook("codex", "tool"),
 						toolMatcher: CODEX_TOOL_MATCHER,
 						additionalContextLimit: CODEX_CONTEXT_TOKENS,
@@ -326,7 +454,7 @@ export function installGrimoireHooks(
 }
 
 /** Runs `sitra grimoire <command>`. Returns the exit code. */
-export function runGrimoireCli(args: readonly string[], deps: CliDeps): number {
+export function runGrimoireCli(args: readonly string[], deps: CliDeps): number | Promise<number> {
 	const at = args.indexOf("--dir");
 	const given = at === -1 ? undefined : args[at + 1];
 	const [command, ...rest] = at === -1 ? args : [...args.slice(0, at), ...args.slice(at + 2)];
@@ -346,20 +474,28 @@ export function runGrimoireCli(args: readonly string[], deps: CliDeps): number {
 				if (out) deps.log(out);
 				return 0;
 			}
+			if (rest[1] === "prompt") {
+				promptHook(dir, tool, payload, deps.env);
+				return 0;
+			}
 			if (tool === "claude" && existsSync(dir)) writeClaudeRoot(dir);
 			deps.log(hookOutput(tool, dir, who));
 			return 0;
 		}
+		case "learn":
+			return learnAll(dir, deps.ask ?? askPi(deps.env), deps.log).then(() => 0);
 		case "eval": {
 			const file = rest[0];
-			if (!file || !existsSync(file)) {
-				deps.log("Usage: sitra grimoire eval <cases.jsonl>  (one JSON case per line: id, harness, cwd, calls, expect)");
+			if (file && !existsSync(file)) {
+				deps.log("Usage: sitra grimoire eval [cases.jsonl]  (default: the corrections Grimoire has recorded)");
 				return 1;
 			}
-			const cases = readFileSync(file, "utf8")
-				.split("\n")
-				.filter((l) => l.trim())
-				.map((l) => JSON.parse(l) as TriggerCase);
+			const cases = file
+				? readFileSync(file, "utf8")
+						.split("\n")
+						.filter((l) => l.trim())
+						.map((l) => JSON.parse(l) as TriggerCase)
+				: casesFromMoments(dir);
 			const report = evaluateTriggers(listEntries(dir), cases);
 			deps.log(report.summary);
 			for (const c of report.caught) deps.log(`  caught ${c.id}: ${c.fired.join(", ")}`);
@@ -400,12 +536,23 @@ export function runGrimoireCli(args: readonly string[], deps: CliDeps): number {
 			deps.log(
 				`  root: ${root.files.length} files, ${root.chars} characters${root.truncated ? ` (over the ${LIMITS.rootChars} limit; agents see the first part)` : ""}`,
 			);
-			deps.log(`  approved: ${listEntries(dir).length}, waiting for review: ${listProposals(dir).length}`);
+			const proposals = listProposals(dir);
+			const learned = proposals.filter((p) => p.proposedBy === "sitra-learn").length;
+			deps.log(
+				`  approved: ${listEntries(dir).length}, waiting for review: ${proposals.length}${learned ? ` (${learned} learned from corrections)` : ""}`,
+			);
+			const cases = casesFromMoments(dir);
+			if (cases.length > 0) deps.log(`  corrections recorded: ${cases.length} (sitra grimoire eval replays them)`);
+			const outcomes = pauseOutcomes(dir);
+			if (outcomes.length > 0) {
+				deps.log("  rules tied to actions (paused → agent changed course / repeated the call):");
+				for (const o of outcomes) deps.log(`    ${o.pauses} → ${o.changed} / ${o.repeated}  ${o.file}`);
+			}
 			return 0;
 		}
 		default:
 			deps.log(
-				"Usage: sitra grimoire [status | search <words> | eval <cases.jsonl> | install | uninstall | import [repo] | hook claude|codex [tool]]",
+				"Usage: sitra grimoire [status | search <words> | eval [cases.jsonl] | learn | install | uninstall | import [repo] | hook claude|codex [tool|prompt]]",
 			);
 			return 1;
 	}
