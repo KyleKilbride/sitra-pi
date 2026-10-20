@@ -22,6 +22,7 @@ import {
 	writeProposal,
 } from "./grimoire.ts";
 import { mainCheckout } from "./sessions.ts";
+import { actionFromPi, entriesForAction, pauseMessage } from "./triggers.ts";
 
 interface Ctx {
 	cwd: string;
@@ -40,6 +41,7 @@ interface ToolResult {
 
 interface Pi {
 	on(event: "session_start", handler: (event: unknown, ctx: Ctx) => void): void;
+	on(event: "tool_call", handler: (event: ToolCall, ctx: Ctx) => { block: true; reason: string } | undefined): void;
 	on(
 		event: "before_agent_start",
 		handler: (event: { systemPromptOptions: { sections: Record<string, string> } }, ctx: Ctx) => void,
@@ -62,6 +64,11 @@ interface Pi {
 	sendUserMessage(content: string): void;
 	getActiveTools?(): string[];
 	setActiveTools?(tools: string[]): void;
+}
+
+interface ToolCall {
+	toolName: string;
+	input: Record<string, unknown>;
 }
 
 const GRIMOIRE_TOOLS = ["grimoire_propose", "grimoire_search"];
@@ -90,7 +97,30 @@ export default function sitraKnowledge(pi: Pi): void {
 		ctx.ui.setStatus("sitra-grimoire", parts.join(" · "));
 	};
 
+	/** Rules tied to actions already shown in this session; each pauses one action, once. */
+	let shown = new Set<string>();
+
+	pi.on("tool_call", (event, ctx) => {
+		// Anything unexpected (an odd event, a Grimoire it can't read) means no opinion: never block a tool by mistake.
+		try {
+			if (typeof event?.toolName !== "string") return undefined;
+			const g = dir();
+			const tied = listEntries(g).filter((e) => e.when?.length);
+			if (tied.length === 0) return undefined;
+			const input = event.input && typeof event.input === "object" ? event.input : {};
+			const matched = entriesForAction(tied, actionFromPi(event.toolName, input), ctx.cwd, shown);
+			if (matched.length === 0) return undefined;
+			const { text, included } = pauseMessage(matched, g);
+			if (included.length === 0) return undefined;
+			for (const e of included) shown.add(e.file);
+			return { block: true, reason: text };
+		} catch {
+			return undefined;
+		}
+	});
+
 	pi.on("session_start", (_event, ctx) => {
+		shown = new Set();
 		// Claude Code imports the root from this file once `sitra grimoire install` has run; keep it current.
 		const g = dir();
 		if (existsSync(join(g, ".sitra", "root.md"))) {

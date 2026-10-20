@@ -4,7 +4,20 @@
  * imports aren't) and the catalogue through a SessionStart hook. Codex loads both through a SessionStart hook with a
  * raised `additionalContextLimit`. Pure functions here; files and processes are passed in.
  */
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+	closeSync,
+	existsSync,
+	mkdirSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	statSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import {
 	grimoireDir,
@@ -19,6 +32,13 @@ import {
 } from "../extensions/grimoire.ts";
 import { shellQuote } from "../extensions/runs.ts";
 import { mainCheckout } from "../extensions/sessions.ts";
+import {
+	actionFromHook,
+	entriesForAction,
+	evaluateTriggers,
+	pauseMessage,
+	type TriggerCase,
+} from "../extensions/triggers.ts";
 
 /** Claude Code saves hook text over 10,000 characters to a file and shows only a preview; stay under it. */
 export const CLAUDE_CONTEXT_MAX = 9_500;
@@ -93,25 +113,113 @@ export function hooksWithoutGrimoire<T extends HooksFile>(settings: T): T & { ho
 }
 
 /** The settings with exactly one sitra SessionStart hook (Claude Code's settings.json and Codex's hooks.json share this shape). */
+export interface GrimoireHooks {
+	/** The SessionStart command (root and catalogue). */
+	session: string;
+	/** The PreToolUse command (rules tied to actions), and which tools it watches. */
+	tool?: string;
+	toolMatcher?: string;
+	additionalContextLimit?: number;
+}
+
+/**
+ * The settings with exactly one sitra SessionStart hook and, when given, one sitra PreToolUse hook (Claude Code's
+ * settings.json and Codex's hooks.json share this shape).
+ */
 export function hooksWithGrimoire<T extends HooksFile>(
 	settings: T,
-	command: string,
-	options?: { additionalContextLimit?: number },
+	ours: GrimoireHooks,
 ): T & { hooks: Record<string, MatcherGroup[]> } {
 	const clean = hooksWithoutGrimoire(settings);
-	const handler: HookHandler = {
+	const session: HookHandler = {
 		type: "command",
-		command,
+		command: ours.session,
 		timeout: 10,
-		...(options?.additionalContextLimit ? { additionalContextLimit: options.additionalContextLimit } : {}),
+		...(ours.additionalContextLimit ? { additionalContextLimit: ours.additionalContextLimit } : {}),
 	};
+	const hooks: Record<string, MatcherGroup[]> = {
+		...clean.hooks,
+		SessionStart: [...(clean.hooks.SessionStart ?? []), { matcher: MATCHER, hooks: [session] }],
+	};
+	if (ours.tool) {
+		const group: MatcherGroup = { hooks: [{ type: "command", command: ours.tool, timeout: 10 }] };
+		if (ours.toolMatcher) group.matcher = ours.toolMatcher;
+		hooks.PreToolUse = [...(clean.hooks.PreToolUse ?? []), group];
+	}
+	return { ...clean, hooks };
+}
+
+/** Tools whose calls the PreToolUse hook checks: shell, file edits and reads, and helpers. */
+export const CLAUDE_TOOL_MATCHER = "Bash|Read|Edit|MultiEdit|Write|NotebookEdit|Task|Agent";
+export const CODEX_TOOL_MATCHER = "Bash|apply_patch|spawn_agent";
+
+/**
+ * What a Claude Code or Codex session has already been shown, under `<grimoire>/.sitra/shown/<session>/`: one file per
+ * rule, created atomically, so hook processes running in parallel never lose each other's notes. Every call touches
+ * the session's folder; folders untouched for three days belong to finished sessions and are removed.
+ */
+export function sessionShown(dir: string, sessionId: string) {
+	const root = join(dir, ".sitra", "shown");
+	const folder = join(root, sessionId.replace(/[^\w.-]/g, "_").slice(0, 120) || "unknown");
+	mkdirSync(folder, { recursive: true });
+	const now = new Date();
+	utimesSync(folder, now, now);
+	const mark = (file: string) => join(folder, createHash("sha1").update(file).digest("hex").slice(0, 16));
 	return {
-		...clean,
-		hooks: {
-			...clean.hooks,
-			SessionStart: [...(clean.hooks.SessionStart ?? []), { matcher: MATCHER, hooks: [handler] }],
+		has: (file: string) => existsSync(mark(file)),
+		/** True when this call is the one that recorded it. */
+		claim(file: string): boolean {
+			try {
+				closeSync(openSync(mark(file), "wx"));
+				return true;
+			} catch {
+				return false;
+			}
+		},
+		cleanUp() {
+			const cutoff = Date.now() - 3 * 86_400_000;
+			for (const f of readdirSync(root)) {
+				try {
+					if (statSync(join(root, f)).mtimeMs < cutoff) rmSync(join(root, f), { recursive: true, force: true });
+				} catch {
+					// Another hook got there first.
+				}
+			}
 		},
 	};
+}
+
+/**
+ * The PreToolUse hook's answer: a deny carrying the matching rules the first time an action needs them in this
+ * session, otherwise "" (no opinion). Anything unexpected, from an odd payload to an unreadable folder, is "".
+ */
+export function toolHookOutput(dir: string, payload: string): string {
+	try {
+		const input: unknown = JSON.parse(payload);
+		if (!input || typeof input !== "object") return "";
+		const { session_id, cwd, tool_name, tool_input } = input as Record<string, unknown>;
+		if (typeof tool_name !== "string" || !existsSync(dir)) return "";
+		const entries = listEntries(dir).filter((e) => e.when?.length);
+		if (entries.length === 0) return "";
+		const session = sessionShown(dir, String(session_id ?? "unknown"));
+		const action = actionFromHook(tool_name, tool_input);
+		const fresh = entriesForAction(entries, action, typeof cwd === "string" ? cwd : process.cwd()).filter(
+			(e) => !session.has(e.file),
+		);
+		if (fresh.length === 0) return "";
+		const claimed = pauseMessage(fresh, dir).included.filter((e) => session.claim(e.file));
+		session.cleanUp();
+		if (claimed.length === 0) return "";
+		return JSON.stringify({
+			hookSpecificOutput: {
+				hookEventName: "PreToolUse",
+				permissionDecision: "deny",
+				permissionDecisionReason: pauseMessage(claimed, dir).text,
+			},
+		});
+	} catch {
+		return "";
+	}
 }
 
 /** CLAUDE.md with one sitra-managed block importing the root file, kept where it is; with no file, the block is removed. */
@@ -168,8 +276,8 @@ export function installGrimoireHooks(
 	remove = false,
 ): void {
 	const where = real(dir);
-	const hook = (tool: string) =>
-		`${shellQuote(join(deps.repoRoot, "bin", "sitra.ts"))} grimoire hook ${tool} --dir ${shellQuote(where)}`;
+	const hook = (tool: string, kind?: "tool") =>
+		`${shellQuote(join(deps.repoRoot, "bin", "sitra.ts"))} grimoire hook ${tool}${kind ? ` ${kind}` : ""} --dir ${shellQuote(where)}`;
 	const claudeDir = join(deps.home, ".claude");
 	const codexDir = join(deps.home, ".codex");
 	let touched = false;
@@ -179,7 +287,16 @@ export function installGrimoireHooks(
 		const md = join(claudeDir, "CLAUDE.md");
 		const before = existsSync(md) ? readFileSync(md, "utf8") : "";
 		const after = claudeMdWithGrimoire(before, remove ? undefined : writeClaudeRoot(where));
-		writeJson(settings, remove ? hooksWithoutGrimoire(current) : hooksWithGrimoire(current, hook("claude")));
+		writeJson(
+			settings,
+			remove
+				? hooksWithoutGrimoire(current)
+				: hooksWithGrimoire(current, {
+						session: hook("claude"),
+						tool: hook("claude", "tool"),
+						toolMatcher: CLAUDE_TOOL_MATCHER,
+					}),
+		);
 		if (after !== before) writeFileSync(md, after);
 		deps.log(`${remove ? "Removed Grimoire from" : "Claude Code loads Grimoire:"} ${settings} and ${md}`);
 		touched = true;
@@ -191,7 +308,12 @@ export function installGrimoireHooks(
 			hooks,
 			remove
 				? hooksWithoutGrimoire(current)
-				: hooksWithGrimoire(current, hook("codex"), { additionalContextLimit: CODEX_CONTEXT_TOKENS }),
+				: hooksWithGrimoire(current, {
+						session: hook("codex"),
+						tool: hook("codex", "tool"),
+						toolMatcher: CODEX_TOOL_MATCHER,
+						additionalContextLimit: CODEX_CONTEXT_TOKENS,
+					}),
 		);
 		deps.log(
 			remove
@@ -213,13 +335,35 @@ export function runGrimoireCli(args: readonly string[], deps: CliDeps): number {
 	switch (command) {
 		case "hook": {
 			const tool = rest[0] === "codex" ? "codex" : "claude";
+			let payload = "";
 			try {
-				deps.readStdin();
+				payload = deps.readStdin();
 			} catch {
-				// The hook's input isn't needed: the context is the same for every session.
+				// The session hook doesn't need its input; the tool hook without input has nothing to check.
+			}
+			if (rest[1] === "tool") {
+				const out = toolHookOutput(dir, payload);
+				if (out) deps.log(out);
+				return 0;
 			}
 			if (tool === "claude" && existsSync(dir)) writeClaudeRoot(dir);
 			deps.log(hookOutput(tool, dir, who));
+			return 0;
+		}
+		case "eval": {
+			const file = rest[0];
+			if (!file || !existsSync(file)) {
+				deps.log("Usage: sitra grimoire eval <cases.jsonl>  (one JSON case per line: id, harness, cwd, calls, expect)");
+				return 1;
+			}
+			const cases = readFileSync(file, "utf8")
+				.split("\n")
+				.filter((l) => l.trim())
+				.map((l) => JSON.parse(l) as TriggerCase);
+			const report = evaluateTriggers(listEntries(dir), cases);
+			deps.log(report.summary);
+			for (const c of report.caught) deps.log(`  caught ${c.id}: ${c.fired.join(", ")}`);
+			for (const c of report.wrongOnly) deps.log(`  other  ${c.id}: ${c.fired.join(", ")}`);
 			return 0;
 		}
 		case "search": {
@@ -261,7 +405,7 @@ export function runGrimoireCli(args: readonly string[], deps: CliDeps): number {
 		}
 		default:
 			deps.log(
-				"Usage: sitra grimoire [status | search <words> | install | uninstall | import [repo] | hook claude|codex]",
+				"Usage: sitra grimoire [status | search <words> | eval <cases.jsonl> | install | uninstall | import [repo] | hook claude|codex [tool]]",
 			);
 			return 1;
 	}

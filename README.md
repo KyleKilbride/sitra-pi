@@ -102,6 +102,8 @@ every tool.
 - Agents propose with `grimoire_propose` (only ever into `proposals/`) and look things up with `grimoire_search`.
 - You review with `/grimoire`, one at a time: Accept, Reject, Skip, "Accept this and all the rest", or Stop.
 - `/grimoire-reflect` asks the agent what the session taught that future agents need.
+- **Rules tied to actions:** an entry with `when: ["command:gh pr create"]` pauses the first matching action in a
+  session and shows the agent that rule first, in Pi, Claude Code and Codex alike. `sitra grimoire eval` measures them.
 - **Claude Code and Codex too:** `sitra grimoire install` (also offered by `sitra init`) loads the same Grimoire there.
   `sitra grimoire uninstall` takes it out again.
 - **Coming from `/kb`:** `sitra grimoire import` copies a repo's old `.pi/knowledge` into `proposals/`, skipping what
