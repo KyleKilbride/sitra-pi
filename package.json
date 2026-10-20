@@ -29,7 +29,8 @@
 		"extensions": [
 			"./extensions/knowledge.ts",
 			"./extensions/lead.ts",
-			"./extensions/tower.ts"
+			"./extensions/tower.ts",
+			"./extensions/sharpen-pi.ts"
 		]
 	},
 	"scripts": {
