@@ -7,7 +7,6 @@ import { execFileSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Type } from "typebox";
-import { knowledgeRepo } from "./kb.ts";
 import {
 	auditSessionsFriction,
 	createTailReader,
@@ -18,6 +17,7 @@ import {
 	gitBranch,
 	groundingPrompt,
 	listSessions,
+	mainCheckout,
 	moveInbox,
 	prepareWorktree,
 	readLastLines,
@@ -45,7 +45,7 @@ export function towerRules(userName?: string, towerName?: string): string {
 - **What to flag for ${who}:**
   - Anyone in \`waiting_for_user\` (needs ${who}'s answer).
   - Anyone who looks off track: drifting from the task ${who} gave them, repeating the same failing tool or test, or stopped unexpectedly.
-- **Improving sitra (\`audit_sessions\`):** use \`audit_sessions\` to spot repeated tool errors and friction across sessions. Propose durable setup improvements with \`kb_propose\` (kind \`setup\`), or edit the sitra repo directly when ${who} gives the go.
+- **Improving sitra (\`audit_sessions\`):** use \`audit_sessions\` to spot repeated tool errors and friction across sessions. Propose durable setup improvements with \`grimoire_propose\` (kind \`setup\`), or edit the sitra repo directly when ${who} gives the go.
 - **How to talk to ${who}:** the headline or ask first, in one line, then a few short lines in plain everyday words. Name the project and branch — never send ${who} to look up session IDs or file paths.
 `;
 }
@@ -225,7 +225,7 @@ export default function sitraTower(pi: Pi): void {
 					discovered: true,
 					pid: process.pid,
 					cwd,
-					repo: knowledgeRepo(cwd),
+					repo: mainCheckout(cwd),
 					...(gitBranch(cwd) ? { branch: gitBranch(cwd) } : {}),
 					sessionFile,
 					...(a.pane_id ? { paneId: a.pane_id } : {}),
@@ -271,7 +271,7 @@ export default function sitraTower(pi: Pi): void {
 			...(process.env.PI_SUBAGENT_AGENT ? { agent: process.env.PI_SUBAGENT_AGENT } : {}),
 			pid: process.pid,
 			cwd: ctx.cwd,
-			repo: knowledgeRepo(ctx.cwd),
+			repo: mainCheckout(ctx.cwd),
 			...(gitBranch(ctx.cwd) ? { branch: gitBranch(ctx.cwd) } : {}),
 			...(sessionFile ? { sessionFile } : {}),
 			...(process.env.PI_SUBAGENT_PARENT_SESSION ? { parentSessionFile: process.env.PI_SUBAGENT_PARENT_SESSION } : {}),
@@ -397,7 +397,7 @@ export default function sitraTower(pi: Pi): void {
 				message: Type.String({ description: "Short status or answer for the tower." }),
 			}),
 			async execute(_id, params, _signal, _onUpdate, ctx) {
-				const repo = basename(knowledgeRepo(ctx.cwd));
+				const repo = basename(mainCheckout(ctx.cwd));
 				const branch = gitBranch(ctx.cwd);
 				const label = branch ? `${repo} (${branch})` : repo;
 				const sent = sendInboxMessage(profileDir, {

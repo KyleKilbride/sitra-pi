@@ -1,23 +1,27 @@
-import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
-import { renderEntry } from "../extensions/kb.ts";
+import { renderEntry } from "../extensions/grimoire.ts";
 
 const EXT = fileURLToPath(new URL("../extensions/knowledge.ts", import.meta.url));
 const MODEL = fileURLToPath(new URL("./fixtures/propose-model.ts", import.meta.url));
 
-test("a real pi session sees the approved knowledge and can only propose, not write, knowledge", async () => {
-	const repo = realpathSync(mkdtempSync(join(tmpdir(), "sitra-e2e-")));
-	execFileSync("git", ["init", "-q", repo]);
-	mkdirSync(join(repo, ".pi/knowledge/lessons"), { recursive: true });
+test("a real pi session starts with Grimoire's root and catalogue, and can only propose, not write, knowledge", async () => {
+	const work = realpathSync(mkdtempSync(join(tmpdir(), "sitra-e2e-")));
+	const grimoire = realpathSync(mkdtempSync(join(tmpdir(), "sitra-e2e-grimoire-")));
+	mkdirSync(join(grimoire, "root"));
+	writeFileSync(join(grimoire, "root", "README.md"), "# How Sam works\nShort replies, the ask first.\n");
+	mkdirSync(join(grimoire, "kinds", "lessons"), { recursive: true });
+	const approved = join(grimoire, "kinds", "lessons", "2026-10-08-read-evals.md");
 	writeFileSync(
-		join(repo, ".pi/knowledge/lessons/2026-10-08-read-evals.md"),
+		approved,
 		renderEntry({
 			kind: "lesson",
 			title: "Read the eval failures before claiming anything",
+			summary: "Open the failing cases first.",
 			body: "b",
 			date: "2026-10-08",
 		}),
@@ -38,12 +42,16 @@ test("a real pi session sees the approved knowledge and can only propose, not wr
 				"--model",
 				"sitra-faux/script",
 				"--tools",
-				"read,kb_propose",
+				"read,grimoire_propose,grimoire_search",
 			],
 			{
-				cwd: repo,
-				// A throwaway profile, so this test never adds its temp repo to the real tower's project list.
-				env: { ...process.env, PI_CODING_AGENT_DIR: mkdtempSync(join(tmpdir(), "sitra-e2e-profile-")) },
+				cwd: work,
+				env: {
+					...process.env,
+					SITRA_GRIMOIRE: grimoire,
+					SITRA_USER_NAME: "Sam",
+					PI_CODING_AGENT_DIR: mkdtempSync(join(tmpdir(), "sitra-e2e-profile-")),
+				},
 				stdio: ["pipe", "pipe", "inherit"],
 			},
 		);
@@ -62,9 +70,14 @@ test("a real pi session sees the approved knowledge and can only propose, not wr
 		child.stdin.write(`${JSON.stringify({ type: "prompt", message: "go" })}\n`);
 	});
 	const system = records.find((r) => r.type === "message_end" && r.message?.role === "system");
-	expect(system?.message?.sections?.["project-knowledge"]).toContain("Read the eval failures before claiming anything");
-	expect(readdirSync(join(repo, ".pi/knowledge/proposals"))).toEqual([
-		"2026-10-08-never-force-push-a-colleague-s-branch.md".replace("2026-10-08", new Date().toISOString().slice(0, 10)),
+	const section = system?.message?.sections?.grimoire ?? "";
+	expect(section).toContain("Short replies, the ask first.");
+	expect(section).toContain("Read the eval failures before claiming anything: Open the failing cases first.");
+	expect(section).toContain("Only Sam approves");
+	expect(readdirSync(join(grimoire, "proposals"))).toEqual([
+		`${new Date().toISOString().slice(0, 10)}-never-force-push-a-colleague-s-branch.md`,
 	]);
-	expect(readdirSync(join(repo, ".pi/knowledge"))).not.toContain("warnings");
+	expect(readdirSync(join(grimoire, "kinds"))).toEqual(["lessons"]);
+	expect(readdirSync(join(grimoire, "kinds", "lessons"))).toEqual(["2026-10-08-read-evals.md"]);
+	expect(readFileSync(approved, "utf8")).toContain("Open the failing cases first.");
 }, 60_000);

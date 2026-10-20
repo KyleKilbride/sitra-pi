@@ -1,13 +1,17 @@
 #!/usr/bin/env node
-/** sitra: `sitra init` sets up; `sitra tower` (or `sitra <name>`) starts your number 2; `sitra` starts a worker lead. */
+/**
+ * sitra: `sitra init` sets up; `sitra tower` (or `sitra <name>`) starts your number 2; `sitra` starts a worker lead;
+ * `sitra grimoire` manages the shared knowledge every agent starts with.
+ */
 import { spawnSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { profileDir, readConfig, sitraHome } from "../cli/config.ts";
+import { runGrimoireCli } from "../cli/grimoire.ts";
 import { type ExecResult, runInit } from "../cli/init.ts";
 import { ensureTowerName, isRadarCommand, isTowerCommand, launchCommand, piEnv } from "../cli/launch.ts";
 import { runRadarTui } from "../extensions/radar.ts";
@@ -16,7 +20,18 @@ const repoRoot = dirname(dirname(realpathSync(fileURLToPath(import.meta.url))));
 const [first, ...rest] = process.argv.slice(2);
 const sitra = sitraHome(process.env, homedir());
 
-if (first === "init") {
+if (first === "grimoire") {
+	// Hooks run inside Claude Code and Codex, without sitra's environment: take the name from sitra's config.
+	const name = process.env.SITRA_USER_NAME?.trim() || readConfig(sitra).name;
+	process.exitCode = runGrimoireCli(rest, {
+		home: homedir(),
+		env: { ...process.env, ...(name ? { SITRA_USER_NAME: name } : {}) },
+		repoRoot,
+		cwd: process.cwd(),
+		readStdin: () => (stdin.isTTY ? "" : readFileSync(0, "utf8")),
+		log: (line) => console.log(line),
+	});
+} else if (first === "init") {
 	const yes = rest.includes("--yes");
 	const interactive = stdin.isTTY && !yes;
 	const rl = interactive ? createInterface({ input: stdin, output: stdout }) : undefined;
