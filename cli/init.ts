@@ -21,8 +21,9 @@ export const HERDR_URL = "https://herdr.dev";
 export const PACKAGES = [
 	"npm:@juicesharp/rpiv-ask-user-question@2.12.0",
 	"npm:@juicesharp/rpiv-todo@2.12.0",
-	"npm:pi-powerline-footer@0.19.0",
+	"npm:pi-powerline-footer@0.20.1",
 	"npm:pi-memory@0.4.2",
+	"npm:pi-web-access@0.40.0",
 	"git:github.com/edxeth/pi-subagents@cf6dbf41c17986f3882e6804a68e8fb8282d25e6",
 ];
 
