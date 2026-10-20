@@ -60,7 +60,11 @@ interface Pi {
 	}): void;
 	registerCommand(name: string, command: { description: string; handler(args: string, ctx: Ctx): Promise<void> }): void;
 	sendUserMessage(content: string): void;
+	getActiveTools?(): string[];
+	setActiveTools?(tools: string[]): void;
 }
+
+const GRIMOIRE_TOOLS = ["grimoire_propose", "grimoire_search"];
 
 const REFLECT =
 	"Look back over this session. What did we learn that a future agent must know: a mistake and what would have caught it, how something really works, a decision and its reason, or a change to the agent setup? Check Grimoire first (the catalogue in your prompt, or grimoire_search) and skip anything it already says. Propose at most 3 entries with grimoire_propose, each with evidence. For a lesson, say what failed, the verified cause, the fix, whether it held, and what would catch it next time. Then stop.";
@@ -100,6 +104,13 @@ export default function sitraKnowledge(pi: Pi): void {
 	});
 
 	pi.on("before_agent_start", (event) => {
+		// A resumed conversation restores the tool list it was saved with, so one saved before Grimoire never sees
+		// these tools. Helpers keep the list their agent definition chose.
+		if (!process.env.PI_SUBAGENT_NAME && pi.getActiveTools && pi.setActiveTools) {
+			const active = pi.getActiveTools();
+			const missing = GRIMOIRE_TOOLS.filter((t) => !active.includes(t));
+			if (missing.length > 0) pi.setActiveTools([...active, ...missing]);
+		}
 		const g = dir();
 		event.systemPromptOptions.sections.grimoire = grimoireSection(g, loadRoot(g), listEntries(g), { who: who() });
 	});
