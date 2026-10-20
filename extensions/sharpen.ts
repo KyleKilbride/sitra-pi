@@ -167,3 +167,52 @@ export const HANDOVER_INSTRUCTIONS = [
 	"5. Next steps: the concrete next actions, and anything waiting on the person.",
 	"Be specific: names, paths, numbers. Leave out exploration that led nowhere unless it rules something out.",
 ].join("\n");
+
+const REQUESTS_HEADING = "## The person's requests, verbatim (carried by sitra)";
+
+/** One line of the transcript a handover summarises: requests and replies whole, calls by their main argument, results clipped. */
+function transcriptLine(m: Msg): string | undefined {
+	if (m.role === "compactionSummary" && typeof m.summary === "string") return `[Earlier handover]\n${m.summary}`;
+	if (m.role === "user") return `Person: ${textOf(m)}`;
+	if (m.role === "assistant") {
+		const out = parts(m).flatMap((p) =>
+			p?.type === "text" && p.text
+				? [p.text]
+				: p?.type === "toolCall" || p?.type === "tool_use"
+					? [`→ ${p.name ?? "tool"} ${describeArgs(p.arguments)}`]
+					: [],
+		);
+		return out.length ? `Agent: ${out.join("\n")}` : undefined;
+	}
+	if (m.role === "toolResult") return `Result${m.isError ? " (error)" : ""}: ${clip(textOf(m), 1_500)}`;
+	return undefined;
+}
+
+/**
+ * The prompt for a handover written by sitra (mid-run, where Pi's own compaction can't be steered): the handover
+ * instructions and a compact transcript, the most recent part kept when it is too long.
+ */
+export function handoverPrompt(messages: readonly Msg[], maxChars = 300_000): string {
+	let transcript = messages.flatMap((m) => transcriptLine(m) ?? []).join("\n\n");
+	if (transcript.length > maxChars) transcript = `…\n${transcript.slice(-maxChars)}`;
+	return `${HANDOVER_INSTRUCTIONS}\n\nThe conversation so far:\n\n${transcript}`;
+}
+
+/**
+ * The handover the next context starts from: the model's summary, then the person's requests verbatim. The requests
+ * are copied from the previous handover rather than summarised again, so they don't fade over many rounds.
+ */
+export function handoverSummary(reply: string, messages: readonly Msg[]): string {
+	const carried: string[] = [];
+	const previous = messages.findLast((m) => m.role === "compactionSummary" && typeof m.summary === "string");
+	const section = (previous?.summary as string | undefined)?.split(REQUESTS_HEADING)[1];
+	if (section) {
+		for (const line of section.split("\n")) if (line.startsWith("- ")) carried.push(line.slice(2));
+	}
+	const all = [
+		...new Set([...carried, ...personRequests(messages, { max: 1000, chars: 600 }).map((r) => r.replace(/\n+/g, " "))]),
+	];
+	const kept = all.length <= 12 ? all : [all[0] as string, ...all.slice(-11)];
+	const body = reply.split(REQUESTS_HEADING)[0]?.trimEnd() ?? "";
+	return kept.length ? `${body}\n\n${REQUESTS_HEADING}\n${kept.map((r) => `- ${r}`).join("\n")}` : body;
+}

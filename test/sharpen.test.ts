@@ -1,6 +1,8 @@
 import { describe, expect, test } from "vitest";
 import {
 	HANDOVER_INSTRUCTIONS,
+	handoverPrompt,
+	handoverSummary,
 	handoverThreshold,
 	helperBrief,
 	type Msg,
@@ -140,5 +142,52 @@ describe("handing over", () => {
 		expect(handoverThreshold(32_000)).toBe(16_000); // half the window for small windows, so there's room to work
 		expect(HANDOVER_INSTRUCTIONS).toMatch(/decisions/i);
 		expect(HANDOVER_INSTRUCTIONS).toMatch(/verbatim|own words/i);
+	});
+});
+
+describe("the handover prompt", () => {
+	test("holds the instructions and a readable transcript: requests, calls with their main argument, clipped results", () => {
+		const prompt = handoverPrompt([
+			{ role: "user", content: [{ type: "text", text: "Fix the parser" }] },
+			{
+				role: "assistant",
+				content: [
+					{ type: "text", text: "Reading it." },
+					{ type: "toolCall", id: "1", name: "read", arguments: { path: "src/parse.ts" } },
+				],
+			},
+			{
+				role: "toolResult",
+				toolCallId: "1",
+				toolName: "read",
+				content: [{ type: "text", text: `start ${"y".repeat(10_000)}` }],
+			},
+		]);
+		expect(prompt).toContain(HANDOVER_INSTRUCTIONS);
+		expect(prompt).toContain("Fix the parser");
+		expect(prompt).toContain("Reading it.");
+		expect(prompt).toContain("read src/parse.ts");
+		expect(prompt).toContain("start y");
+		expect(prompt.length).toBeLessThan(HANDOVER_INSTRUCTIONS.length + 4_000);
+	});
+});
+
+describe("the handover summary", () => {
+	test("ends with the person's requests verbatim, carried through later handovers instead of re-summarised", () => {
+		const first = handoverSummary("1. Goal: parsers", [
+			{ role: "user", content: [{ type: "text", text: "Fix every parser. Don't run the full suite." }] },
+			{ role: "user", content: [{ type: "text", text: "ok" }] },
+		]);
+		expect(first.startsWith("1. Goal: parsers")).toBe(true);
+		expect(first).toContain("Don't run the full suite.");
+		expect(first).not.toMatch(/^- ok$/m);
+		const second = handoverSummary("1. Goal: parsers, round two", [
+			{ role: "compactionSummary", summary: first },
+			{ role: "user", content: [{ type: "text", text: "Also skip the legacy folder." }] },
+		]);
+		expect(second).toContain("Don't run the full suite.");
+		expect(second).toContain("Also skip the legacy folder.");
+		expect(second.match(/Don't run the full suite\./g)).toHaveLength(1);
+		expect(second).not.toContain("1. Goal: parsers\n");
 	});
 });
