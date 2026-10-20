@@ -41,6 +41,8 @@ export interface SessionRecord {
 	/** Found through herdr, not the sitra registry: an older or non-sitra Pi with no inbox. */
 	discovered?: boolean;
 	waitingFor?: string;
+	/** When the current wait for the person began; unchanged while the same question stays open. */
+	waitingSince?: string;
 	task?: string;
 	startedAt: string;
 	updatedAt: string;
@@ -119,7 +121,7 @@ export function detectSessionAlerts(
 		const where = sessionLabel(r);
 		if (r.status === "waiting_for_user") {
 			alerts.push({
-				key: `waiting:${r.id}:${r.updatedAt}`,
+				key: `waiting:${r.id}:${r.waitingSince ?? r.updatedAt}`,
 				sessionId: r.id,
 				kind: "waiting_for_user",
 				summary: `${where} is waiting for your answer${r.task ? ` (task: ${r.task})` : ""}.`,
@@ -154,7 +156,7 @@ export function detectSessionAlerts(
 			}
 			if (streak >= 3) {
 				alerts.push({
-					key: `errors:${r.id}:${r.updatedAt}`,
+					key: `errors:${r.id}:${streak}:${lastError}`,
 					sessionId: r.id,
 					kind: "repeated_errors",
 					summary: `${where} hit ${streak} tool errors in a row (${lastError}) and may be stuck.`,
@@ -294,6 +296,12 @@ export function updateSession(
 		};
 		if (patch.status && patch.status !== "waiting_for_user" && !("waitingFor" in patch)) {
 			delete next.waitingFor;
+		}
+		if (next.status === "waiting_for_user") {
+			next.waitingSince =
+				current.status === "waiting_for_user" && current.waitingSince ? current.waitingSince : next.updatedAt;
+		} else {
+			delete next.waitingSince;
 		}
 		writeSession(profileDir, next);
 		return next;

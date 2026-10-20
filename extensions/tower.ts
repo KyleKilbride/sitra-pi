@@ -278,6 +278,7 @@ export default function sitraTower(pi: Pi): void {
 			...(process.env.HERDR_PANE_ID ? { paneId: process.env.HERDR_PANE_ID } : {}),
 			status: patch.status ?? "idle",
 			...(patch.waitingFor ? { waitingFor: patch.waitingFor } : {}),
+			...(patch.status === "waiting_for_user" ? { waitingSince: now } : {}),
 			...(currentTask ? { task: currentTask } : {}),
 			startedAt,
 			updatedAt: now,
