@@ -74,6 +74,15 @@ export default function sitraSharpen(pi: Pi): void {
 		ctx.compact?.({ customInstructions: HANDOVER_INSTRUCTIONS });
 	};
 
+	/**
+	 * One automatic handover per crossing: after one, the context must fall back below the line before another, so a
+	 * handover that can't get under it (a small window, little to summarise) never repeats every turn.
+	 */
+	let armed = true;
+	pi.on("session_start", () => {
+		armed = true;
+	});
+
 	// After Pi has finished its own retries, recovery and follow-ups: compacting earlier (at agent_end) would abort them.
 	pi.on("agent_settled", (event: { aborted?: boolean }, ctx) => {
 		try {
@@ -83,7 +92,10 @@ export default function sitraSharpen(pi: Pi): void {
 			if (!usage?.tokens || !usage.contextWindow) return;
 			// A single huge turn has nothing earlier to summarise; Pi would only report "nothing to compact".
 			const turns = branchMessages(ctx).filter((m) => m.role === "user").length;
-			if (usage.tokens >= handoverThreshold(usage.contextWindow) && turns >= 2) {
+			const over = usage.tokens >= handoverThreshold(usage.contextWindow);
+			if (!over) armed = true;
+			if (over && armed && turns >= 2) {
+				armed = false;
 				handOver(ctx, `The conversation reached ${Math.round(usage.tokens / 1000)}k tokens.`);
 			}
 		} catch {

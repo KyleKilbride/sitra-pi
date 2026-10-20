@@ -137,6 +137,30 @@ describe("handing over", () => {
 		expect(compacts).toHaveLength(1);
 	});
 
+	test("after a handover, it waits until the context has dropped below the line before it can hand over again", () => {
+		const { handlers } = fakePi();
+		const compacts: unknown[] = [];
+		const ctx = (tokens: number) => ({
+			sessionManager: {
+				getBranch: () => [
+					{ type: "message", message: user("a") },
+					{ type: "message", message: user("b") },
+				],
+			},
+			ui: { notify() {} },
+			getContextUsage: () => ({ tokens, contextWindow: 1_000_000 }),
+			compact: (o: unknown) => compacts.push(o),
+		});
+		const settle = (tokens: number) => handlers.get("agent_settled")?.({ aborted: false }, ctx(tokens));
+		settle(170_000);
+		settle(175_000);
+		settle(180_000);
+		expect(compacts).toHaveLength(1);
+		settle(60_000);
+		settle(170_000);
+		expect(compacts).toHaveLength(2);
+	});
+
 	test("/handover compacts now, and each handover is saved as a readable file", async () => {
 		const dir = realpathSync(mkdtempSync(join(tmpdir(), "sitra-handover-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", dir);
