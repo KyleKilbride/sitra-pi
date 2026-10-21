@@ -203,6 +203,42 @@ test("an unreadable Grimoire is visible in the session but does not block ordina
 	expect(event.systemPromptOptions.sections.grimoire).toContain("Grimoire unavailable");
 });
 
+test("a missing Grimoire is treated as empty in the prompt, not as unavailable", async () => {
+	const { mkdtempSync, realpathSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const dir = join(realpathSync(mkdtempSync(join(tmpdir(), "sitra-missing-grimoire-"))), "missing");
+	vi.stubEnv("SITRA_GRIMOIRE", dir);
+	vi.stubEnv("PI_SUBAGENT_NAME", "");
+	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	sitraKnowledge({
+		on: (n: string, h: (e: unknown, c: unknown) => unknown) => handlers.set(n, h),
+		registerTool() {},
+		registerCommand() {},
+		sendUserMessage() {},
+	} as never);
+	const warnings: string[] = [];
+	const statuses: (string | undefined)[] = [];
+	const ctx = {
+		cwd: process.cwd(),
+		hasUI: true,
+		ui: {
+			setStatus: (_k: string, t: string | undefined) => statuses.push(t),
+			notify: (message: string) => warnings.push(message),
+		},
+	};
+	const event = {
+		messageType: "user",
+		prompt: "hello",
+		systemPromptOptions: { sections: {} as Record<string, string> },
+	};
+	handlers.get("before_agent_start")?.(event, ctx);
+	expect(event.systemPromptOptions.sections.grimoire).toContain("Approved entries (0");
+	expect(event.systemPromptOptions.sections.grimoire).not.toContain("Grimoire unavailable");
+	expect(warnings).toEqual([]);
+	expect(statuses.at(-1)).toContain("grimoire 0");
+});
+
 test("the status line shows today's tally, and /grimoire walks through repeats after proposals", async () => {
 	const { mkdtempSync, realpathSync } = await import("node:fs");
 	const { tmpdir } = await import("node:os");
@@ -300,4 +336,42 @@ test("the first change in a session waits until the agent has looked at Grimoire
 	handlers.get("session_start")?.({}, ctx);
 	vi.stubEnv("SITRA_GRIMOIRE_LOOK", "0");
 	expect(call("edit", { path: "/w/a.ts" })).toBeUndefined();
+});
+
+test("action triggers do not pre-scan unrelated root files before loading entries", async () => {
+	const { mkdtempSync, mkdirSync, writeFileSync, realpathSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const { renderEntry } = await import("../extensions/grimoire.ts");
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "sitra-no-prescan-")));
+	writeFileSync(join(dir, "root"), "not a directory\n");
+	mkdirSync(join(dir, "kinds", "warnings"), { recursive: true });
+	writeFileSync(
+		join(dir, "kinds", "warnings", "w.md"),
+		renderEntry({
+			kind: "warning",
+			title: "Use draft PRs",
+			body: "Open PRs as drafts.",
+			date: "2026-10-21",
+			when: ["command:gh pr create"],
+		}),
+	);
+	vi.stubEnv("SITRA_GRIMOIRE", dir);
+	vi.stubEnv("PI_SUBAGENT_NAME", "");
+	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	sitraKnowledge({
+		on: (n: string, h: (e: unknown, c: unknown) => unknown) => handlers.set(n, h),
+		registerTool() {},
+		registerCommand() {},
+		sendUserMessage() {},
+	} as never);
+	const warnings: string[] = [];
+	const ctx = { cwd: dir, hasUI: true, ui: { setStatus() {}, notify: (message: string) => warnings.push(message) } };
+	const result = handlers.get("tool_call")?.(
+		{ type: "tool_call", toolName: "bash", input: { command: "gh pr create" } },
+		ctx,
+	) as { block?: boolean; reason?: string } | undefined;
+	expect(result?.block).toBe(true);
+	expect(result?.reason).toContain("Open PRs as drafts.");
+	expect(warnings).toEqual([]);
 });

@@ -62,6 +62,7 @@ describe("launch", () => {
 		expect(env).toEqual({
 			PATH: "/bin",
 			PI_CODING_AGENT_DIR: "/home/sam/.sitra/profile",
+			PI_MEMORY_DIR: "/home/sam/.sitra/profile/memory",
 			SITRA_USER_NAME: "Sam",
 		});
 	});

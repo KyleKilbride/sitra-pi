@@ -11,7 +11,7 @@ const report: HelperReport = {
 	status: "blocked",
 	summary: "Could not inspect the migration because the database was unavailable.",
 	evidence: ["/tmp/sitra/runs/db.log", "extensions/lead.ts"],
-	openQuestions: ["Should Kyle start the database before the builder continues?"],
+	openQuestions: ["Should the person start the database before the builder continues?"],
 	assumptions: ["No schema change was made."],
 };
 
@@ -30,10 +30,16 @@ test("the lead-facing report exposes fields and flags raw missing prose", () => 
 	const valid = helperReportForLead(rendered);
 	expect(valid).toMatchObject({ ok: true, report });
 	expect(valid.text).toContain("Status: blocked");
+	expect(valid.text).toContain("Open questions for the person:");
 	expect(valid.text).toContain("/tmp/sitra/runs/db.log");
+	expect(valid.text).not.toMatch(/Kyle|Sam/);
 
 	const missing = helperReportForLead("I read the files and it looks fine.");
 	expect(missing).toMatchObject({ ok: false });
 	expect(missing.text).toContain("missing structured helper_report");
 	expect(missing.text).toContain("I read the files");
+
+	const invalidJson = helperReportForLead(`${HELPER_REPORT_MARKER}\n{`);
+	expect(invalidJson).toMatchObject({ ok: false });
+	expect(invalidJson.text).toContain("invalid structured helper_report JSON");
 });

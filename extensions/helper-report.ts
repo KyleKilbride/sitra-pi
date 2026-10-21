@@ -1,10 +1,11 @@
 import { Type } from "typebox";
+import * as Value from "typebox/value";
 
 export const HELPER_REPORT_MARKER = "sitra-helper-report-v1";
 
 export const HELPER_REPORT_SCHEMA = Type.Object({
 	status: Type.Union([Type.Literal("done"), Type.Literal("blocked"), Type.Literal("needs-input")]),
-	summary: Type.String(),
+	summary: Type.String({ minLength: 1 }),
 	evidence: Type.Array(Type.String()),
 	openQuestions: Type.Array(Type.String()),
 	assumptions: Type.Array(Type.String()),
@@ -20,40 +21,23 @@ export interface HelperReport {
 	assumptions: string[];
 }
 
-const STATUSES = new Set<HelperReportStatus>(["done", "blocked", "needs-input"]);
-
-const strings = (input: Record<string, unknown>, key: keyof HelperReport): string[] | string => {
-	const value = input[key];
-	if (!Array.isArray(value)) return `${key} must be an array`;
-	const bad = value.find((item) => typeof item !== "string");
-	if (bad !== undefined) return `${key} must contain only strings`;
-	return value;
-};
-
 export function validateHelperReport(
 	input: unknown,
 ): { ok: true; report: HelperReport } | { ok: false; reason: string } {
-	if (!input || typeof input !== "object" || Array.isArray(input))
-		return { ok: false, reason: "report must be an object" };
-	const value = input as Record<string, unknown>;
-	if (!STATUSES.has(value.status as HelperReportStatus))
-		return { ok: false, reason: "status must be done, blocked, or needs-input" };
-	if (typeof value.summary !== "string" || value.summary.trim() === "")
-		return { ok: false, reason: "summary must be a non-empty string" };
-	const evidence = strings(value, "evidence");
-	if (typeof evidence === "string") return { ok: false, reason: evidence };
-	const openQuestions = strings(value, "openQuestions");
-	if (typeof openQuestions === "string") return { ok: false, reason: openQuestions };
-	const assumptions = strings(value, "assumptions");
-	if (typeof assumptions === "string") return { ok: false, reason: assumptions };
+	if (!Value.Check(HELPER_REPORT_SCHEMA, input)) {
+		const [first] = Value.Errors(HELPER_REPORT_SCHEMA, input);
+		const where = first?.instancePath ? `${first.instancePath}: ` : "";
+		return { ok: false, reason: `${where}${first?.message ?? "report does not match schema"}` };
+	}
+	const value = input as HelperReport;
 	return {
 		ok: true,
 		report: {
-			status: value.status as HelperReportStatus,
+			status: value.status,
 			summary: value.summary,
-			evidence,
-			openQuestions,
-			assumptions,
+			evidence: value.evidence,
+			openQuestions: value.openQuestions,
+			assumptions: value.assumptions,
 		},
 	};
 }
@@ -97,7 +81,7 @@ export function helperReportForLead(
 		`Summary: ${valid.report.summary}`,
 		"Evidence:",
 		list(valid.report.evidence),
-		"Open questions for Kyle:",
+		"Open questions for the person:",
 		list(valid.report.openQuestions),
 		"Assumptions:",
 		list(valid.report.assumptions),

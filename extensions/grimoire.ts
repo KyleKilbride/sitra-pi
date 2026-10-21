@@ -57,14 +57,6 @@ export function grimoireStoreStatus(dir: string): GrimoireStoreStatus {
 	const problem = readableDir(dir, "Grimoire");
 	if (problem === "missing") return { state: "missing", dir, reason: `${dir} does not exist` };
 	if (problem) return { state: "unreadable", dir, reason: problem };
-	for (const rel of ["root", "proposals", "rejected", "kinds", ...KINDS.map((kind) => `kinds/${kind}s`)]) {
-		const folder = join(dir, rel);
-		if (!existsSync(folder)) continue;
-		const dirProblem = readableDir(folder, rel);
-		if (dirProblem) return { state: "unreadable", dir, reason: dirProblem };
-		const fileProblem = readableMarkdownFiles(folder, rel);
-		if (fileProblem) return { state: "unreadable", dir, reason: fileProblem };
-	}
 	return { state: "ok", dir };
 }
 
@@ -82,17 +74,6 @@ function readableDir(dir: string, label: string): string | "missing" | undefined
 		const code = typeof error === "object" && error ? (error as { code?: unknown }).code : undefined;
 		return code === "ENOENT" ? "missing" : `${label} can't be read: ${reason(error)}`;
 	}
-}
-
-function readableMarkdownFiles(dir: string, label: string): string | undefined {
-	for (const file of markdownFiles(dir)) {
-		try {
-			readFileSync(join(dir, file), "utf8");
-		} catch (error) {
-			return `${label}/${file} can't be read: ${reason(error)}`;
-		}
-	}
-	return undefined;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -190,12 +171,17 @@ function markdownFiles(dir: string): string[] {
 		.sort();
 }
 
-function readEntries(root: string, rel: string): Entry[] {
+function unreadable(dir: string, error: unknown): GrimoireStoreStatus {
+	return { state: "unreadable", dir, reason: reason(error) };
+}
+
+function readEntries(root: string, rel: string, strict = false): Entry[] {
 	return markdownFiles(join(root, rel)).flatMap((f) => {
 		try {
 			const entry = parseEntry(readFileSync(join(root, rel, f), "utf8"), `${rel}/${f}`);
 			return entry ? [entry] : [];
-		} catch {
+		} catch (error) {
+			if (strict) throw error;
 			return []; // one unreadable file never hides the rest
 		}
 	});
@@ -204,6 +190,20 @@ function readEntries(root: string, rel: string): Entry[] {
 /** Approved entries, from `kinds/<kind>s/`. */
 export function listEntries(dir: string): Entry[] {
 	return KINDS.flatMap((kind) => readEntries(dir, `kinds/${kind}s`));
+}
+
+export function listEntriesWithStatus(dir: string): { status: GrimoireStoreStatus; entries: Entry[] } {
+	const status = grimoireStoreStatus(dir);
+	if (status.state === "missing") return { status, entries: [] };
+	if (status.state === "unreadable") return { status, entries: [] };
+	try {
+		return {
+			status,
+			entries: KINDS.flatMap((kind) => readEntries(dir, `kinds/${kind}s`, true)),
+		};
+	} catch (error) {
+		return { status: unreadable(dir, error), entries: [] };
+	}
 }
 
 export function listProposals(dir: string): Entry[] {
@@ -286,6 +286,21 @@ export function loadRoot(dir: string, maxChars = LIMITS.rootChars): RootText {
 		chars: full.length,
 		truncated: true,
 	};
+}
+
+export function loadRootWithStatus(
+	dir: string,
+	maxChars = LIMITS.rootChars,
+): { status: GrimoireStoreStatus; root: RootText } {
+	const status = grimoireStoreStatus(dir);
+	const empty = { text: "", files: [], chars: 0, truncated: false };
+	if (status.state === "missing") return { status, root: empty };
+	if (status.state === "unreadable") return { status, root: empty };
+	try {
+		return { status, root: loadRoot(dir, maxChars) };
+	} catch (error) {
+		return { status: unreadable(dir, error), root: empty };
+	}
 }
 
 /**

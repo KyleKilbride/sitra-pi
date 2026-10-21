@@ -5,8 +5,8 @@ function script() {
 	try {
 		const parsed = JSON.parse(process.env.SITRA_LOOP_MODEL_SCRIPT || "[]");
 		return Array.isArray(parsed) ? parsed : [];
-	} catch {
-		return [];
+	} catch (error) {
+		throw new Error(`Invalid SITRA_LOOP_MODEL_SCRIPT: ${String(error)}`);
 	}
 }
 
@@ -19,7 +19,8 @@ export default function (pi) {
 	let next = 0;
 	faux.setResponses(
 		Array.from({ length: 50 }, () => () => {
-			const step = steps[next++] ?? { text: "done" };
+			const step = steps[next++];
+			if (!step) throw new Error("SITRA_LOOP_MODEL_SCRIPT ran out of steps");
 			if (step.tool?.name) {
 				return fauxAssistantMessage(fauxToolCall(step.tool.name, step.tool.arguments ?? {}), { stopReason: "toolUse" });
 			}

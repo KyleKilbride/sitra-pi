@@ -10,13 +10,14 @@ import {
 	decide,
 	grimoireDir,
 	grimoireSection,
-	grimoireStoreStatus,
+	type grimoireStoreStatus,
 	importedRepos,
 	KINDS,
 	type Kind,
 	listEntries,
+	listEntriesWithStatus,
 	listProposals,
-	loadRoot,
+	loadRootWithStatus,
 	searchEntries,
 	unreadableProposals,
 	writeClaudeRoot,
@@ -120,21 +121,23 @@ export default function sitraKnowledge(pi: Pi): void {
 
 	const status = (ctx: Ctx) => {
 		const g = dir();
-		const s = grimoireStoreStatus(g);
-		if (s.state === "missing") {
-			ctx.ui.setStatus("sitra-grimoire", `grimoire missing: ${g}`);
+		const root = loadRootWithStatus(g);
+		if (root.status.state === "unreadable") {
+			ctx.ui.setStatus("sitra-grimoire", `grimoire unreadable: ${root.status.reason}`);
+			warnUnreadable(ctx, root.status);
 			return;
 		}
-		if (s.state === "unreadable") {
-			ctx.ui.setStatus("sitra-grimoire", `grimoire unreadable: ${s.reason}`);
-			warnUnreadable(ctx, s);
+		const loaded = listEntriesWithStatus(g);
+		if (loaded.status.state === "unreadable") {
+			ctx.ui.setStatus("sitra-grimoire", `grimoire unreadable: ${loaded.status.reason}`);
+			warnUnreadable(ctx, loaded.status);
 			return;
 		}
-		const approved = listEntries(g).length;
+		const approved = loaded.entries.length;
 		const waiting = listProposals(g).length;
 		const parts = [`grimoire ${approved}`];
 		if (waiting) parts.push(`${waiting} to review (/grimoire)`);
-		if (loadRoot(g).truncated) parts.push("root over its limit");
+		if (root.root.truncated) parts.push("root over its limit");
 		if (oldKnowledgeBase(ctx.cwd)) parts.push("old /kb here: sitra grimoire import");
 		const t = tally(g);
 		if (t.caught || t.learned || t.repeats) {
@@ -159,12 +162,11 @@ export default function sitraKnowledge(pi: Pi): void {
 		try {
 			if (typeof event?.toolName !== "string") return undefined;
 			const g = dir();
-			const s = grimoireStoreStatus(g);
-			if (s.state === "unreadable") {
-				warnUnreadable(ctx, s);
+			const loaded = listEntriesWithStatus(g);
+			if (loaded.status.state === "unreadable") {
+				warnUnreadable(ctx, loaded.status);
 				return undefined;
 			}
-			if (s.state === "missing") return undefined;
 			const session = ctx?.sessionManager?.getSessionId?.() ?? `pi-${process.pid}`;
 			const call = { tool: event.toolName, input: event.input && typeof event.input === "object" ? event.input : {} };
 			try {
@@ -181,7 +183,7 @@ export default function sitraKnowledge(pi: Pi): void {
 			) {
 				looked = true;
 			}
-			const entries = listEntries(g);
+			const entries = loaded.entries;
 			const firstChange = ["edit", "write", "subagent"].includes(event.toolName);
 			if (firstChange && !looked && !lookAsked && entries.length > 0 && process.env.SITRA_GRIMOIRE_LOOK !== "0") {
 				// Models under-use memory unless nudged (Anthropic's memory tool insists on a look before acting).
@@ -272,13 +274,19 @@ export default function sitraKnowledge(pi: Pi): void {
 		}
 		try {
 			const g = dir();
-			const s = grimoireStoreStatus(g);
-			if (s.state !== "ok") {
-				warnUnreadable(ctx, s);
-				event.systemPromptOptions.sections.grimoire = unavailableSection(s);
+			const root = loadRootWithStatus(g);
+			if (root.status.state === "unreadable") {
+				warnUnreadable(ctx, root.status);
+				event.systemPromptOptions.sections.grimoire = unavailableSection(root.status);
 				return;
 			}
-			event.systemPromptOptions.sections.grimoire = grimoireSection(g, loadRoot(g), listEntries(g), { who: who() });
+			const loaded = listEntriesWithStatus(g);
+			if (loaded.status.state === "unreadable") {
+				warnUnreadable(ctx, loaded.status);
+				event.systemPromptOptions.sections.grimoire = unavailableSection(loaded.status);
+				return;
+			}
+			event.systemPromptOptions.sections.grimoire = grimoireSection(g, root.root, loaded.entries, { who: who() });
 		} catch (error) {
 			const s = { state: "unreadable" as const, dir: dir(), reason: String(error) };
 			warnUnreadable(ctx, s);

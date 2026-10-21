@@ -6,12 +6,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Type } from "typebox";
-import {
-	HELPER_REPORT_SCHEMA,
-	helperReportForLead,
-	renderHelperReport,
-	validateHelperReport,
-} from "./helper-report.ts";
+import { HELPER_REPORT_SCHEMA, renderHelperReport, validateHelperReport } from "./helper-report.ts";
 import { paneCommand, readRun, shellQuote } from "./runs.ts";
 import { gitBranch, mainCheckout } from "./sessions.ts";
 
@@ -58,8 +53,6 @@ interface Pi {
 		event: "before_agent_start",
 		handler: (event: { systemPromptOptions: { sections: Record<string, string> } }, ctx: Ctx) => unknown,
 	): void;
-	on(event: "context", handler: (event: { messages?: unknown }, ctx: Ctx) => unknown): void;
-	on(event: string, handler: (event: unknown, ctx: Ctx) => unknown): void;
 	registerTool(tool: {
 		name: string;
 		label: string;
@@ -87,23 +80,6 @@ interface Pi {
 	): void;
 }
 
-type Msg = { role?: string; toolName?: string; content?: unknown };
-const HELPER_RESULT_TOOLS = new Set(["subagent", "task", "agent", "spawn_agent"]);
-
-function contentText(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	return content
-		.filter((part): part is { type?: string; text?: string } => !!part && typeof part === "object")
-		.filter((part) => part.type === "text" && typeof part.text === "string")
-		.map((part) => part.text)
-		.join("\n");
-}
-
-function withText(message: Msg, text: string): Msg {
-	return { ...message, content: [{ type: "text", text }] };
-}
-
 export default function sitraLead(pi: Pi): void {
 	const isTeammate = Boolean(process.env.PI_SUBAGENT_NAME);
 	const isTower = process.env.SITRA_ROLE === "tower";
@@ -120,23 +96,6 @@ export default function sitraLead(pi: Pi): void {
 				(f) => f.path.startsWith(root) || (profile && f.path.startsWith(profile)),
 			);
 		}
-	});
-
-	pi.on("context", (event: { messages?: unknown }) => {
-		if (isTeammate || !Array.isArray(event?.messages)) return undefined;
-		let changed = false;
-		const messages = (event.messages as Msg[]).map((message) => {
-			if (
-				message?.role !== "toolResult" ||
-				typeof message.toolName !== "string" ||
-				!HELPER_RESULT_TOOLS.has(message.toolName.toLowerCase())
-			) {
-				return message;
-			}
-			changed = true;
-			return withText(message, helperReportForLead(contentText(message.content)).text);
-		});
-		return changed ? { messages } : undefined;
 	});
 
 	// A question waiting for the person shows as "blocked" in herdr, so they see that something needs them.
@@ -166,29 +125,26 @@ export default function sitraLead(pi: Pi): void {
 
 	const runsDir = join(process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent"), "runs");
 
-	pi.registerTool({
-		name: "helper_report",
-		label: "Report helper result",
-		description:
-			"Return a helper or teammate result as structured fields for the lead: status, summary, evidence, open questions for Kyle, and assumptions.",
-		promptSnippet:
-			"helper_report: helpers must call this before their final reply so the lead receives validated status, summary, evidence, open questions and assumptions",
-		parameters: HELPER_REPORT_SCHEMA,
-		async execute(_id, params) {
-			const valid = validateHelperReport(params);
-			if (!valid.ok) throw new Error(`invalid helper_report: ${valid.reason}`);
-			const block = renderHelperReport(valid.report);
-			return {
-				content: [
-					{
-						type: "text",
-						text: `Recorded helper report. Return exactly this block as your final reply so the lead receives the validated fields:\n\n${block}`,
-					},
-				],
-				details: valid.report,
-			};
-		},
-	});
+	if (isTeammate) {
+		pi.registerTool({
+			name: "helper_report",
+			label: "Report helper result",
+			description:
+				"Return a helper or teammate result as structured fields: status, summary, evidence, open questions for the person, and assumptions.",
+			promptSnippet:
+				"helper_report: helpers can record validated status, summary, evidence, open questions for the person and assumptions",
+			parameters: HELPER_REPORT_SCHEMA,
+			async execute(_id, params) {
+				const valid = validateHelperReport(params);
+				if (!valid.ok) throw new Error(`invalid helper_report: ${valid.reason}`);
+				const block = renderHelperReport(valid.report);
+				return {
+					content: [{ type: "text", text: `Recorded helper report.\n\n${block}` }],
+					details: valid.report,
+				};
+			},
+		});
+	}
 
 	pi.registerTool({
 		name: "run_in_pane",

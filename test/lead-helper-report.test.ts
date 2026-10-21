@@ -9,6 +9,8 @@ function fakePi() {
 	const tools = new Map<
 		string,
 		{
+			description: string;
+			promptSnippet?: string;
 			execute: (
 				id: string,
 				params: Record<string, unknown>,
@@ -32,10 +34,16 @@ const content = (text: string) => [{ type: "text", text }];
 afterEach(() => vi.unstubAllEnvs());
 
 describe("helper_report", () => {
-	test("helpers get a schema-validated report tool that returns a lead-readable block", async () => {
+	test("only helper sessions get a schema-validated report tool", async () => {
 		const { tools } = fakePi();
-		const tool = tools.get("helper_report");
+		expect(tools.has("helper_report")).toBe(false);
+
+		vi.stubEnv("PI_SUBAGENT_NAME", "scout");
+		const helper = fakePi();
+		const tool = helper.tools.get("helper_report");
 		expect(tool).toBeDefined();
+		expect(tool?.description).not.toMatch(/Kyle|Sam/);
+		expect(tool?.promptSnippet).not.toMatch(/Kyle|Sam/);
 		const result = await tool?.execute(
 			"1",
 			{
@@ -50,10 +58,32 @@ describe("helper_report", () => {
 			{},
 		);
 		expect(result?.content[0]?.text).toContain("sitra-helper-report-v1");
+		expect(result?.content[0]?.text).not.toContain("Return exactly this block as your final reply");
+		expect(result?.content[0]?.text).not.toMatch(/Kyle|Sam/);
 		expect(result?.details).toMatchObject({ status: "done", summary: "Found the parser tests." });
 	});
 
-	test("the lead context receives structured helper fields, or an explicit raw-output failure", () => {
+	test("invalid helper_report arguments fail loudly", async () => {
+		vi.stubEnv("PI_SUBAGENT_NAME", "scout");
+		const { tools } = fakePi();
+		await expect(
+			tools.get("helper_report")?.execute(
+				"1",
+				{
+					status: "done-ish",
+					summary: "Found the parser tests.",
+					evidence: ["test/parser.test.ts"],
+					openQuestions: [],
+					assumptions: [],
+				},
+				undefined,
+				undefined,
+				{},
+			),
+		).rejects.toThrow(/invalid helper_report/);
+	});
+
+	test("lead context leaves teammate prose alone until the runner owns report transport", () => {
 		const { handlers } = fakePi();
 		const report: HelperReport = {
 			status: "needs-input",
@@ -66,10 +96,9 @@ describe("helper_report", () => {
 			{ role: "toolResult", toolName: "subagent", content: content(renderHelperReport(report)) },
 			{ role: "toolResult", toolName: "subagent", content: content("All good, no details.") },
 		];
-		const rewritten = handlers.get("context")?.({ messages }, {}) as { messages: typeof messages };
-		expect(rewritten.messages[0]?.content[0]?.text).toContain("Status: needs-input");
-		expect(rewritten.messages[0]?.content[0]?.text).toContain("Which status code");
-		expect(rewritten.messages[1]?.content[0]?.text).toContain("missing structured helper_report");
-		expect(rewritten.messages[1]?.content[0]?.text).toContain("All good, no details.");
+		const rewritten = handlers.get("context")?.({ messages }, {}) as { messages: typeof messages } | undefined;
+		expect(rewritten).toBeUndefined();
+		expect(messages[0]?.content[0]?.text).toBe(renderHelperReport(report));
+		expect(messages[1]?.content[0]?.text).toBe("All good, no details.");
 	});
 });

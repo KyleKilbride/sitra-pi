@@ -19,7 +19,8 @@ async function runPi(options: {
 	cwd: string;
 	extensions: string[];
 	tools?: string;
-	script: unknown[];
+	script?: unknown[];
+	scriptRaw?: string;
 	env?: Record<string, string>;
 }): Promise<unknown[]> {
 	const records: unknown[] = [];
@@ -43,13 +44,14 @@ async function runPi(options: {
 				env: {
 					...process.env,
 					PI_CODING_AGENT_DIR: mkdtempSync(join(tmpdir(), "sitra-loop-profile-")),
-					SITRA_LOOP_MODEL_SCRIPT: JSON.stringify(options.script),
+					SITRA_LOOP_MODEL_SCRIPT: options.scriptRaw ?? JSON.stringify(options.script ?? []),
 					...options.env,
 				},
-				stdio: ["pipe", "pipe", "inherit"],
+				stdio: ["pipe", "pipe", "pipe"],
 			},
 		);
 		let buf = "";
+		let stderr = "";
 		child.stdout.on("data", (d) => {
 			buf += d;
 			for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
@@ -59,7 +61,15 @@ async function runPi(options: {
 				if (last.type === "agent_settled") child.stdin.end();
 			}
 		});
-		child.on("exit", () => resolve());
+		child.stderr.on("data", (d) => {
+			stderr += d;
+		});
+		child.on("exit", (code) => {
+			const modelError = records.find((record) => JSON.stringify(record).includes("SITRA_LOOP_MODEL_SCRIPT"));
+			if (modelError) reject(new Error(JSON.stringify(modelError)));
+			else if (code === 0) resolve();
+			else reject(new Error(stderr || `pi exited with code ${code}`));
+		});
 		child.on("error", reject);
 		child.stdin.write(`${JSON.stringify({ type: "prompt", message: "go" })}\n`);
 	});
@@ -87,6 +97,7 @@ test("loop model e2e: helper_report can return structured fields through a real 
 		cwd: work,
 		extensions: [LEAD_EXT],
 		tools: "helper_report",
+		env: { PI_SUBAGENT_NAME: "scout" },
 		script: [
 			{
 				tool: {
@@ -105,4 +116,21 @@ test("loop model e2e: helper_report can return structured fields through a real 
 	});
 	expect(JSON.stringify(records)).toContain("sitra-helper-report-v1");
 	expect(JSON.stringify(records)).toContain("Checked the parser tests.");
+}, 60_000);
+
+test("loop model e2e: invalid scripts and exhausted scripts fail loudly", async () => {
+	await expect(
+		runPi({
+			cwd: worktree(),
+			extensions: [LEAD_EXT],
+			scriptRaw: "{",
+		}),
+	).rejects.toThrow(/Invalid SITRA_LOOP_MODEL_SCRIPT/);
+	await expect(
+		runPi({
+			cwd: worktree(),
+			extensions: [LEAD_EXT],
+			script: [],
+		}),
+	).rejects.toThrow(/SITRA_LOOP_MODEL_SCRIPT ran out of steps/);
 }, 60_000);
