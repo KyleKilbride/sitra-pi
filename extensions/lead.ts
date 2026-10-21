@@ -42,6 +42,9 @@ function herdr(args: string[]): string {
 interface Ctx {
 	cwd: string;
 	isIdle?: () => boolean;
+	sessionManager?: {
+		getSessionId?(): string | undefined;
+	};
 }
 
 interface Pi {
@@ -143,6 +146,10 @@ export default function sitraLead(pi: Pi): void {
 				label: params.label,
 				project: basename(mainCheckout(ctx.cwd)),
 				...(branch ? { branch } : {}),
+				agent:
+					process.env.PI_SUBAGENT_NAME?.trim() ||
+					(isTower ? (process.env.SITRA_TOWER_NAME?.trim() ?? "tower") : "lead"),
+				...(ctx.sessionManager?.getSessionId?.() ? { sessionId: ctx.sessionManager.getSessionId() } : {}),
 			});
 			let where: string;
 			if (process.env.HERDR_ENV === "1" && process.env.HERDR_PANE_ID) {

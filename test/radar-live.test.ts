@@ -7,7 +7,7 @@ import { collectRadarSnapshot, type RadarSnapshot, type RunSummary, type WorkerC
 import { initialRadarState, liveStatus } from "../extensions/radar-model.ts";
 import { parseMailSnapshot } from "../extensions/radar-store.ts";
 import { buildRadarLayout } from "../extensions/radar-view.ts";
-import { EXIT_MARKER, paneCommand, readRun, readRunHeader } from "../extensions/runs.ts";
+import { EXIT_MARKER, paneCommand, type RunMeta, readRun, readRunHeader } from "../extensions/runs.ts";
 
 const NOW = Date.parse("2026-10-21T16:00:00Z");
 const tmp = () => mkdtempSync(join(tmpdir(), "sitra-radar-live-"));
@@ -51,12 +51,25 @@ describe("runs know who started them and whether they are still alive", () => {
 		const log = join(tmp(), "run.log");
 		execFileSync("bash", [
 			"-c",
-			paneCommand("echo hello", log, { label: "unit tests", project: "app", branch: "feat/x" }),
+			paneCommand("echo hello", log, {
+				label: "unit tests",
+				project: "app",
+				branch: "feat/x",
+				agent: "lead",
+				sessionId: "session-1",
+			} satisfies RunMeta),
 		]);
 		const text = readFileSync(log, "utf8");
 		const header = readRunHeader(text.split("\n")[0] ?? "");
 		expect(header?.pid).toBeGreaterThan(1);
-		expect(header?.meta).toEqual({ label: "unit tests", project: "app", branch: "feat/x" });
+		expect((header as { pidStart?: string } | undefined)?.pidStart).toMatch(/^\d*$/);
+		expect(header?.meta).toEqual({
+			label: "unit tests",
+			project: "app",
+			branch: "feat/x",
+			agent: "lead",
+			sessionId: "session-1",
+		});
 		expect(readRun(text)).toMatchObject({ done: true, exitCode: 0, tail: "hello" });
 	});
 	test("a log without a header has no owner", () => {
@@ -98,6 +111,22 @@ describe("runs know who started them and whether they are still alive", () => {
 		expect(states.indexOf("running")).toBeLessThan(states.indexOf("passed"));
 		expect(states.lastIndexOf("running")).toBeLessThan(states.indexOf("passed"));
 	});
+	test("a reused pid with a different process start token is stopped", () => {
+		const profile = tmp();
+		const dir = join(profile, "runs");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(dir, "2026-10-21T15-57-00-000Z-reused.log"),
+			`__SITRA_RUN__={"pid":${process.pid},"pidStart":"definitely-not-this-process","meta":{"label":"reused pid","project":"app","agent":"lead","sessionId":"session-1"}}\nwork still pending\n`,
+		);
+		const snap = collectRadarSnapshot(profile, { nowMs: NOW });
+		expect(snap.runs[0]).toMatchObject({
+			state: "stopped",
+			project: "app",
+			agent: "lead",
+			sessionId: "session-1",
+		});
+	});
 });
 
 describe("status is derived from live state, not only from what the tower last wrote", () => {
@@ -121,7 +150,7 @@ describe("status is derived from live state, not only from what the tower last w
 		expect(doing).not.toContain("repo-3");
 		expect(status.doing[0]).toContain("repo-2");
 	});
-	test("recent finished runs are done, old ones are not, failures say so", () => {
+	test("finished runs are not treated as finished work", () => {
 		const snap: RadarSnapshot = {
 			...base,
 			runs: [
@@ -131,12 +160,54 @@ describe("status is derived from live state, not only from what the tower last w
 			],
 		};
 		const done = liveStatus(snap, NOW).done.join("\n");
-		expect(done).toContain("label-ok");
-		expect(done).toContain("label-bad");
+		expect(done).not.toContain("label-ok");
+		expect(done).not.toContain("label-bad");
 		expect(done).not.toContain("label-old");
-		expect(done.split("\n").find((l) => l.includes("label-bad"))).not.toBe(
-			done.split("\n").find((l) => l.includes("label-ok")),
+	});
+	test("finished test runs do not count as finished work", () => {
+		const snap: RadarSnapshot = {
+			...base,
+			runs: [run("ok", "passed", { exitCode: 0, project: "app", label: "unit tests" })],
+		};
+		expect(liveStatus(snap, NOW).done.join("\n")).not.toContain("unit tests");
+	});
+	test("open pull requests are live status items", () => {
+		const status = liveStatus(
+			{
+				...base,
+				pullRequests: [
+					{
+						id: "app#23",
+						project: "app",
+						number: 23,
+						title: "Radar live status",
+						branch: "krskl/radar-live-status",
+						url: "https://example.test/pr/23",
+						isDraft: true,
+					},
+				],
+			} as RadarSnapshot,
+			NOW,
 		);
+		expect(status.next.join("\n")).toContain("PR #23 draft");
+		expect(status.next.join("\n")).toContain("Radar live status");
+	});
+	test("tower notes are shown above live items and exact duplicate notes are not repeated", () => {
+		const snap: RadarSnapshot = {
+			...base,
+			workers: [worker(1, "working", { nowLine: "fixing the cabin filter" })],
+			summary: {
+				done: ["tower finished item"],
+				doing: ["repo-1 (branch-1) — fixing the cabin filter", "tower top note"],
+				next: [],
+				updatedAt: "2026-10-21T15:55:00Z",
+			},
+		};
+		const status = liveStatus(snap, NOW);
+		expect(status.doing[0]).toBe("repo-1 (branch-1) — fixing the cabin filter");
+		expect(status.doing[1]).toBe("tower top note");
+		expect(status.doing.filter((line) => line.includes("fixing the cabin filter"))).toHaveLength(1);
+		expect(status.done[0]).toBe("tower finished item");
 	});
 	test("tower notes are kept and marked old once they go stale; proposals are next", () => {
 		const fresh = liveStatus(
@@ -173,7 +244,7 @@ describe("status is derived from live state, not only from what the tower last w
 });
 
 describe("mailbox and runs lists are one readable line each", () => {
-	test("mail rows show when, who and the subject on a single line, newest first", () => {
+	test("mail rows show incoming first, then who, subject and delivery on a single line", () => {
 		const mail = [
 			{
 				id: "a",
@@ -198,10 +269,50 @@ describe("mailbox and runs lists are one readable line each", () => {
 		);
 		const lines = layout.body.filter((l) => l.includes("subject-"));
 		expect(lines).toHaveLength(2);
-		expect(lines[0]).toContain("subject-b");
+		expect(lines[0]).toContain("subject-a");
 		expect(lines[0]).toContain("peer/agent");
-		expect(lines[0]).toContain("uncertain");
-		expect(lines[1]).toContain("subject-a");
+		expect(lines[1]).toContain("subject-b");
+		expect(lines[1]).toContain("delivery unknown");
+	});
+	test("mail rows use structured subject, preview and delivery instead of reading meaning from state text", () => {
+		const items = parseMailSnapshot({
+			items: [
+				{
+					id: "sent",
+					peer: "teammate",
+					direction: "out",
+					state: "confirmed by legacy text but structured delivery says no",
+					delivery: { confirmed: false, status: "queued" },
+					subject: "Real subject",
+					summary: "Body first line that must not become the subject",
+					preview: "one line preview",
+					body: "Body first line that must not become the subject\nsecond line",
+					updatedAt: "2026-10-21T15:59:00Z",
+				},
+				{
+					id: "in",
+					peer: "worker",
+					direction: "in",
+					state: "received",
+					delivery: { confirmed: true, status: "received" },
+					subject: "Incoming subject",
+					preview: "incoming preview",
+					updatedAt: "2026-10-20T15:59:00Z",
+				},
+			],
+		}).items;
+		expect(items.map((item) => item.id)).toEqual(["in", "sent"]);
+		const layout = buildRadarLayout(
+			{ ...base, mail: items },
+			{ cols: 120, rows: 30, nowMs: NOW, state: { ...initialRadarState(), view: "mail" } },
+		);
+		const text = layout.body.join("\n");
+		expect(text).toContain("Incoming subject");
+		expect(text).toContain("Real subject");
+		expect(text).toContain("one line preview");
+		expect(text).toContain("[queued]");
+		expect(text).toContain("date unknown");
+		expect(text).not.toContain("Body first line that must not become the subject");
 	});
 	test("messages with an approximate date sort after dated ones and say so", () => {
 		const items = parseMailSnapshot({
@@ -227,7 +338,13 @@ describe("mailbox and runs lists are one readable line each", () => {
 	});
 	test("run rows name the project and branch that started them and say when stopped", () => {
 		const runs = [
-			run("r1", "running", { project: "app", branch: "feat/y", label: "evals" }),
+			run("r1", "running", {
+				project: "app",
+				branch: "feat/y",
+				label: "evals",
+				agent: "lead",
+				sessionId: "lead-1",
+			}),
 			run("r2", "stopped", { label: "dead", project: "app" }),
 		];
 		const layout = buildRadarLayout(
@@ -238,6 +355,8 @@ describe("mailbox and runs lists are one readable line each", () => {
 		expect(text).toContain("running");
 		expect(text).toContain("app");
 		expect(text).toContain("feat/y");
+		expect(text).toContain("lead");
+		expect(text).toContain("lead-1");
 		expect(text).toContain("stopped");
 		expect(layout.header.join("\n")).toContain("1 active");
 	});

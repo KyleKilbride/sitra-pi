@@ -12,6 +12,13 @@ const clock = (iso: string) =>
 		minute: "2-digit",
 		hour12: false,
 	});
+const deliveryTag = (delivery: RadarSnapshot["mail"][number]["delivery"]): string => {
+	if (!delivery) return "[delivery unknown] ";
+	if (delivery.confirmed === true) return "";
+	if (delivery.status) return `[${plain(delivery.status)}] `;
+	if (delivery.confirmed === false) return "[not confirmed] ";
+	return "[delivery unknown] ";
+};
 
 function wrap(text: string, width: number): string[] {
 	const out: string[] = [];
@@ -90,10 +97,11 @@ export function buildRadarLayout(
 		for (let i = 0; i < snapshot.mail.length; i++) {
 			const m = snapshot.mail[i];
 			if (!m) continue;
-			const when = m.dateApproximate ? "date unknown" : clock(m.updatedAt);
-			const tag = m.direction === "out" && !/confirmed/.test(m.state) ? `[${plain(m.state)}] ` : "";
+			const when = m.direction === "out" || m.dateApproximate ? "date unknown" : clock(m.updatedAt);
+			const tag = m.direction === "out" ? deliveryTag(m.delivery) : "";
+			const preview = m.preview ? ` — ${plain(m.preview)}` : "";
 			content.push(
-				`${i === state.selected ? "▸" : " "} ${m.direction === "in" ? "←" : "→"} ${when}  ${plain(m.peer)}  ${tag}${plain(m.summary)}`,
+				`${i === state.selected ? "▸" : " "} ${m.direction === "in" ? "←" : "→"} ${when}  ${plain(m.peer)}  ${tag}${plain(m.subject ?? m.summary)}${preview}`,
 			);
 		}
 		cursor = state.selected;
@@ -110,7 +118,14 @@ export function buildRadarLayout(
 						: r.state === "failed"
 							? `✗ failed (exit ${r.exitCode ?? "?"})`
 							: "◌ stopped";
-			const owner = [r.project, r.branch ? `(${r.branch})` : undefined].filter(Boolean).join(" ");
+			const owner = [
+				r.agent,
+				r.sessionId ? `session ${r.sessionId}` : undefined,
+				r.project,
+				r.branch ? `(${r.branch})` : undefined,
+			]
+				.filter(Boolean)
+				.join(" ");
 			content.push(
 				`${i === state.selected ? "▸" : " "} ${word}  ${plain(r.label)} — ${owner ? plain(owner) : "owner unknown"} · ${formatAge(nowMs - Date.parse(r.updatedAt))} ago`,
 			);
@@ -123,16 +138,26 @@ export function buildRadarLayout(
 			title = "MESSAGE · READ ONLY";
 			content = wrap(
 				mail
-					? `${mail.direction === "in" ? "From" : "To"}: ${mail.peer}\n${mail.updatedAt} · ${mail.state}\n\n${mail.body ?? mail.summary}`
+					? `${mail.direction === "in" ? "From" : "To"}: ${mail.peer}\nSubject: ${mail.subject ?? mail.summary}\n${mail.updatedAt} · ${mail.state}\n\n${mail.body ?? mail.preview ?? mail.subject ?? mail.summary}`
 					: "This message is no longer in the local mailbox.",
 				width,
 			);
 		} else if (state.view === "run") {
 			const run = snapshot.runs.find((r) => r.id === state.itemId);
+			const owner = run
+				? [
+						run.agent,
+						run.sessionId ? `session ${run.sessionId}` : undefined,
+						run.project,
+						run.branch ? `(${run.branch})` : undefined,
+					]
+						.filter(Boolean)
+						.join(" ")
+				: "";
 			title = "RUN OUTPUT · LAST 80 LINES";
 			content = wrap(
 				run
-					? `${run.label}\n${run.done ? `Finished · exit ${run.exitCode ?? "unknown"}` : "Running · output refreshes automatically"}\n\n${run.tail || "No output yet"}`
+					? `${run.label}${owner ? ` — ${owner}` : ""}\n${run.done ? `Finished · exit ${run.exitCode ?? "unknown"}` : "Running · output refreshes automatically"}\n\n${run.tail || "No output yet"}`
 					: "This run is no longer available.",
 				width,
 			);

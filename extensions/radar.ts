@@ -1,6 +1,6 @@
 /** Live, keyboard-driven workspace dashboard with read-only mailbox and run logs. */
 import { execFileSync } from "node:child_process";
-import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { grimoireDir, listProposals } from "./grimoire.ts";
 import { initialRadarState, type RadarState, type TowerSummary } from "./radar-model.ts";
@@ -26,8 +26,15 @@ export interface MailItem {
 	id: string;
 	peer: string;
 	direction: "in" | "out";
-	state: string;
+	/** Deprecated compatibility field: old adapters used this as the row's subject. */
 	summary: string;
+	subject?: string;
+	preview?: string;
+	state: string;
+	delivery?: {
+		confirmed?: boolean;
+		status?: string;
+	};
 	body?: string;
 	updatedAt: string;
 	/** True when `updatedAt` is only when the dashboard first saw the message, not when it was sent or received. */
@@ -42,10 +49,22 @@ export interface RunSummary {
 	state: RunState;
 	project?: string;
 	branch?: string;
+	agent?: string;
+	sessionId?: string;
 	tail?: string;
 	done: boolean;
 	exitCode?: number;
 	updatedAt: string;
+}
+
+export interface PullRequestSummary {
+	id: string;
+	project: string;
+	number: number;
+	title: string;
+	branch?: string;
+	url?: string;
+	isDraft?: boolean;
 }
 
 export interface WorkerCard {
@@ -70,6 +89,8 @@ export interface RadarSnapshot {
 	workers: WorkerCard[];
 	alerts: SessionAlert[];
 	runs: RunSummary[];
+	pullRequests?: PullRequestSummary[];
+	statusNotices?: string[];
 	pendingProposals: number;
 	mail: MailItem[];
 	mailNotice?: string;
@@ -275,16 +296,41 @@ function readFirstLine(file: string): string {
 	}
 }
 
-function processAlive(pid: number): boolean {
+function procPidStart(pid: number): string | undefined {
+	if (process.platform !== "linux") return undefined;
 	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
+		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+		const end = stat.lastIndexOf(") ");
+		if (end < 0) return undefined;
+		// Field 22 is starttime. After the comm field, token 0 is field 3 (`state`).
+		return stat
+			.slice(end + 2)
+			.trim()
+			.split(/\s+/)[19];
+	} catch {
+		return undefined;
 	}
 }
 
-function collectRuns(profileDir: string, nowMs: number, pidAlive: (pid: number) => boolean): RunSummary[] {
+function processAlive(pid: number, pidStart?: string): boolean {
+	try {
+		process.kill(pid, 0);
+		if (!pidStart) return true;
+		const currentStart = procPidStart(pid);
+		return currentStart === undefined ? true : currentStart === pidStart;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EPERM") return false;
+		if (!pidStart) return true;
+		const currentStart = procPidStart(pid);
+		return currentStart === undefined ? true : currentStart === pidStart;
+	}
+}
+
+function collectRuns(
+	profileDir: string,
+	nowMs: number,
+	pidAlive: (pid: number, pidStart?: string) => boolean,
+): RunSummary[] {
 	const dir = join(profileDir, "runs");
 	if (!existsSync(dir)) return [];
 	try {
@@ -301,7 +347,7 @@ function collectRuns(profileDir: string, nowMs: number, pidAlive: (pid: number) 
 			const mtimeMs = statSync(full).mtimeMs;
 			const label =
 				header?.meta.label ?? file.replace(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-/, "").replace(/\.log$/, "");
-			const alive = header ? pidAlive(header.pid) : nowMs - mtimeMs < LEGACY_RUN_STALE_MS;
+			const alive = header ? pidAlive(header.pid, header.pidStart) : nowMs - mtimeMs < LEGACY_RUN_STALE_MS;
 			const state: RunState = status.done
 				? status.exitCode === 0
 					? "passed"
@@ -315,6 +361,8 @@ function collectRuns(profileDir: string, nowMs: number, pidAlive: (pid: number) 
 				state,
 				...(header?.meta.project ? { project: header.meta.project } : {}),
 				...(header?.meta.branch ? { branch: header.meta.branch } : {}),
+				...(header?.meta.agent ? { agent: header.meta.agent } : {}),
+				...(header?.meta.sessionId ? { sessionId: header.meta.sessionId } : {}),
 				tail: status.tail,
 				done: status.done,
 				...(status.exitCode !== undefined ? { exitCode: status.exitCode } : {}),
@@ -326,6 +374,46 @@ function collectRuns(profileDir: string, nowMs: number, pidAlive: (pid: number) 
 	} catch {
 		return [];
 	}
+}
+
+function collectOpenPullRequests(repos: readonly string[]): { items: PullRequestSummary[]; notices: string[] } {
+	const items: PullRequestSummary[] = [];
+	const notices: string[] = [];
+	const seenRepos = new Set<string>();
+	for (const repo of repos) {
+		if (seenRepos.has(repo) || !existsSync(repo)) continue;
+		seenRepos.add(repo);
+		const project = basename(repo);
+		try {
+			const raw = execFileSync(
+				"gh",
+				["pr", "list", "--state", "open", "--limit", "20", "--json", "number,title,headRefName,isDraft,url"],
+				{ cwd: repo, encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "pipe"] },
+			);
+			const parsed = JSON.parse(raw) as {
+				number?: unknown;
+				title?: unknown;
+				headRefName?: unknown;
+				isDraft?: unknown;
+				url?: unknown;
+			}[];
+			for (const pr of parsed) {
+				if (typeof pr.number !== "number" || typeof pr.title !== "string") continue;
+				items.push({
+					id: `${project}#${pr.number}`,
+					project,
+					number: pr.number,
+					title: pr.title.slice(0, 200),
+					...(typeof pr.headRefName === "string" ? { branch: pr.headRefName.slice(0, 200) } : {}),
+					...(typeof pr.url === "string" ? { url: pr.url } : {}),
+					...(typeof pr.isDraft === "boolean" ? { isDraft: pr.isDraft } : {}),
+				});
+			}
+		} catch {
+			notices.push(`Open PRs unavailable for ${project}; gh pr list failed.`);
+		}
+	}
+	return { items, notices };
 }
 
 interface HerdrWorkspaceMeta {
@@ -448,8 +536,10 @@ export function collectRadarSnapshot(
 		nowMs?: number;
 		towerName?: string;
 		includeHerdr?: boolean;
+		includePullRequests?: boolean;
+		listPullRequests?: (repos: string[]) => PullRequestSummary[];
 		readLines?: (file: string) => string;
-		pidAlive?: (pid: number) => boolean;
+		pidAlive?: (pid: number, pidStart?: string) => boolean;
 	},
 ): RadarSnapshot {
 	const nowMs = options?.nowMs ?? Date.now();
@@ -623,12 +713,28 @@ export function collectRadarSnapshot(
 	} catch {
 		// An unreadable Grimoire just shows nothing to review.
 	}
+	const runSummaries = collectRuns(profileDir, nowMs, options?.pidAlive ?? processAlive);
+	const repos = Array.from(
+		new Set(
+			workers
+				.map((w) => w.lead.repo || w.lead.cwd)
+				.filter((repo): repo is string => Boolean(repo))
+				.map((repo) => mainCheckout(repo)),
+		),
+	);
+	const pullRequestResult = options?.listPullRequests
+		? { items: options.listPullRequests(repos), notices: [] }
+		: options?.includePullRequests
+			? collectOpenPullRequests(repos)
+			: { items: [], notices: [] };
 
 	return {
 		towerName,
 		workers,
 		alerts,
-		runs: collectRuns(profileDir, nowMs, options?.pidAlive ?? processAlive),
+		runs: runSummaries,
+		...(pullRequestResult.items.length > 0 ? { pullRequests: pullRequestResult.items } : {}),
+		...(pullRequestResult.notices.length > 0 ? { statusNotices: pullRequestResult.notices } : {}),
 		pendingProposals,
 		mail: collectMail(profileDir),
 		summary: readTowerSummary(profileDir),

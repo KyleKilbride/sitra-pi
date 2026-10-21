@@ -70,15 +70,17 @@ and Kitty/CSI-u terminal input. A terminal of at least 20 columns by 12 rows is 
 
 - **Workspaces** use live local session records; icons describe session state, not task completion.
 - **Runs** are the latest 30 local logs created by `run_in_pane`, running ones first. Each row names the project and
-  branch that started it. A run records its shell's process id, so one whose process is gone shows as **stopped**
-  instead of running forever; older logs without that record are stopped after 15 minutes of silence. Enter opens the
-  last 80 output lines, updating while they run. This is not a list of every shell process.
-- **Status** is derived live: workers needing you or working (with their current task), running and recently finished
-  runs, and open Grimoire proposals. The tower's own `update_radar_status` notes are appended to it and tagged with
-  their age once older than 30 minutes, so a stale note can never pass as current. Radar never infers that idle
-  means done or claims remote work is being polled. **s** reads every entry when the pinned summary is truncated.
-- **Mail** rows are one line: when, who, subject; newest first. Items flagged `dateApproximate` (the dashboard only
-  saw them locally, so the time is not real) say "date unknown" and sort after dated ones. Mail is read-only: opening it does not send, acknowledge, consume or mark remote messages read. It refreshes
+  branch, agent and session that started it. A run records its shell's process id and, on Linux, the process start
+  token from `/proc`, so a reused pid does not keep a dead run looking alive. Older logs without that record are
+  stopped after 15 minutes of silence. Enter opens the last 80 output lines, updating while they run. This is not a
+  list of every shell process.
+- **Status** is derived live: the tower's own `update_radar_status` notes come first, then workers needing you or
+  working (with their current task), running runs, open pull requests and open Grimoire proposals. Exact duplicate
+  tower notes and live items are shown once. Finished test/build runs do not count as finished work; put verified
+  work in the tower notes. Notes older than 30 minutes are tagged with their age, so a stale note can never pass as
+  current. Radar never infers that idle means done. **s** reads every entry when the pinned summary is truncated.
+- **Mail** rows are one line: incoming first, then sender, subject and a one-line preview. Sent items and items flagged
+  `dateApproximate` say "date unknown". Mail is read-only: opening it does not send, acknowledge, consume or mark remote messages read. It refreshes
   a local source about every five seconds. No source is shown honestly as disconnected; errors retain last good
   messages with a visible warning. There is no built-in messaging provider or authentication in this repository.
 
@@ -86,10 +88,32 @@ A private integration can write `sitra-mail.json` in the Pi profile as `{ "items
 `radar-mail-source.json` as `{ "command": "node", "args": ["/path/to/local-mail-reader.mjs"] }`. The latter is an
 explicitly trusted local executable, invoked **without a shell**, with a three-second timeout. It must only project
 already-local data, never become a second network inbox consumer. It returns `{ "items": [...], "notice": "...",
-"updatedAt": "ISO timestamp" }`. Each item needs `id`, `peer`, `direction` (`in`/`out`), `state`, `summary`,
-`updatedAt`, and optionally full `body`. The adapter owns honest delivery states and coverage notices. Terminal
-controls in display text are stripped. Keep adapters, their caches and all personal mailbox data in the private
-profile, never in the public repository. Old bare-array mail snapshots are not treated as a live inbox.
+"updatedAt": "ISO timestamp" }`.
+
+Each mail item must use this documented shape:
+
+```json
+{
+  "id": "stable adapter id",
+  "peer": "sender or recipient label",
+  "direction": "in",
+  "state": "adapter display state",
+  "subject": "message subject",
+  "preview": "one-line body preview",
+  "updatedAt": "2026-10-21T15:59:00.000Z",
+  "dateApproximate": false,
+  "delivery": { "confirmed": true, "status": "delivered" },
+  "body": "optional full message body"
+}
+```
+
+`direction` is `in` or `out`. `dateApproximate` is `true` when `updatedAt` is only when the dashboard first saw the
+item, not the real sent or received time. `delivery.confirmed` is the structured delivery truth for outgoing mail;
+`delivery.status` is the short tag radar shows when delivery is not confirmed or is unknown. `summary` is still
+accepted as a backward-compatible subject for old private snapshots, but new adapters should send `subject` and
+`preview`. Radar never decides delivery by matching words in `state`. Terminal controls in display text are stripped.
+Keep adapters, their caches and all personal mailbox data in the private profile, never in the public repository.
+Old bare-array mail snapshots are not treated as a live inbox.
 
 **Teammates** (via [pi-subagents](https://github.com/edxeth/pi-subagents)):
 
