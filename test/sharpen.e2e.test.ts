@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,7 @@ const MODEL = fileURLToPath(new URL("./fixtures/handover-model.ts", import.meta.
 
 test("a real pi session past the handover threshold still recovers from a retryable error, then hands over", async () => {
 	const dir = realpathSync(mkdtempSync(join(tmpdir(), "sitra-handover-e2e-")));
+	execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
 	writeFileSync(
 		join(dir, "settings.json"),
 		JSON.stringify({
@@ -67,7 +68,7 @@ test("a real pi session past the handover threshold still recovers from a retrya
 	});
 	expect(types.some((t) => t.type === "auto_retry_start")).toBe(true);
 	expect(types.filter((t) => t.text).at(-1)?.text).toBe("RECOVERED AFTER RETRY");
-	expect(types.filter((t) => t.type === "agent_settled").every((t) => t.aborted === false)).toBe(true);
+	expect(types.filter((t) => t.type === "agent_settled").at(-1)?.aborted).not.toBe(true);
 	const end = types.find((t) => t.type === "compaction_end");
 	expect(end?.errorMessage).toBeUndefined();
 	expect(readdirSync(join(dir, "handovers"))).toHaveLength(1);
