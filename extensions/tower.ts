@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Type } from "typebox";
+import { writeTowerSummary } from "./radar-store.ts";
 import {
 	auditSessionsFriction,
 	createTailReader,
@@ -46,6 +47,7 @@ export function towerRules(userName?: string, towerName?: string): string {
   - Anyone in \`waiting_for_user\` (needs ${who}'s answer).
   - Anyone who looks off track: drifting from the task ${who} gave them, repeating the same failing tool or test, or stopped unexpectedly.
 - **Improving sitra (\`audit_sessions\`):** use \`audit_sessions\` to spot repeated tool errors and friction across sessions. Propose durable setup improvements with \`grimoire_propose\` (kind \`setup\`), or edit the sitra repo directly when ${who} gives the go.
+- **Dashboard status:** publish verified Done / Being done / Next updates with \`update_radar_status\` whenever work changes and before ending a turn. Keep completed work separate from idle sessions, include outside work only from a current owner report, and retain uncertainty. The timestamp is the last verification, not a live remote check. Keep status lists in radar rather than repeating them in chat; use chat for decisions and surprises.
 - **How to talk to ${who}:** the headline or ask first, in one line, then a few short lines in plain everyday words. Name the project and branch — never send ${who} to look up session IDs or file paths.
 `;
 }
@@ -345,7 +347,14 @@ export default function sitraTower(pi: Pi): void {
 		if (role === "tower") {
 			if (pi.getActiveTools && pi.setActiveTools) {
 				const active = pi.getActiveTools();
-				const towerTools = ["list_sessions", "read_session", "message_session", "audit_sessions", "spawn_session"];
+				const towerTools = [
+					"list_sessions",
+					"read_session",
+					"message_session",
+					"audit_sessions",
+					"spawn_session",
+					"update_radar_status",
+				];
 				const missing = towerTools.filter((t) => !active.includes(t));
 				if (missing.length > 0) pi.setActiveTools([...active, ...missing]);
 			}
@@ -419,7 +428,7 @@ export default function sitraTower(pi: Pi): void {
 	if (role !== "tower") return;
 
 	pi.registerCommand?.("radar", {
-		description: "Open (or focus) the live btop-style sitra radar in a right-hand herdr pane",
+		description: "Open (or focus) the live sitra dashboard in a right-hand herdr pane",
 		async handler(_args, ctx) {
 			const pane = openRadarPane(ctx.cwd, true);
 			ctx.ui?.notify?.(
@@ -538,6 +547,28 @@ export default function sitraTower(pi: Pi): void {
 				],
 				details: { sent: true, toSessionId: match.id, messageId: sent.id },
 			};
+		},
+	});
+
+	pi.registerTool({
+		name: "update_radar_status",
+		label: "Update radar status",
+		description:
+			"Publish the tower’s verified Done / Being done / Next summary to radar. Replace all three lists together. Check source state first; this does not verify external work or contact anyone.",
+		parameters: Type.Object({
+			done: Type.Array(Type.String({ maxLength: 1000 }), { maxItems: 20 }),
+			doing: Type.Array(Type.String({ maxLength: 1000 }), { maxItems: 20 }),
+			next: Type.Array(Type.String({ maxLength: 1000 }), { maxItems: 20 }),
+		}),
+		async execute(_id, params) {
+			const summary = {
+				done: params.done as string[],
+				doing: params.doing as string[],
+				next: params.next as string[],
+				updatedAt: new Date().toISOString(),
+			};
+			writeTowerSummary(profileDir, summary);
+			return { content: [{ type: "text", text: "Radar status updated." }], details: summary };
 		},
 	});
 
