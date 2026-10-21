@@ -4,48 +4,18 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { writeProposal } from "../extensions/grimoire.ts";
 import {
-	brailleSparkline,
 	collectRadarSnapshot,
 	createRefreshScheduler,
 	frameUpdate,
 	renderRadarFrame,
-	renderSprite,
-	type VisualState,
 	visibleWidth,
 } from "../extensions/radar.ts";
+import { readTowerSummary } from "../extensions/radar-store.ts";
 import { EXIT_MARKER } from "../extensions/runs.ts";
 import { type SessionRecord, writeSession } from "../extensions/sessions.ts";
 import sitraTower from "../extensions/tower.ts";
 
 const tmp = () => realpathSync(mkdtempSync(join(tmpdir(), "sitra-radar-")));
-
-describe("braille sparklines", () => {
-	test("encodes zero activity as blank braille cells and rising activity into rising dot rows", () => {
-		expect(brailleSparkline([0, 0, 0, 0], 2)).toBe("⠀⠀");
-		const rising = brailleSparkline([0, 1, 2, 3, 4, 4], 3);
-		expect([...rising]).toHaveLength(3);
-		expect(rising.endsWith("⣿")).toBe(true);
-		expect(rising[0]).not.toBe("⣿");
-	});
-});
-
-describe("half-block pixel sprites", () => {
-	test("draws a 4-row, 14-column half-block pixel diorama for every state across 4 animation frames", () => {
-		const states: VisualState[] = ["working", "waiting_for_user", "error_loop", "idle", "stopped"];
-		for (const state of states) {
-			const frames = [0, 1, 2, 3].map((t) => renderSprite(state, t));
-			for (const f of frames) {
-				expect(f).toHaveLength(4);
-				for (const row of f) {
-					expect(visibleWidth(row)).toBe(14);
-				}
-			}
-			expect(new Set(frames.map((f) => f.join("\n"))).size).toBeGreaterThanOrEqual(2);
-		}
-		expect(renderSprite("working", 0).join("\n")).not.toBe(renderSprite("waiting_for_user", 0).join("\n"));
-		expect(renderSprite("error_loop", 0).join("\n")).not.toBe(renderSprite("idle", 0).join("\n"));
-	});
-});
 
 describe("radar snapshot and frame", () => {
 	test("collects workers, teammates, error loops, runs, Grimoire proposals and peer mail into a bounded frame", () => {
@@ -118,16 +88,18 @@ describe("radar snapshot and frame", () => {
 
 		writeFileSync(
 			join(profile, "sitra-mail.json"),
-			JSON.stringify([
-				{
-					id: "task-1",
-					peer: "operator/main",
-					direction: "in",
-					state: "WORKING",
-					summary: "Provisioning karl-bot client ID with Infra",
-					updatedAt: "2026-10-15T16:30:00.000Z",
-				},
-			]),
+			JSON.stringify({
+				items: [
+					{
+						id: "task-1",
+						peer: "operator/main",
+						direction: "in",
+						state: "WORKING",
+						summary: "Provisioning karl-bot client ID with Infra",
+						updatedAt: "2026-10-15T16:30:00.000Z",
+					},
+				],
+			}),
 		);
 
 		const snap = collectRadarSnapshot(profile, {
@@ -157,9 +129,14 @@ describe("radar snapshot and frame", () => {
 		expect(frame0).not.toContain("⚡");
 		expect(frame0).toContain("Ron");
 		expect(frame0).toContain("travelagent-ai");
-		expect(frame0).toContain("flights-scout");
-		expect(frame0).toContain("unit-tests");
-		expect(frame0).toContain("operator/main");
+		expect(frame1).toBe(frame0);
+		expect(frame0).not.toMatch(/[▀▄]/u);
+		expect(renderRadarFrame(snap, { cols: 88, rows: 34, state: { view: "runs", selected: 0, scroll: 0 } })).toContain(
+			"unit-tests",
+		);
+		expect(renderRadarFrame(snap, { cols: 88, rows: 34, state: { view: "mail", selected: 0, scroll: 0 } })).toContain(
+			"operator/main",
+		);
 
 		const narrowSnap = {
 			...snap,
@@ -332,6 +309,7 @@ fi
 			const snap = collectRadarSnapshot(profile, { includeHerdr: true, towerName: "Ron" });
 			const wsCard = snap.workers.find((w) => w.workspaceId === "wH");
 			expect(wsCard?.lead.id).toBe("lead-ws");
+			expect(wsCard?.tabId).toBe("wH:t1");
 			expect(wsCard?.teammates.map((t) => t.id)).toEqual(["tm-ws"]);
 			expect(wsCard?.nowLine).toBeUndefined();
 			expect(wsCard?.lastLine).toBe("Targeting staging now.");
@@ -343,6 +321,46 @@ fi
 			for (const [k, v] of Object.entries(savedEnv)) {
 				if (v === undefined) delete process.env[k];
 				else process.env[k] = v;
+			}
+		}
+	});
+});
+
+describe("radar summary tool", () => {
+	test("publishes explicit status and restores its tool on resumed towers", async () => {
+		const profile = tmp();
+		const saved = { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR, SITRA_ROLE: process.env.SITRA_ROLE };
+		process.env.PI_CODING_AGENT_DIR = profile;
+		process.env.SITRA_ROLE = "tower";
+		try {
+			const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
+			const tools = new Map<
+				string,
+				{ execute(id: string, params: { done: string[]; doing: string[]; next: string[] }): Promise<unknown> }
+			>();
+			const setActiveTools = vi.fn();
+			sitraTower({
+				on: (event, fn) => handlers.set(event, fn as never),
+				registerTool: (tool) => tools.set(tool.name, tool as never),
+				registerCommand: () => {},
+				events: { on: () => {} },
+				getActiveTools: () => ["read"],
+				setActiveTools,
+			});
+			const value = { done: ["verified-marker"], doing: ["in-progress-marker"], next: [] };
+			await tools.get("update_radar_status")?.execute("test", value);
+			expect(readTowerSummary(profile)).toMatchObject(value);
+			const ctx = { cwd: profile, sessionManager: { getSessionId: () => "tower-status" } };
+			handlers.get("before_agent_start")?.(
+				{ prompt: "status", messageType: "user", systemPromptOptions: { sections: {} } },
+				ctx,
+			);
+			expect(setActiveTools).toHaveBeenCalledWith(expect.arrayContaining(["read", "update_radar_status"]));
+			handlers.get("session_shutdown")?.({}, ctx);
+		} finally {
+			for (const [key, value] of Object.entries(saved)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
 			}
 		}
 	});

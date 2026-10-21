@@ -1,11 +1,11 @@
-/**
- * sitra radar: a zero-token, btop-inspired retro-futuristic TUI that renders your live herdr workspaces as animated
- * half-block pixel dioramas, gradient Braille activity waves, plain-English progress lines, and peer mail.
- */
+/** Live, keyboard-driven workspace dashboard with read-only mailbox and run logs. */
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync, watch } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { grimoireDir, listProposals } from "./grimoire.ts";
+import { initialRadarState, type RadarState, type TowerSummary } from "./radar-model.ts";
+import { collectMail, readTowerSummary } from "./radar-store.ts";
+import { buildRadarLayout } from "./radar-view.ts";
 import { readRun } from "./runs.ts";
 import {
 	createTailReader,
@@ -18,7 +18,6 @@ import {
 	readTranscriptTail,
 	type SessionAlert,
 	type SessionRecord,
-	sessionsDir,
 } from "./sessions.ts";
 
 export type VisualState = "working" | "waiting_for_user" | "error_loop" | "idle" | "stopped";
@@ -29,11 +28,14 @@ export interface MailItem {
 	direction: "in" | "out";
 	state: string;
 	summary: string;
+	body?: string;
 	updatedAt: string;
 }
 
 export interface RunSummary {
+	id: string;
 	label: string;
+	tail?: string;
 	done: boolean;
 	exitCode?: number;
 	updatedAt: string;
@@ -44,6 +46,7 @@ export interface WorkerCard {
 	title: string;
 	subtitle?: string;
 	workspaceId?: string;
+	tabId?: string;
 	harness?: string;
 	lead: SessionRecord;
 	teammates: SessionRecord[];
@@ -62,6 +65,8 @@ export interface RadarSnapshot {
 	runs: RunSummary[];
 	pendingProposals: number;
 	mail: MailItem[];
+	mailNotice?: string;
+	summary?: TowerSummary;
 }
 
 const ANSI_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
@@ -141,325 +146,6 @@ export function fitAnsi(text: string, width: number): string {
 
 const fg = (r: number, g: number, b: number, s: string) => `\x1b[38;2;${r};${g};${b}m${s}\x1b[0m`;
 const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
-const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
-
-/**
- * Encodes an activity series into Unicode Braille cells (2 horizontal samples x 4 vertical dot rows per cell),
- * matching btop's high-density terminal graphs.
- */
-export function brailleSparkline(values: readonly number[], width = 8): string {
-	const totalSamples = Math.max(1, width * 2);
-	const samples: number[] = [];
-	if (values.length === 0) {
-		for (let i = 0; i < totalSamples; i++) samples.push(0);
-	} else {
-		for (let i = 0; i < totalSamples; i++) {
-			const idx = Math.floor((i * values.length) / totalSamples);
-			samples.push(Math.max(0, values[idx] ?? 0));
-		}
-	}
-	const max = Math.max(1, ...samples);
-	const leftBits = [0x40, 0x04, 0x02, 0x01];
-	const rightBits = [0x80, 0x20, 0x10, 0x08];
-	let out = "";
-	for (let c = 0; c < width; c++) {
-		const lv = samples[c * 2] ?? 0;
-		const rv = samples[c * 2 + 1] ?? 0;
-		const lHeight = lv <= 0 ? 0 : Math.min(4, Math.ceil((lv / max) * 4));
-		const rHeight = rv <= 0 ? 0 : Math.min(4, Math.ceil((rv / max) * 4));
-		let mask = 0;
-		for (let d = 0; d < lHeight; d++) mask |= leftBits[d] ?? 0;
-		for (let d = 0; d < rHeight; d++) mask |= rightBits[d] ?? 0;
-		out += String.fromCodePoint(0x2800 + mask);
-	}
-	return out;
-}
-
-function gradientSparkline(
-	values: readonly number[],
-	width: number,
-	fromRgb: [number, number, number] = [55, 200, 255],
-	toRgb: [number, number, number] = [70, 255, 175],
-): string {
-	const raw = [...brailleSparkline(values, width)];
-	return raw
-		.map((ch, i) => {
-			const t = raw.length <= 1 ? 1 : i / (raw.length - 1);
-			const r = Math.round(fromRgb[0] + (toRgb[0] - fromRgb[0]) * t);
-			const g = Math.round(fromRgb[1] + (toRgb[1] - fromRgb[1]) * t);
-			const b = Math.round(fromRgb[2] + (toRgb[2] - fromRgb[2]) * t);
-			return fg(r, g, b, ch);
-		})
-		.join("");
-}
-
-const PALETTE: Record<string, [number, number, number]> = {
-	H: [85, 205, 255],
-	V: [200, 255, 255],
-	N: [40, 115, 165],
-	B: [45, 155, 210],
-	A: [125, 235, 255],
-	L: [35, 100, 145],
-	C: [55, 95, 125],
-	T: [35, 65, 90],
-	G: [55, 255, 165],
-	S: [115, 255, 215],
-	D: [0, 215, 255],
-	W: [255, 195, 50],
-	F: [255, 70, 115],
-	Y: [255, 245, 120],
-	E: [255, 65, 75],
-	O: [255, 145, 40],
-	I: [120, 140, 200],
-	Z: [155, 215, 255],
-	M: [235, 160, 95],
-	P: [90, 100, 115],
-	K: [55, 62, 72],
-};
-
-const DIORAMAS_14: Record<VisualState, [string[], string[], string[], string[]]> = {
-	working: [
-		[
-			"..HHHH....S...",
-			".HVVVVH.....D.",
-			".HHHHHH..TTTTT",
-			"..BBBB...TGGST",
-			".ABBBBA..TGSGT",
-			"..BBBB...TTTTT",
-			"..L..L..CCCCCC",
-			".LL..LL.......",
-		],
-		[
-			"..HHHH.....D..",
-			".HVVVVH..S....",
-			".HHHHHH..TTTTT",
-			".ABBBBA..TSGGT",
-			"..BBBB...TGGST",
-			"..BBBB...TTTTT",
-			"..L..L..CCCCCC",
-			".LL..LL.......",
-		],
-		[
-			"..HHHH...D...S",
-			".HVVVVH.......",
-			".HHHHHH..TTTTT",
-			"..BBBB...TGGST",
-			".ABBBBA..TSTGT",
-			"..BBBB...TTTTT",
-			"..L..L..CCCCCC",
-			".LL..LL.......",
-		],
-		[
-			"..HHHH....S...",
-			".HNNNNH....D..",
-			".HHHHHH..TTTTT",
-			".ABBBBA..TSTGT",
-			"..BBBB...TGGST",
-			"..BBBB...TTTTT",
-			"..L..L..CCCCCC",
-			".LL..LL.......",
-		],
-	],
-	waiting_for_user: [
-		[
-			"..WWWW...FFFFF",
-			".WYYYYW..FYYYF",
-			".WWWWWW..FFFFF",
-			".AWWWWA....F..",
-			"..WWWW...TTTTT",
-			"..WWWW...TYYYT",
-			"..L..L..CCCCCC",
-			".LL..LL.......",
-		],
-		[
-			".AWWWW...YYYYY",
-			".WYYYYW..YFFFY",
-			"..WWWWW..YYYYY",
-			"..WWWW.....Y..",
-			"..WWWW...TTTTT",
-			"..WWWW...TFFFT",
-			"..L..L..CCCCCC",
-			".LL..LL.......",
-		],
-		[
-			"..WWWW...FFFFF",
-			".WYYYYW..FYYYF",
-			".WWWWWW..FFFFF",
-			".AWWWWA....F..",
-			"..WWWW...TTTTT",
-			"..WWWW...TFFFT",
-			"..L..L..CCCCCC",
-			".LL..LL.......",
-		],
-		[
-			".AWWWW...YYYYY",
-			".WYYYYW..YFFFY",
-			"..WWWWW..YYYYY",
-			"..WWWW.....Y..",
-			"..WWWW...TTTTT",
-			"..WWWW...TYYYT",
-			"..L..L..CCCCCC",
-			".LL..LL.......",
-		],
-	],
-	error_loop: [
-		[
-			".AEEEEA..Y..O.",
-			".EYYYYE...OE..",
-			".EEEEEE..TTTTT",
-			"..EEEE...TEEET",
-			".AEEEEA..TEYET",
-			"..EEEE...TTTTT",
-			"..L..L..CCCCCC",
-			".LL..LL.......",
-		],
-		[
-			"..EEEE....OY..",
-			"AEYYYYEA.E..Y.",
-			".EEEEEE..TTTTT",
-			"..EEEE...TYEET",
-			"..EEEE...TEEET",
-			"..EEEE...TTTTT",
-			".L....L.CCCCCC",
-			"LL....LL......",
-		],
-		[
-			".AEEEEA...Y.O.",
-			".EYYYYE..O.E..",
-			".EEEEEE..TTTTT",
-			"..EEEE...TEEET",
-			".AEEEEA..TEYET",
-			"..EEEE...TTTTT",
-			"..L..L..CCCCCC",
-			".LL..LL.......",
-		],
-		[
-			"..EEEE...O..Y.",
-			"AEYYYYEA..EY..",
-			".EEEEEE..TTTTT",
-			"..EEEE...TEYET",
-			"..EEEE...TEEET",
-			"..EEEE...TTTTT",
-			".L....L.CCCCCC",
-			"LL....LL......",
-		],
-	],
-	idle: [
-		[
-			"..IIII....Z...",
-			".IVVVVI.....Z.",
-			".IIIIII..TTTTT",
-			"..IIII...TKKKT",
-			"..IIIIMMMTKKKT",
-			"..IIII.MMTTTTT",
-			"..L..L..CCCCCC",
-			".LL..LL.......",
-		],
-		[
-			"..IIII.....Z..",
-			".IVVVVI...Z...",
-			".IIIIII..TTTTT",
-			"..IIII...TKKKT",
-			"..IIIIMMMTKKKT",
-			"..IIII.MMTTTTT",
-			"..L..L..CCCCCC",
-			".LL..LL.......",
-		],
-		[
-			"..IIII...Z....",
-			".INNNNI....Z..",
-			".IIIIII..TTTTT",
-			"..IIII...TKKKT",
-			"..IIIIMMMTKKKT",
-			"..IIII.MMTTTTT",
-			"..L..L..CCCCCC",
-			".LL..LL.......",
-		],
-		[
-			"..IIII....Z...",
-			".IVVVVI..Z....",
-			".IIIIII..TTTTT",
-			"..IIII...TKKKT",
-			"..IIIIMMMTKKKT",
-			"..IIII.MMTTTTT",
-			"..L..L..CCCCCC",
-			".LL..LL.......",
-		],
-	],
-	stopped: [
-		[
-			"..PPPP........",
-			".PKKKKP.......",
-			".PPPPPP..TTTTT",
-			"..PPPP...TKKKT",
-			"..PPPP...TKKKT",
-			"..PPPP...TTTTT",
-			"..K..K..CCCCCC",
-			".KK..KK.......",
-		],
-		[
-			"..PPPP........",
-			".PKKKKP.......",
-			".PPPPPP..TTTTT",
-			"..PPPP...TKKKT",
-			"..PPPP...TKPPT",
-			"..PPPP...TTTTT",
-			"..K..K..CCCCCC",
-			".KK..KK.......",
-		],
-		[
-			"..PPPP........",
-			".PKKKKP.......",
-			".PPPPPP..TTTTT",
-			"..PPPP...TKKKT",
-			"..PPPP...TKKKT",
-			"..PPPP...TTTTT",
-			"..K..K..CCCCCC",
-			".KK..KK.......",
-		],
-		[
-			"..PPPP........",
-			".PKKKKP.......",
-			".PPPPPP..TTTTT",
-			"..PPPP...TKKKT",
-			"..PPPP...TPKKT",
-			"..PPPP...TTTTT",
-			"..K..K..CCCCCC",
-			".KK..KK.......",
-		],
-	],
-};
-
-export function renderSprite(state: VisualState, tick = 0, width: 14 | 8 = 14): string[] {
-	const frames = DIORAMAS_14[state];
-	const grid = frames[Math.abs(tick) % 4] ?? frames[0];
-	const rows: string[] = [];
-	for (let r = 0; r < 8; r += 2) {
-		const topRow = grid[r] ?? "";
-		const botRow = grid[r + 1] ?? "";
-		let line = "";
-		for (let c = 0; c < width; c++) {
-			const srcCol = width === 8 && c >= 6 ? c + 6 : c;
-			const t = topRow[srcCol] ?? ".";
-			const b = botRow[srcCol] ?? ".";
-			const tc = PALETTE[t];
-			const bc = PALETTE[b];
-			if (!tc && !bc) {
-				line += " ";
-			} else if (tc && !bc) {
-				line += `\x1b[38;2;${tc[0]};${tc[1]};${tc[2]}m▀\x1b[0m`;
-			} else if (!tc && bc) {
-				line += `\x1b[38;2;${bc[0]};${bc[1]};${bc[2]}m▄\x1b[0m`;
-			} else if (tc && bc && t === b) {
-				line += `\x1b[38;2;${tc[0]};${tc[1]};${tc[2]}m█\x1b[0m`;
-			} else if (tc && bc) {
-				line += `\x1b[38;2;${tc[0]};${tc[1]};${tc[2]}m\x1b[48;2;${bc[0]};${bc[1]};${bc[2]}m▀\x1b[0m`;
-			}
-		}
-		rows.push(line);
-	}
-	return rows;
-}
 
 function cleanMarkdown(text: string): string {
 	return text
@@ -471,7 +157,7 @@ function cleanMarkdown(text: string): string {
 }
 
 /** How many transcript lines the radar reads from the end of each session file; nothing older is ever needed. */
-const TRANSCRIPT_TAIL_LINES = 200;
+export const TRANSCRIPT_TAIL_LINES = 200;
 
 function readTranscriptInsights(
 	readLines: (file: string) => string,
@@ -576,15 +262,17 @@ function collectRuns(profileDir: string): RunSummary[] {
 			.filter((f) => f.endsWith(".log"))
 			.sort()
 			.reverse()
-			.slice(0, 4);
+			.slice(0, 30);
 		return files.map((file) => {
 			const full = join(dir, file);
 			// The exit marker is the log's last line, so the end of the log is all that's needed.
-			const status = readRun(readLastLines(full, 10), 3);
+			const status = readRun(readLastLines(full, 100), 80);
 			const label = file.replace(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-/, "").replace(/\.log$/, "");
 			const mtime = statSync(full).mtime.toISOString();
 			return {
+				id: full,
 				label,
+				tail: status.tail,
 				done: status.done,
 				...(status.exitCode !== undefined ? { exitCode: status.exitCode } : {}),
 				updatedAt: mtime,
@@ -595,19 +283,9 @@ function collectRuns(profileDir: string): RunSummary[] {
 	}
 }
 
-function collectMail(profileDir: string): MailItem[] {
-	const file = join(profileDir, "sitra-mail.json");
-	if (!existsSync(file)) return [];
-	try {
-		const parsed = JSON.parse(readFileSync(file, "utf8"));
-		return Array.isArray(parsed) ? (parsed as MailItem[]).slice(0, 6) : [];
-	} catch {
-		return [];
-	}
-}
-
 interface HerdrWorkspaceMeta {
 	workspaceId: string;
+	tabId?: string;
 	number: number;
 	name: string;
 	tabLabel?: string;
@@ -641,7 +319,8 @@ function queryHerdrWorkspaces(
 	if (process.env.HERDR_ENV !== "1") return [];
 	try {
 		const run = (args: string[]) =>
-			JSON.parse(execFileSync("herdr", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })).result;
+			JSON.parse(execFileSync("herdr", args, { encoding: "utf8", timeout: 1000, stdio: ["ignore", "pipe", "ignore"] }))
+				.result;
 		const workspaces = (run(["workspace", "list"])?.workspaces ?? []) as {
 			workspace_id: string;
 			number: number;
@@ -697,6 +376,7 @@ function queryHerdrWorkspaces(
 			const tabLabel = cleanTabLabel(primary.tab_id ? tabs.get(primary.tab_id) : undefined);
 			out.push({
 				workspaceId: ws.workspace_id,
+				...(primary.tab_id ? { tabId: primary.tab_id } : {}),
 				number: ws.number,
 				name: wsName,
 				...(tabLabel ? { tabLabel } : {}),
@@ -813,6 +493,7 @@ export function collectRadarSnapshot(
 				title: ws.name,
 				...(ws.tabLabel && ws.tabLabel.toLowerCase() !== ws.name.toLowerCase() ? { subtitle: ws.tabLabel } : {}),
 				workspaceId: ws.workspaceId,
+				...(ws.tabId ? { tabId: ws.tabId } : {}),
 				...(ws.harness ? { harness: ws.harness } : {}),
 				lead,
 				teammates,
@@ -899,10 +580,11 @@ export function collectRadarSnapshot(
 		runs: collectRuns(profileDir),
 		pendingProposals,
 		mail: collectMail(profileDir),
+		summary: readTowerSummary(profileDir),
 	};
 }
 
-function drawBox(
+export function drawBox(
 	title: string,
 	rightTag: string,
 	bodyLines: readonly string[],
@@ -937,7 +619,7 @@ function drawBox(
 	return [top, ...mid, bot];
 }
 
-function statusBadge(state: VisualState, activeHelpers = 0): string {
+export function statusBadge(state: VisualState, activeHelpers = 0): string {
 	const helperNote = activeHelpers > 0 ? ` +${activeHelpers} helper${activeHelpers === 1 ? "" : "s"}` : "";
 	switch (state) {
 		case "working":
@@ -953,162 +635,18 @@ function statusBadge(state: VisualState, activeHelpers = 0): string {
 	}
 }
 
-function formatAge(iso: string, nowMs = Date.now()): string {
-	const sec = Math.max(0, Math.round((nowMs - Date.parse(iso)) / 1000));
-	if (!Number.isFinite(sec)) return "";
-	if (sec < 30) return "now";
-	if (sec < 60) return `${sec}s`;
-	const min = Math.floor(sec / 60);
-	if (min < 60) return `${min}m`;
-	const hr = Math.floor(min / 60);
-	if (hr < 24) return `${hr}h`;
-	return `${Math.floor(hr / 24)}d`;
-}
-
+/** Render one bounded frame, with controls and the tower summary pinned below the scrollable viewport. */
 export function renderRadarFrame(
 	snapshot: RadarSnapshot,
-	options?: { cols?: number; rows?: number; tick?: number; selectedIndex?: number; nowMs?: number },
+	options?: { cols?: number; rows?: number; tick?: number; selectedIndex?: number; nowMs?: number; state?: RadarState },
 ): string {
-	const cols = Math.max(20, options?.cols ?? 84);
-	const rows = Math.max(12, options?.rows ?? 32);
-	const tick = options?.tick ?? 0;
-	const selected = options?.selectedIndex ?? 0;
-	const nowMs = options?.nowMs ?? Date.now();
-
-	const workingCount = snapshot.workers.filter((w) => w.visualState === "working").length;
-	const waitingWorkers = snapshot.workers.filter(
-		(w) => w.visualState === "waiting_for_user" || w.visualState === "error_loop",
-	);
-	const waitingCount = waitingWorkers.length;
-	const totalActivity = [0, 0, 0, 0, 0, 0, 0, 0].map((_, idx) =>
-		snapshot.workers.reduce((sum, w) => sum + (w.activity[idx] ?? 0), 0),
-	);
-
-	const beacon = waitingCount > 0 ? "▲" : workingCount > 0 ? "◈" : "❖";
-	const waveWidth = Math.max(4, Math.min(12, cols - 44));
-	const wave = gradientSparkline(totalActivity, waveWidth, [0, 215, 255], [75, 255, 175]);
-	const headerHeadline =
-		waitingCount > 0
-			? fg(255, 205, 55, bold(`Needs you in #${waitingWorkers[0]?.index} ${waitingWorkers[0]?.title}`))
-			: `${fg(75, 255, 175, `${workingCount} working`)} · ${dim(`${snapshot.workers.length - workingCount} idle`)} · ${fg(160, 225, 200, "Nothing waiting on you")}`;
-	const headerBox = drawBox(
-		`${beacon} SITRA RADAR · ${snapshot.towerName}`,
-		waitingCount > 0 ? "NEEDS YOU" : "ALL CLEAR",
-		[` ${wave}  ${headerHeadline}`],
-		cols,
-		waitingCount > 0 ? [255, 190, 55] : [60, 195, 245],
-	);
-
-	const inner = cols - 2;
-	const spriteWidth: 14 | 8 = cols >= 44 ? 14 : 8;
-	const textCols = Math.max(8, inner - spriteWidth - 3);
-	const workerLines: string[] = [];
-
-	if (snapshot.workers.length === 0) {
-		workerLines.push(dim(" No active workspaces found."));
-	} else {
-		for (let i = 0; i < snapshot.workers.length; i++) {
-			const w = snapshot.workers[i];
-			if (!w) continue;
-			const sprite = renderSprite(w.visualState, tick + i, spriteWidth);
-			const sub = w.subtitle ? ` · ${w.subtitle}` : "";
-			const paneTag = !w.workspaceId && w.lead.paneId ? ` [${w.lead.paneId}]` : "";
-			const age = formatAge(w.lead.updatedAt, nowMs);
-			const ageTag = age ? ` · ${age}` : "";
-			const selMark = i === selected ? fg(80, 255, 200, "▸") : " ";
-			const spark = gradientSparkline(
-				w.activity,
-				Math.max(4, Math.min(8, Math.floor(textCols / 5))),
-				w.visualState === "waiting_for_user" ? [255, 180, 50] : [55, 205, 255],
-				w.visualState === "waiting_for_user" ? [255, 235, 100] : [80, 255, 175],
-			);
-
-			const r0 = `${selMark}${bold(`#${w.index} ${w.title}`)}${fg(140, 210, 250, sub)}  ${statusBadge(
-				w.visualState,
-				w.activeHelpers,
-			)}${dim(`${paneTag}${ageTag}`)}`;
-
-			const line1Text =
-				w.nowLine ??
-				(w.visualState === "waiting_for_user"
-					? (w.lead.waitingFor ?? "Waiting for your answer")
-					: (w.lead.task ?? "Standing by"));
-			const r1 = `  ${fg(120, 220, 255, w.visualState === "working" ? "Now: " : "Task: ")}${fg(230, 245, 255, line1Text)}`;
-
-			const line2Text =
-				w.lastLine ??
-				(w.teammates.length > 0
-					? `Helpers: ${w.teammates.map((t) => `${t.name ?? t.agent ?? "helper"} (${t.status})`).join(", ")}`
-					: (w.lastAction ?? "Ready"));
-			const r2 = `  ${dim(`Last: ${line2Text}`)}`;
-
-			const branchOrTeam =
-				w.teammates.length > 0
-					? `${fg(120, 230, 255, "team:")} ${w.teammates.map((t) => t.name ?? t.agent ?? "helper").join(", ")}`
-					: dim(w.lead.branch ?? basename(w.lead.repo || w.lead.cwd));
-			const r3 = `  ${spark}  ${branchOrTeam}`;
-
-			const rightRows = [r0, r1, r2, r3];
-			for (let r = 0; r < 4; r++) {
-				workerLines.push(` ${sprite[r]}  ${fitAnsi(rightRows[r] ?? "", textCols)}`);
-			}
-			if (i < snapshot.workers.length - 1) {
-				workerLines.push(dim(` ${"─".repeat(Math.max(6, inner - 2))} `));
-			}
-		}
-	}
-	const workersBox = drawBox("YOUR WORKSPACES", `${snapshot.workers.length} open`, workerLines, cols, [65, 200, 245]);
-
-	const activeRuns = snapshot.runs.filter((r) => !r.done);
-	const runsBox =
-		activeRuns.length > 0 || (snapshot.runs.length > 0 && !snapshot.workers.some((w) => w.workspaceId))
-			? drawBox(
-					"BACKGROUND RUNS",
-					`${snapshot.runs.length}`,
-					snapshot.runs.slice(0, 2).map((r) => {
-						const icon = !r.done
-							? fg(80, 235, 255, "◐")
-							: r.exitCode === 0
-								? fg(70, 250, 165, "✓")
-								: fg(255, 90, 95, `✗(${r.exitCode})`);
-						return ` ${icon} ${r.label}`;
-					}),
-					cols,
-					[70, 215, 175],
-				)
-			: [];
-
-	const mailBox =
-		snapshot.mail.length > 0
-			? drawBox(
-					"CONCOURSE MAIL",
-					`${snapshot.mail.length} recent`,
-					snapshot.mail.slice(0, 3).map((m) => {
-						const tag =
-							m.state === "WORKING"
-								? fg(255, 210, 80, "waiting on them")
-								: m.state === "INPUT_REQUIRED"
-									? fg(255, 110, 110, bold("needs reply"))
-									: fg(110, 235, 175, "done");
-						return ` ${bold(m.peer)} (${tag}): ${m.summary}`;
-					}),
-					cols,
-					[185, 145, 255],
-				)
-			: [];
-
-	const footer = fitAnsi(
-		` ${fg(95, 225, 255, "[1-9]")} jump to workspace  ${fg(95, 225, 255, "[↑/↓ Enter]")} switch  ${fg(
-			95,
-			225,
-			255,
-			"[q]",
-		)} close`,
-		cols,
-	);
-
-	const allLines = [...headerBox, ...workersBox, ...runsBox, ...mailBox, footer];
-	return allLines.slice(0, rows).join("\n");
+	const layout = buildRadarLayout(snapshot, {
+		cols: options?.cols ?? 84,
+		rows: options?.rows ?? 32,
+		nowMs: options?.nowMs,
+		state: options?.state ?? { ...initialRadarState(), selected: options?.selectedIndex ?? 0 },
+	});
+	return [...layout.header, ...layout.body, ...layout.summary, ...layout.footer].join("\n");
 }
 
 /**
@@ -1153,132 +691,4 @@ export function frameUpdate(prev: readonly string[] | undefined, next: readonly 
 	return out ? `\x1b[?2026h${out}\x1b[?2026l` : "";
 }
 
-function focusWorker(card: WorkerCard | undefined): void {
-	if (!card) return;
-	try {
-		const wsId = card.workspaceId ?? (card.lead.paneId?.includes(":") ? card.lead.paneId.split(":")[0] : undefined);
-		if (wsId) {
-			execFileSync("herdr", ["workspace", "focus", wsId], { stdio: "ignore" });
-		}
-	} catch {
-		// Ignore when outside herdr.
-	}
-}
-
-/** Runs the interactive full-screen btop-style radar TUI in the current terminal. */
-export function runRadarTui(profileDir: string, options?: { towerName?: string; closePaneOnExit?: boolean }): void {
-	let tick = 0;
-	let selectedIndex = 0;
-	const readLines = createTailReader(TRANSCRIPT_TAIL_LINES);
-	const snapshot = () =>
-		collectRadarSnapshot(profileDir, { towerName: options?.towerName, includeHerdr: true, readLines });
-	let lastSnap = snapshot();
-	let shown: string[] | undefined;
-
-	const draw = () => {
-		const cols = process.stdout.columns || 84;
-		const rows = process.stdout.rows || 32;
-		const frameLines = renderRadarFrame(lastSnap, { cols, rows, tick, selectedIndex }).split("\n");
-		const out = frameUpdate(shown, frameLines);
-		shown = frameLines;
-		if (out) process.stdout.write(out);
-	};
-	const refresh = createRefreshScheduler(() => {
-		lastSnap = snapshot();
-		if (selectedIndex >= lastSnap.workers.length) {
-			selectedIndex = Math.max(0, lastSnap.workers.length - 1);
-		}
-		draw();
-	}, 1000);
-	const render = (refreshData: boolean) => (refreshData ? refresh.request() : draw());
-
-	process.stdout.write("\x1b]0;sitra radar\x07\x1b[?1049h\x1b[?25l\x1b[2J");
-	draw();
-
-	const watchers: ReturnType<typeof watch>[] = [];
-	for (const dir of [profileDir, sessionsDir(profileDir), join(profileDir, "runs")]) {
-		if (!existsSync(dir)) continue;
-		try {
-			watchers.push(watch(dir, () => render(true)));
-		} catch {
-			// Polling fallback handles platforms where watch fails.
-		}
-	}
-
-	const timer = setInterval(() => {
-		tick++;
-		if (tick % 4 === 0) refresh.request();
-		draw();
-	}, 450);
-
-	const onResize = () => {
-		process.stdout.write("\x1b[2J");
-		shown = undefined;
-		draw();
-	};
-	process.stdout.on("resize", onResize);
-
-	const cleanup = () => {
-		clearInterval(timer);
-		refresh.cancel();
-		for (const w of watchers) w.close();
-		process.stdout.off("resize", onResize);
-		if (process.stdin.isTTY) process.stdin.setRawMode(false);
-		process.stdout.write("\x1b[?25h\x1b[?1049l\x1b]0;\x07");
-	};
-	process.once("SIGINT", () => {
-		cleanup();
-		process.exit(0);
-	});
-	process.once("SIGTERM", () => {
-		cleanup();
-		process.exit(0);
-	});
-
-	if (process.stdin.isTTY) {
-		process.stdin.setRawMode(true);
-		process.stdin.resume();
-		process.stdin.on("data", (buf: Buffer) => {
-			const key = buf.toString("utf8");
-			if (key === "q" || key === "\u0003") {
-				cleanup();
-				if (options?.closePaneOnExit && process.env.HERDR_ENV === "1" && process.env.HERDR_PANE_ID) {
-					try {
-						execFileSync("herdr", ["pane", "close", process.env.HERDR_PANE_ID], { stdio: "ignore" });
-					} catch {
-						// Ignore if already closing.
-					}
-				}
-				process.exit(0);
-			}
-			if (key === "r") {
-				render(true);
-				return;
-			}
-			if (key === "j" || key === "\u001b[B") {
-				selectedIndex = Math.min(Math.max(0, lastSnap.workers.length - 1), selectedIndex + 1);
-				render(false);
-				return;
-			}
-			if (key === "k" || key === "\u001b[A") {
-				selectedIndex = Math.max(0, selectedIndex - 1);
-				render(false);
-				return;
-			}
-			if (key === "\r" || key === "\n") {
-				focusWorker(lastSnap.workers[selectedIndex]);
-				return;
-			}
-			if (/^[1-9]$/.test(key)) {
-				const num = Number(key);
-				const byWorkspaceNumber = lastSnap.workers.findIndex((w) => w.index === num);
-				const idx = byWorkspaceNumber !== -1 ? byWorkspaceNumber : num - 1;
-				if (lastSnap.workers[idx]) {
-					selectedIndex = idx;
-					focusWorker(lastSnap.workers[idx]);
-					render(false);
-				}
-			}
-		});
-	}
-}
+export { runRadarTui } from "./radar-runtime.ts";
