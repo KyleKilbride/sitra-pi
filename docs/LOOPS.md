@@ -53,11 +53,13 @@ Verified against `main` at `997e0e5`:
 
 Keep pure logic separate from Pi wiring:
 
-- `extensions/loop.ts`: pure state, TypeBox schemas, stage transitions, report validation, metric helpers.
-- `extensions/loop-pi.ts`: Pi command/tool wiring, helper starts, run_in_pane integration, Grimoire proposal drafting.
-- `package.json`: add `./extensions/loop-pi.ts` to `pi.extensions` when implemented.
-- New profile templates for advisors and verifier: each must set explicit `tools:` and `skills:` lists and use the
-  `helper_report` tool.
+- This first profile slice does not add the runner, loop state file, or a `loop-pi.ts` extension yet.
+- `extensions/helper-report.ts`: pure TypeBox validation for base helper reports and role-specific advisor/verifier
+  details.
+- `extensions/sharpen-pi.ts`: Pi wiring only; verifier subagent calls skip the automatic helper brief by checking the
+  structured `agent` field.
+- Profile templates for advisors and verifier: each sets explicit `tools:`, `deny-tools:`, `skills: none`, and
+  `allow-model-override: false`, and reports through `helper_report`.
 
 ## State and brief schema
 
@@ -73,6 +75,7 @@ const Question = Type.Object({
 	id: Type.String(),
 	text: Type.String(),
 	recommended: Type.String(),
+	dependsOn: Type.Array(Type.String()),
 	answer: Type.Optional(Type.String()),
 });
 
@@ -173,6 +176,16 @@ const HelperReport = Type.Object({
 	evidence: Type.Array(Type.String()),
 	openQuestions: Type.Array(Type.String()),
 	assumptions: Type.Array(Type.String()),
+	role: Type.Optional(
+		Type.Union([
+			Type.Literal("intent"),
+			Type.Literal("codebase"),
+			Type.Literal("test-design"),
+			Type.Literal("architecture"),
+			Type.Literal("verifier"),
+		]),
+	),
+	details: Type.Optional(Type.Unknown()),
 });
 ```
 
@@ -197,12 +210,18 @@ const CodebaseDetails = Type.Object({
 	existingTests: Type.Array(Type.String()),
 	facts: Type.Array(Type.String()),
 	boundaries: Type.Array(Type.String()),
+	owners: Type.Array(Type.String()),
 });
 
 const TestDesignDetails = Type.Object({
-	acceptanceTests: Type.Array(Type.String()),
-	testFiles: Type.Array(Type.String()),
-	commands: Type.Array(Type.String()),
+	acceptanceTests: Type.Array(
+		Type.Object({
+			name: Type.String(),
+			proves: Type.String(),
+			targetFile: Type.String(),
+			command: Type.String(),
+		}),
+	),
 });
 
 const ArchitectureDetails = Type.Object({
@@ -210,12 +229,17 @@ const ArchitectureDetails = Type.Object({
 	boundaryConcerns: Type.Array(Type.String()),
 	needlessLayersOrCode: Type.Array(Type.String()),
 	simplerShape: Type.Array(Type.String()),
-	privateChecklistEntriesUsed: Type.Array(Type.String()),
+	checklistEntriesUsed: Type.Array(Type.String()),
+	checklist: Type.Object({
+		state: Type.Union([Type.Literal("ok"), Type.Literal("absent"), Type.Literal("unreadable")]),
+		path: Type.String(),
+	}),
 });
 
 const VerifierDetails = Type.Object({
 	checksRun: Type.Array(Type.String()),
-	runLogs: Type.Array(Type.String()),
+	rerunChecks: Type.Array(Type.Object({ command: Type.String(), log: Type.String(), reason: Type.String() })),
+	acceptedLogs: Type.Array(Type.Object({ log: Type.String(), reason: Type.String() })),
 	testHashesChecked: Type.Array(Type.String()),
 	goalMatched: Type.Boolean(),
 	missClass: Type.Optional(ReworkClass),

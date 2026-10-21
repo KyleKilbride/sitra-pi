@@ -104,10 +104,23 @@ test("loop model e2e: helper_report can return structured fields through a real 
 					name: "helper_report",
 					arguments: {
 						status: "done",
+						role: "intent",
 						summary: "Checked the parser tests.",
 						evidence: ["test/parser.test.ts"],
 						openQuestions: [],
 						assumptions: ["No browser was needed."],
+						details: {
+							questions: [
+								{
+									id: "q1",
+									text: "Keep the parser test in place?",
+									recommended: "Yes, keep the existing test target.",
+									dependsOn: [],
+								},
+							],
+							doneCandidates: ["Parser tests describe the expected behavior."],
+							ambiguities: [],
+						},
 					},
 				},
 			},
@@ -116,6 +129,7 @@ test("loop model e2e: helper_report can return structured fields through a real 
 	});
 	expect(JSON.stringify(records)).toContain("sitra-helper-report-v1");
 	expect(JSON.stringify(records)).toContain("Checked the parser tests.");
+	expect(JSON.stringify(records)).toContain('"role":"intent"');
 }, 60_000);
 
 test("loop model e2e: invalid scripts and exhausted scripts fail loudly", async () => {

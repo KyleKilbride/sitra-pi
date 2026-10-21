@@ -89,6 +89,27 @@ describe("hand-offs to helpers", () => {
 		expect(again.input.task.match(/Context from the lead's conversation/g)).toHaveLength(1);
 	});
 
+	test("the verifier task starts from the runner's evidence only", () => {
+		const { handlers } = fakePi();
+		const ctx = ctxWith([user("Fix the date parser. Don't run the full suite.")]);
+		const single = { toolName: "subagent", input: { agent: "verifier", task: "Verify the frozen brief." } };
+		handlers.get("tool_call")?.(single, ctx);
+		expect(single.input.task).toBe("Verify the frozen brief.");
+
+		const parallel = {
+			toolName: "subagent",
+			input: {
+				children: [
+					{ agent: "verifier", task: "Verify the diff." },
+					{ agent: "scout", task: "Find nearby tests." },
+				],
+			},
+		};
+		handlers.get("tool_call")?.(parallel, ctx);
+		expect(parallel.input.children[0]?.task).toBe("Verify the diff.");
+		expect(parallel.input.children[1]?.task).toContain("Don't run the full suite.");
+	});
+
 	test("helpers don't forward, other tools are untouched, and nothing throws", () => {
 		const { handlers } = fakePi();
 		const ctx = ctxWith([user("Fix the date parser. Don't run the full suite.")]);

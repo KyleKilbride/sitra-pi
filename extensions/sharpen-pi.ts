@@ -56,6 +56,11 @@ function withBrief(task: unknown, brief: string): unknown {
 	return `${task}\n\n${brief}`;
 }
 
+function addBriefToChild(input: Record<string, unknown>, brief: string): void {
+	if (input.agent === "verifier") return;
+	if (typeof input.task === "string") input.task = withBrief(input.task, brief);
+}
+
 /** Asks the session's model for a handover of `messages`; throws when no usable summary comes back. */
 async function writeHandover(ctx: Ctx, messages: Msg[], signal?: AbortSignal): Promise<string> {
 	if (!ctx.model || !ctx.modelRegistry) throw new Error("no model");
@@ -112,10 +117,10 @@ export default function sitraSharpen(pi: Pi): void {
 			const brief = helperBrief(branchMessages(ctx));
 			if (!brief) return undefined;
 			const input = event.input;
-			if (typeof input.task === "string") input.task = withBrief(input.task, brief);
+			addBriefToChild(input, brief);
 			if (Array.isArray(input.children)) {
 				for (const child of input.children as Record<string, unknown>[]) {
-					if (child && typeof child === "object") child.task = withBrief(child.task, brief);
+					if (child && typeof child === "object") addBriefToChild(child, brief);
 				}
 			}
 		} catch {
