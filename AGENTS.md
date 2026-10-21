@@ -8,6 +8,9 @@ sitra is a Pi package plus a small CLI. One package, no workspace. Read this bef
 | Path | What it is |
 |---|---|
 | `extensions/grimoire.ts` | Grimoire core: entry format, store, root loading, catalogue, search, import from `/kb`. No Pi imports. |
+| `extensions/grimoire-ui.ts` | Local Grimoire web UI server (`127.0.0.1`, token + `Host` check), snapshot, CRUD, link repointing and day log. No Pi imports. |
+| `extensions/grimoire-ui-pi.ts` | Pi wiring for `/grimoire-ui`: starts the local server, opens the default browser, stops on `session_shutdown`. |
+| `extensions/replycheck.ts` / `replycheck-pi.ts` | The end-of-reply PR check: PR links the agent didn't look up this turn are checked with `gh` before the reply settles. |
 | `extensions/knowledge.ts` | Pi extension: Grimoire in every prompt, `grimoire_propose`, `grimoire_search`, `/grimoire`, `/grimoire-reflect`, the status line. |
 | `extensions/lead.ts` | Pi extension: the lead's rules (lead only, never teammates), the context-file filter, `run_in_pane` / `check_run`, the herdr "needs you" signal. |
 | `extensions/runs.ts` | Pure helpers for `run_in_pane`: the bash command that logs output and the exit code, and reading a log back. |

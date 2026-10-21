@@ -30,7 +30,9 @@
 			"./extensions/knowledge.ts",
 			"./extensions/lead.ts",
 			"./extensions/tower.ts",
-			"./extensions/sharpen-pi.ts"
+			"./extensions/sharpen-pi.ts",
+			"./extensions/grimoire-ui-pi.ts",
+			"./extensions/replycheck-pi.ts"
 		]
 	},
 	"scripts": {

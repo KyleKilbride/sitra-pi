@@ -105,6 +105,9 @@ every tool.
   summary, path), and opens the entries that apply.
 - Agents propose with `grimoire_propose` (only ever into `proposals/`) and look things up with `grimoire_search`.
 - You review with `/grimoire`, one at a time: Accept, Reject, Skip, "Accept this and all the rest", or Stop.
+- `/grimoire-ui` opens Grimoire in your default browser (on a local `127.0.0.1` server with a random token) so you can
+  see the exact prompt text agents get, check which hooks and extensions are active, edit the root or any rule by hand,
+  add/move/delete/restore entries, and inspect the day's log of pauses, corrections and repeats.
 - `/grimoire-reflect` asks the agent what the session taught that future agents need.
 - **Learns from corrections:** when you correct an agent, a background model drafts the missing rule (with a trigger
   when one fits) into `proposals/`, quoting you. You just review `/grimoire`. Turn it off with `"learn": false`.

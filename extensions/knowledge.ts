@@ -173,7 +173,7 @@ export default function sitraKnowledge(pi: Pi): void {
 					session,
 					included.map((e) => e.file),
 					call,
-					{ turn: String(turn) },
+					{ turn: String(turn), cwd: ctx.cwd },
 				);
 			} catch {
 				// Measuring never gets in the way of a rule.
