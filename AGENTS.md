@@ -40,7 +40,7 @@ flowchart LR
   approved -->|root + catalogue in every prompt| lead & team
 ```
 
-- `sitra` sets `PI_CODING_AGENT_DIR=~/.sitra/profile`, `PI_MEMORY_DIR` and `SITRA_USER_NAME`, then runs `pi`.
+- `sitra` sets `PI_CODING_AGENT_DIR=~/.sitra/profile` and `SITRA_USER_NAME`, then runs `pi`.
 - Teammates get `PI_SUBAGENT_NAME` from pi-subagents; `lead.ts` uses it to give the lead's rules to the lead only.
 
 ## Rules for changing it

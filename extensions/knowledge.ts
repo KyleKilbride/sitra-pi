@@ -10,12 +10,14 @@ import {
 	decide,
 	grimoireDir,
 	grimoireSection,
+	type grimoireStoreStatus,
 	importedRepos,
 	KINDS,
 	type Kind,
 	listEntries,
+	listEntriesWithStatus,
 	listProposals,
-	loadRoot,
+	loadRootWithStatus,
 	searchEntries,
 	unreadableProposals,
 	writeClaudeRoot,
@@ -102,13 +104,40 @@ export default function sitraKnowledge(pi: Pi): void {
 		return existsSync(join(repo, ".pi", "knowledge")) && !importedRepos(dir()).includes(repo) ? repo : undefined;
 	};
 
+	let warnedUnreadable = "";
+	const unavailableSection = (s: ReturnType<typeof grimoireStoreStatus>) =>
+		[
+			"# Grimoire unavailable",
+			`The Grimoire at ${s.dir} is ${s.state}${"reason" in s ? `: ${s.reason}` : "."}`,
+			"Continue the ordinary session, but do not assume approved knowledge was loaded. Surface this to the person.",
+		].join("\n");
+	const warnUnreadable = (ctx: Ctx, s: ReturnType<typeof grimoireStoreStatus>) => {
+		if (s.state !== "unreadable") return;
+		const key = `${s.dir}\n${s.reason}`;
+		if (key === warnedUnreadable) return;
+		warnedUnreadable = key;
+		ctx.ui.notify(`Grimoire is unreadable at ${s.dir}: ${s.reason}. Continuing without approved knowledge.`, "warning");
+	};
+
 	const status = (ctx: Ctx) => {
 		const g = dir();
-		const approved = listEntries(g).length;
+		const root = loadRootWithStatus(g);
+		if (root.status.state === "unreadable") {
+			ctx.ui.setStatus("sitra-grimoire", `grimoire unreadable: ${root.status.reason}`);
+			warnUnreadable(ctx, root.status);
+			return;
+		}
+		const loaded = listEntriesWithStatus(g);
+		if (loaded.status.state === "unreadable") {
+			ctx.ui.setStatus("sitra-grimoire", `grimoire unreadable: ${loaded.status.reason}`);
+			warnUnreadable(ctx, loaded.status);
+			return;
+		}
+		const approved = loaded.entries.length;
 		const waiting = listProposals(g).length;
 		const parts = [`grimoire ${approved}`];
 		if (waiting) parts.push(`${waiting} to review (/grimoire)`);
-		if (loadRoot(g).truncated) parts.push("root over its limit");
+		if (root.root.truncated) parts.push("root over its limit");
 		if (oldKnowledgeBase(ctx.cwd)) parts.push("old /kb here: sitra grimoire import");
 		const t = tally(g);
 		if (t.caught || t.learned || t.repeats) {
@@ -133,6 +162,11 @@ export default function sitraKnowledge(pi: Pi): void {
 		try {
 			if (typeof event?.toolName !== "string") return undefined;
 			const g = dir();
+			const loaded = listEntriesWithStatus(g);
+			if (loaded.status.state === "unreadable") {
+				warnUnreadable(ctx, loaded.status);
+				return undefined;
+			}
 			const session = ctx?.sessionManager?.getSessionId?.() ?? `pi-${process.pid}`;
 			const call = { tool: event.toolName, input: event.input && typeof event.input === "object" ? event.input : {} };
 			try {
@@ -149,7 +183,7 @@ export default function sitraKnowledge(pi: Pi): void {
 			) {
 				looked = true;
 			}
-			const entries = listEntries(g);
+			const entries = loaded.entries;
 			const firstChange = ["edit", "write", "subagent"].includes(event.toolName);
 			if (firstChange && !looked && !lookAsked && entries.length > 0 && process.env.SITRA_GRIMOIRE_LOOK !== "0") {
 				// Models under-use memory unless nudged (Anthropic's memory tool insists on a look before acting).
@@ -179,7 +213,8 @@ export default function sitraKnowledge(pi: Pi): void {
 				// Measuring never gets in the way of a rule.
 			}
 			return { block: true, reason: text };
-		} catch {
+		} catch (error) {
+			ctx?.ui?.notify(`Grimoire action triggers could not be checked: ${String(error).slice(0, 200)}`, "warning");
 			return undefined;
 		}
 	});
@@ -239,9 +274,23 @@ export default function sitraKnowledge(pi: Pi): void {
 		}
 		try {
 			const g = dir();
-			event.systemPromptOptions.sections.grimoire = grimoireSection(g, loadRoot(g), listEntries(g), { who: who() });
-		} catch {
-			// An unreadable Grimoire leaves the prompt without it rather than failing the turn.
+			const root = loadRootWithStatus(g);
+			if (root.status.state === "unreadable") {
+				warnUnreadable(ctx, root.status);
+				event.systemPromptOptions.sections.grimoire = unavailableSection(root.status);
+				return;
+			}
+			const loaded = listEntriesWithStatus(g);
+			if (loaded.status.state === "unreadable") {
+				warnUnreadable(ctx, loaded.status);
+				event.systemPromptOptions.sections.grimoire = unavailableSection(loaded.status);
+				return;
+			}
+			event.systemPromptOptions.sections.grimoire = grimoireSection(g, root.root, loaded.entries, { who: who() });
+		} catch (error) {
+			const s = { state: "unreadable" as const, dir: dir(), reason: String(error) };
+			warnUnreadable(ctx, s);
+			event.systemPromptOptions.sections.grimoire = unavailableSection(s);
 		}
 	});
 

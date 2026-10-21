@@ -3,7 +3,7 @@
  * `kinds/` (approved entries, pulled in by relevance), `proposals/` (agents write only here) and `rejected/`.
  * No Pi imports: the Pi extension, the CLI and the Claude Code / Codex hooks all build on this file.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { shellQuote } from "./runs.ts";
@@ -38,6 +38,11 @@ export interface RootText {
 	truncated: boolean;
 }
 
+export type GrimoireStoreStatus =
+	| { state: "ok"; dir: string }
+	| { state: "missing"; dir: string; reason: string }
+	| { state: "unreadable"; dir: string; reason: string };
+
 /** Sizes that keep the brain from crowding out the work. */
 export const LIMITS = { rootChars: 32_000, catalogueChars: 12_000, queryChars: 4_000 };
 
@@ -46,6 +51,29 @@ export function grimoireDir(env: Record<string, string | undefined>, home = home
 	if (env.SITRA_GRIMOIRE?.trim()) return env.SITRA_GRIMOIRE.trim();
 	if (env.PI_CODING_AGENT_DIR?.trim()) return join(env.PI_CODING_AGENT_DIR.trim(), "grimoire");
 	return join(env.SITRA_HOME?.trim() || join(home, ".sitra"), "profile", "grimoire");
+}
+
+export function grimoireStoreStatus(dir: string): GrimoireStoreStatus {
+	const problem = readableDir(dir, "Grimoire");
+	if (problem === "missing") return { state: "missing", dir, reason: `${dir} does not exist` };
+	if (problem) return { state: "unreadable", dir, reason: problem };
+	return { state: "ok", dir };
+}
+
+function reason(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function readableDir(dir: string, label: string): string | "missing" | undefined {
+	try {
+		const stat = statSync(dir);
+		if (!stat.isDirectory()) return `${label} is not a directory: ${dir}`;
+		readdirSync(dir);
+		return undefined;
+	} catch (error) {
+		const code = typeof error === "object" && error ? (error as { code?: unknown }).code : undefined;
+		return code === "ENOENT" ? "missing" : `${label} can't be read: ${reason(error)}`;
+	}
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -143,12 +171,17 @@ function markdownFiles(dir: string): string[] {
 		.sort();
 }
 
-function readEntries(root: string, rel: string): Entry[] {
+function unreadable(dir: string, error: unknown): GrimoireStoreStatus {
+	return { state: "unreadable", dir, reason: reason(error) };
+}
+
+function readEntries(root: string, rel: string, strict = false): Entry[] {
 	return markdownFiles(join(root, rel)).flatMap((f) => {
 		try {
 			const entry = parseEntry(readFileSync(join(root, rel, f), "utf8"), `${rel}/${f}`);
 			return entry ? [entry] : [];
-		} catch {
+		} catch (error) {
+			if (strict) throw error;
 			return []; // one unreadable file never hides the rest
 		}
 	});
@@ -157,6 +190,20 @@ function readEntries(root: string, rel: string): Entry[] {
 /** Approved entries, from `kinds/<kind>s/`. */
 export function listEntries(dir: string): Entry[] {
 	return KINDS.flatMap((kind) => readEntries(dir, `kinds/${kind}s`));
+}
+
+export function listEntriesWithStatus(dir: string): { status: GrimoireStoreStatus; entries: Entry[] } {
+	const status = grimoireStoreStatus(dir);
+	if (status.state === "missing") return { status, entries: [] };
+	if (status.state === "unreadable") return { status, entries: [] };
+	try {
+		return {
+			status,
+			entries: KINDS.flatMap((kind) => readEntries(dir, `kinds/${kind}s`, true)),
+		};
+	} catch (error) {
+		return { status: unreadable(dir, error), entries: [] };
+	}
 }
 
 export function listProposals(dir: string): Entry[] {
@@ -239,6 +286,21 @@ export function loadRoot(dir: string, maxChars = LIMITS.rootChars): RootText {
 		chars: full.length,
 		truncated: true,
 	};
+}
+
+export function loadRootWithStatus(
+	dir: string,
+	maxChars = LIMITS.rootChars,
+): { status: GrimoireStoreStatus; root: RootText } {
+	const status = grimoireStoreStatus(dir);
+	const empty = { text: "", files: [], chars: 0, truncated: false };
+	if (status.state === "missing") return { status, root: empty };
+	if (status.state === "unreadable") return { status, root: empty };
+	try {
+		return { status, root: loadRoot(dir, maxChars) };
+	} catch (error) {
+		return { status: unreadable(dir, error), root: empty };
+	}
 }
 
 /**
