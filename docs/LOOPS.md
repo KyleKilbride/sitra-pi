@@ -92,6 +92,7 @@ const AdvisorRun = Type.Object({
 });
 
 const BuildState = Type.Object({
+	commit: Type.Optional(Type.String()),
 	testFiles: Type.Array(Type.String()),
 	testHashes: Type.Array(Type.Object({ file: Type.String(), sha256: Type.String() })),
 	redRunLog: Type.Optional(Type.String()),
@@ -149,6 +150,8 @@ export const LoopState = Type.Object({
 		Type.Object({
 			status: Type.Union([Type.Literal("passed"), Type.Literal("missed"), Type.Literal("blocked")]),
 			runLogs: Type.Array(Type.String()),
+			rerunChecks: Type.Array(Type.Object({ command: Type.String(), log: Type.String(), reason: Type.String() })),
+			acceptedLogs: Type.Array(Type.Object({ log: Type.String(), reason: Type.String() })),
 			summary: Type.String(),
 		}),
 	),
@@ -173,14 +176,12 @@ const HelperReport = Type.Object({
 });
 ```
 
-Each role uses that transport plus a role-specific schema in `details` or an equivalent validated payload. The transport
-decision is part of the runner slice because PR #25 removes lead-side text parsing. Options:
-
-1. Pi tool result details carry the validated report to the runner.
-2. The helper tool emits a custom message the runner consumes.
-3. The helper writes a report file in the private profile and returns its path.
-
-The doc should not choose the transport yet; it should require that the runner receives validated fields, not prose.
+Each role uses that transport plus a role-specific schema in `details`. Validated helper reports reach the runner as Pi
+custom messages carrying structured data; they are never reparsed from model prose. This is better than tool-result
+details because the runner can consume one normalized message stream for every helper, and better than report files
+because it avoids stale paths, cleanup, and another write surface. If Pi cannot carry structured custom-message details,
+the explicit fallback is a private report file path; if that file cannot be written or read, the helper result is
+blocked. There is no hidden fallback.
 
 Role schemas:
 
@@ -227,9 +228,9 @@ All advisors are read-only and must report through `helper_report`.
 
 | Role | Inputs | Sees other advisor output? | When it runs |
 |---|---|---|---|
-| Intent | Goal, limits, Grimoire root/catalogue, current questions | No | First, in parallel with codebase |
-| Codebase | Goal, limits, Grimoire root/catalogue, repository files/history | No | First, in parallel with intent |
-| Test-design | Goal, limits, Grimoire root/catalogue, intent and codebase reports | Yes: intent and codebase | After intent/codebase are done |
+| Intent | Goal, limits, Grimoire root/catalogue (empty if missing), current questions | No | First, in parallel with codebase |
+| Codebase | Goal, limits, Grimoire root/catalogue (empty if missing), repository files/history | No | First, in parallel with intent |
+| Test-design | Goal, limits, Grimoire root/catalogue (empty if missing), intent and codebase reports | Yes: intent and codebase | After intent/codebase are done |
 | Architecture | Goal, limits, frozen advisor brief, lead-authored plan, private checklist from profile or Grimoire | Yes: all brief sections and plan | After the lead drafts the plan |
 
 The architecture checklist is private user material. It lives in the person's profile or Grimoire, not in this repo.
@@ -283,15 +284,19 @@ The verifier is independent:
 - Use a fixed verifier profile: reuse `reviewer.md` only after adding explicit `tools:` and `skills:`, or add
   `verifier.md`.
 - Prefer a verifier model different from the builder's model.
-- The verifier reruns the agreed checks itself when they are targeted and available. It also inspects the runner's
-  provided red/green logs and test hashes. If it cannot rerun or inspect enough evidence, it reports `blocked`.
+- The verifier reruns a check when the saved `run_in_pane` log does not match the current commit and test hashes, or
+  when the check is cheap. Cheap means the command is configured under `maxVerifierRerunMs` for that graph, defaulting
+  to 120,000 ms per check, and is not a full suite. The verifier may accept an existing log only when that log is tied
+  to the exact commit and test hashes being verified. It records each check it reran and each log it accepted, with the
+  reason. If it cannot rerun or inspect enough evidence, it reports `blocked`.
 
 ## Stop conditions
 
 | Stop | Who decides | Next stage |
 |---|---|---|
 | Open questions remain | Runner from advisor reports | `needs-person` |
-| Grimoire missing or unreadable | Open question for the person: should missing and unreadable both block? | `blocked` until answered |
+| Grimoire missing | Runner treats it as an empty Grimoire for a new profile | Continue |
+| Grimoire unreadable | Runner asks one question to the person | `blocked` until answered |
 | State is stale | Runner | `blocked` |
 | Red run missing | Runner before verifier starts | `build` to record red run, or `blocked` if impossible |
 | Verifier cannot inspect enough evidence | Verifier | `blocked` |
@@ -353,11 +358,3 @@ Use red-then-green tests with a new scripted model fixture, `test/fixtures/loop-
 `check.yml` exists, but CI has not been observed running for this work. Verification for the slice assumes local
 `pnpm check` run through `run_in_pane` under Node >= 24.12, matching `package.json`.
 
-## Open questions for the person
-
-1. Should missing Grimoire and unreadable Grimoire both block the runner, or should a missing empty Grimoire be allowed
-   for a new profile?
-2. Which transport should carry validated helper reports to the runner: tool result details, custom messages, or private
-   report files?
-3. Should the verifier always rerun agreed checks, or may it accept existing logs for checks that are expensive but
-   already captured by `run_in_pane`?
