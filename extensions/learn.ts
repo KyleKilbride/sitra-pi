@@ -382,6 +382,8 @@ const sameCall = (a: Call, b: Call) => a.tool === b.tool && canonical(a.input) =
 export interface CallTime {
 	turn?: string;
 	now?: number;
+	/** The folder the agent works in, shown in the day log. */
+	cwd?: string;
 }
 const SAME_TURN_MS = 1_500;
 
@@ -397,7 +399,7 @@ export function recordPause(
 	mkdirSync(folder, { recursive: true });
 	writeFileSync(
 		join(folder, `${newMomentId()}.json`),
-		JSON.stringify({ files, call, turn: when.turn, at: when.now ?? Date.now() }),
+		JSON.stringify({ files, call, turn: when.turn, at: when.now ?? Date.now(), cwd: when.cwd }),
 	);
 }
 
@@ -437,12 +439,12 @@ export function recordPauseFollowUp(dir: string, session: string, call: Call, wh
 			continue; // Another call took it.
 		}
 		try {
-			const pending = JSON.parse(readFileSync(taken, "utf8")) as { files: string[]; call: Call };
+			const pending = JSON.parse(readFileSync(taken, "utf8")) as { files: string[]; call: Call; cwd?: string };
 			const outcome = sameCall(pending.call, call) ? "repeated" : "changed";
 			for (const file of pending.files) {
 				appendFileSync(
 					join(dir, ".sitra", "pauses.jsonl"),
-					`${JSON.stringify({ at: new Date(now).toISOString(), file, outcome })}\n`,
+					`${JSON.stringify({ at: new Date(now).toISOString(), file, outcome, session, cwd: pending.cwd, call: pending.call })}\n`,
 				);
 			}
 		} catch {

@@ -40,3 +40,7 @@ fresh context with a structured handover behaved the same as the full history.
   measurable difference, and restating earlier requests risks pulling the agent back to finished work.
 - **Picking memories per step** with a model. See docs/GRIMOIRE.md: the opening message rarely predicts the mistake,
   and the measured gain didn't justify the latency and cost.
+
+## The end-of-reply PR check
+
+Agents copy status lists forward from earlier replies and tell the person a pull request is waiting when it was merged hours ago. A rule in the prompt didn't stop it, so `extensions/replycheck-pi.ts` checks in code. Before a reply becomes final (`agent_before_settle`), sitra looks for GitHub pull request links in it. Any the agent didn't look up with `gh` this turn are checked with `gh pr view`. If one is merged or closed, the agent gets one factual note and one more turn to correct its reply, at most once per prompt. It needs no model call and fails open. `SITRA_REPLY_CHECK=0` turns it off.

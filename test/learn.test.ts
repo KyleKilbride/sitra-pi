@@ -195,6 +195,21 @@ describe("did a pause help", () => {
 		expect(existsSync(join(dir, ".sitra", "pauses.jsonl"))).toBe(true);
 	});
 
+	test("each outcome line records the session, the folder and the call that was paused, for the day log", () => {
+		const dir = tmp();
+		const call = { tool: "bash", input: { command: "gh pr create --fill" } };
+		recordPause(dir, "s1", ["kinds/setups/drafts.md"], call, { turn: "1", cwd: "/work/app" });
+		recordPauseFollowUp(dir, "s1", { tool: "bash", input: { command: "ls" } }, { turn: "2" });
+		const line = JSON.parse(readFileSync(join(dir, ".sitra", "pauses.jsonl"), "utf8").trim());
+		expect(line).toMatchObject({
+			file: "kinds/setups/drafts.md",
+			outcome: "changed",
+			session: "s1",
+			cwd: "/work/app",
+			call,
+		});
+	});
+
 	test("an approved entry's renderEntry still round-trips with when, for the learn proposals", () => {
 		const dir = tmp();
 		mkdirSync(join(dir, "kinds", "setups"), { recursive: true });

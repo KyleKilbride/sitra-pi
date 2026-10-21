@@ -248,7 +248,7 @@ export function toolHookOutput(dir: string, payload: string): string {
 				sessionId,
 				claimed.map((e) => e.file),
 				call,
-				when,
+				{ ...when, cwd: typeof cwd === "string" ? cwd : process.cwd() },
 			);
 		} catch {
 			// Measuring never gets in the way of a rule.

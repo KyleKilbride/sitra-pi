@@ -114,7 +114,12 @@ cached prompt prefix survives from turn to turn.
    Accepted entries move to `kinds/<kind>s/`; rejected ones to `rejected/`.
 3. `/grimoire-reflect` asks the agent to look back over the session and propose at most three entries. Lessons follow
    the shape: what failed, the verified cause, the fix, whether it held, what would catch it next time.
-4. Agents never write to `root/` or `kinds/`.
+4. `/grimoire-ui` opens a local browser page (`127.0.0.1` on a random port, with a one-time URL token and a `Host`
+   header check) for viewing and editing Grimoire by hand: the exact prompt text agents get, root and catalogue sizes
+   against their limits, Claude Code and Codex hook status, editable root files, approved entries (add, edit, move
+   between kinds, delete to `rejected/` with broken-link repointing or removal), proposals waiting, rejected entries
+   (with restore), and the day's log of pauses, corrections and repeats.
+5. Agents never write to `root/` or `kinds/`.
 
 ## Learning from corrections
 
