@@ -184,7 +184,6 @@ Details, sizes and the reasons behind them: [docs/GRIMOIRE.md](docs/GRIMOIRE.md)
 - [`@juicesharp/rpiv-ask-user-question`](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question): structured questions
 - [`@juicesharp/rpiv-todo`](https://www.npmjs.com/package/@juicesharp/rpiv-todo): task list
 - [`pi-powerline-footer`](https://www.npmjs.com/package/pi-powerline-footer): status line
-- [`pi-memory`](https://www.npmjs.com/package/pi-memory): personal preferences only, not project facts
 - [`pi-web-access`](https://www.npmjs.com/package/pi-web-access): web search and reading pages, PDFs and videos
 - [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp): the app-tester's browser, attached to your running Chrome
 

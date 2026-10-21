@@ -167,6 +167,42 @@ test("the turn-start handler never throws, and the review count refreshes even w
 	expect(() => handlers.get("before_agent_start")?.(event(), ctx)).not.toThrow();
 });
 
+test("an unreadable Grimoire is visible in the session but does not block ordinary turns", async () => {
+	const { mkdtempSync, realpathSync, writeFileSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "sitra-unreadable-grimoire-")));
+	writeFileSync(join(dir, "root"), "not a directory\n");
+	vi.stubEnv("SITRA_GRIMOIRE", dir);
+	vi.stubEnv("PI_SUBAGENT_NAME", "");
+	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	sitraKnowledge({
+		on: (n: string, h: (e: unknown, c: unknown) => unknown) => handlers.set(n, h),
+		registerTool() {},
+		registerCommand() {},
+		sendUserMessage() {},
+	} as never);
+	const warnings: string[] = [];
+	const statuses: (string | undefined)[] = [];
+	const ctx = {
+		cwd: dir,
+		hasUI: true,
+		ui: {
+			setStatus: (_k: string, t: string | undefined) => statuses.push(t),
+			notify: (message: string) => warnings.push(message),
+		},
+	};
+	const event = {
+		messageType: "user",
+		prompt: "hello",
+		systemPromptOptions: { sections: {} as Record<string, string> },
+	};
+	expect(() => handlers.get("before_agent_start")?.(event, ctx)).not.toThrow();
+	expect(warnings.at(-1)).toContain("Grimoire is unreadable");
+	expect(statuses.at(-1)).toContain("grimoire unreadable");
+	expect(event.systemPromptOptions.sections.grimoire).toContain("Grimoire unavailable");
+});
+
 test("the status line shows today's tally, and /grimoire walks through repeats after proposals", async () => {
 	const { mkdtempSync, realpathSync } = await import("node:fs");
 	const { tmpdir } = await import("node:os");

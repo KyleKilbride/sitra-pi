@@ -171,16 +171,16 @@ test("installs run quietly, and a failed one says what went wrong and how to ret
 	const m = machine({});
 	const exec = m.deps.exec;
 	m.deps.exec = (command, args, opts) =>
-		command === "pi" && args[1] === "npm:pi-memory@0.4.2"
-			? { code: 1, stdout: "npm error 404 Not Found - pi-memory\n" }
+		command === "pi" && args[1] === "npm:pi-web-access@0.40.0"
+			? { code: 1, stdout: "npm error 404 Not Found - pi-web-access\n" }
 			: exec(command, args, opts);
 	const result = await runInit(m.deps);
 	const piInstalls = m.calls.filter((c) => c.command === "pi" && c.args[0] === "install");
 	expect(piInstalls.length).toBeGreaterThan(0);
 	expect(m.lines.join("\n")).not.toContain("404");
-	const failure = result.needsYou.find((item) => item.includes("pi-memory"));
+	const failure = result.needsYou.find((item) => item.includes("pi-web-access"));
 	expect(failure).toContain("npm error 404 Not Found");
-	expect(failure).toContain("pi install npm:pi-memory@0.4.2");
+	expect(failure).toContain("pi install npm:pi-web-access@0.40.0");
 });
 
 test("offers to load Grimoire in Claude Code and Codex when they're set up, and leaves them alone when declined", async () => {
@@ -207,4 +207,17 @@ test("offers to load Grimoire in Claude Code and Codex when they're set up, and 
 test("every pinned package is an exact version or commit, and web access ships by default", () => {
 	for (const p of PACKAGES) expect(p).toMatch(/@(\d+\.\d+\.\d+|[0-9a-f]{40})$/);
 	expect(PACKAGES).toContain("npm:pi-web-access@0.40.0");
+	expect(PACKAGES).not.toContain("npm:pi-memory@0.4.2");
+});
+
+test("init does not reinstall pi-memory or rewrite a filtered pi-memory package entry", async () => {
+	const m = machine({});
+	const profile = profileOf(m.home);
+	mkdirSync(profile, { recursive: true });
+	const settings = join(profile, "settings.json");
+	const filtered = '{\n\t"packages": [\n\t\t{ "source": "npm:pi-memory@0.4.2", "extensions": [] }\n\t]\n}\n';
+	writeFileSync(settings, filtered);
+	await runInit(m.deps);
+	expect(m.calls.filter((c) => c.command === "pi" && c.args.includes("npm:pi-memory@0.4.2"))).toEqual([]);
+	expect(readFileSync(settings, "utf8")).toBe(filtered);
 });

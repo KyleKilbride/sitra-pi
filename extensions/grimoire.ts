@@ -3,7 +3,7 @@
  * `kinds/` (approved entries, pulled in by relevance), `proposals/` (agents write only here) and `rejected/`.
  * No Pi imports: the Pi extension, the CLI and the Claude Code / Codex hooks all build on this file.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { shellQuote } from "./runs.ts";
@@ -38,6 +38,11 @@ export interface RootText {
 	truncated: boolean;
 }
 
+export type GrimoireStoreStatus =
+	| { state: "ok"; dir: string }
+	| { state: "missing"; dir: string; reason: string }
+	| { state: "unreadable"; dir: string; reason: string };
+
 /** Sizes that keep the brain from crowding out the work. */
 export const LIMITS = { rootChars: 32_000, catalogueChars: 12_000, queryChars: 4_000 };
 
@@ -46,6 +51,48 @@ export function grimoireDir(env: Record<string, string | undefined>, home = home
 	if (env.SITRA_GRIMOIRE?.trim()) return env.SITRA_GRIMOIRE.trim();
 	if (env.PI_CODING_AGENT_DIR?.trim()) return join(env.PI_CODING_AGENT_DIR.trim(), "grimoire");
 	return join(env.SITRA_HOME?.trim() || join(home, ".sitra"), "profile", "grimoire");
+}
+
+export function grimoireStoreStatus(dir: string): GrimoireStoreStatus {
+	const problem = readableDir(dir, "Grimoire");
+	if (problem === "missing") return { state: "missing", dir, reason: `${dir} does not exist` };
+	if (problem) return { state: "unreadable", dir, reason: problem };
+	for (const rel of ["root", "proposals", "rejected", "kinds", ...KINDS.map((kind) => `kinds/${kind}s`)]) {
+		const folder = join(dir, rel);
+		if (!existsSync(folder)) continue;
+		const dirProblem = readableDir(folder, rel);
+		if (dirProblem) return { state: "unreadable", dir, reason: dirProblem };
+		const fileProblem = readableMarkdownFiles(folder, rel);
+		if (fileProblem) return { state: "unreadable", dir, reason: fileProblem };
+	}
+	return { state: "ok", dir };
+}
+
+function reason(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function readableDir(dir: string, label: string): string | "missing" | undefined {
+	try {
+		const stat = statSync(dir);
+		if (!stat.isDirectory()) return `${label} is not a directory: ${dir}`;
+		readdirSync(dir);
+		return undefined;
+	} catch (error) {
+		const code = typeof error === "object" && error ? (error as { code?: unknown }).code : undefined;
+		return code === "ENOENT" ? "missing" : `${label} can't be read: ${reason(error)}`;
+	}
+}
+
+function readableMarkdownFiles(dir: string, label: string): string | undefined {
+	for (const file of markdownFiles(dir)) {
+		try {
+			readFileSync(join(dir, file), "utf8");
+		} catch (error) {
+			return `${label}/${file} can't be read: ${reason(error)}`;
+		}
+	}
+	return undefined;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

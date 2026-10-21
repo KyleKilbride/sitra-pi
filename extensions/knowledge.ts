@@ -10,6 +10,7 @@ import {
 	decide,
 	grimoireDir,
 	grimoireSection,
+	grimoireStoreStatus,
 	importedRepos,
 	KINDS,
 	type Kind,
@@ -102,8 +103,33 @@ export default function sitraKnowledge(pi: Pi): void {
 		return existsSync(join(repo, ".pi", "knowledge")) && !importedRepos(dir()).includes(repo) ? repo : undefined;
 	};
 
+	let warnedUnreadable = "";
+	const unavailableSection = (s: ReturnType<typeof grimoireStoreStatus>) =>
+		[
+			"# Grimoire unavailable",
+			`The Grimoire at ${s.dir} is ${s.state}${"reason" in s ? `: ${s.reason}` : "."}`,
+			"Continue the ordinary session, but do not assume approved knowledge was loaded. Surface this to the person.",
+		].join("\n");
+	const warnUnreadable = (ctx: Ctx, s: ReturnType<typeof grimoireStoreStatus>) => {
+		if (s.state !== "unreadable") return;
+		const key = `${s.dir}\n${s.reason}`;
+		if (key === warnedUnreadable) return;
+		warnedUnreadable = key;
+		ctx.ui.notify(`Grimoire is unreadable at ${s.dir}: ${s.reason}. Continuing without approved knowledge.`, "warning");
+	};
+
 	const status = (ctx: Ctx) => {
 		const g = dir();
+		const s = grimoireStoreStatus(g);
+		if (s.state === "missing") {
+			ctx.ui.setStatus("sitra-grimoire", `grimoire missing: ${g}`);
+			return;
+		}
+		if (s.state === "unreadable") {
+			ctx.ui.setStatus("sitra-grimoire", `grimoire unreadable: ${s.reason}`);
+			warnUnreadable(ctx, s);
+			return;
+		}
 		const approved = listEntries(g).length;
 		const waiting = listProposals(g).length;
 		const parts = [`grimoire ${approved}`];
@@ -133,6 +159,12 @@ export default function sitraKnowledge(pi: Pi): void {
 		try {
 			if (typeof event?.toolName !== "string") return undefined;
 			const g = dir();
+			const s = grimoireStoreStatus(g);
+			if (s.state === "unreadable") {
+				warnUnreadable(ctx, s);
+				return undefined;
+			}
+			if (s.state === "missing") return undefined;
 			const session = ctx?.sessionManager?.getSessionId?.() ?? `pi-${process.pid}`;
 			const call = { tool: event.toolName, input: event.input && typeof event.input === "object" ? event.input : {} };
 			try {
@@ -179,7 +211,8 @@ export default function sitraKnowledge(pi: Pi): void {
 				// Measuring never gets in the way of a rule.
 			}
 			return { block: true, reason: text };
-		} catch {
+		} catch (error) {
+			ctx?.ui?.notify(`Grimoire action triggers could not be checked: ${String(error).slice(0, 200)}`, "warning");
 			return undefined;
 		}
 	});
@@ -239,9 +272,17 @@ export default function sitraKnowledge(pi: Pi): void {
 		}
 		try {
 			const g = dir();
+			const s = grimoireStoreStatus(g);
+			if (s.state !== "ok") {
+				warnUnreadable(ctx, s);
+				event.systemPromptOptions.sections.grimoire = unavailableSection(s);
+				return;
+			}
 			event.systemPromptOptions.sections.grimoire = grimoireSection(g, loadRoot(g), listEntries(g), { who: who() });
-		} catch {
-			// An unreadable Grimoire leaves the prompt without it rather than failing the turn.
+		} catch (error) {
+			const s = { state: "unreadable" as const, dir: dir(), reason: String(error) };
+			warnUnreadable(ctx, s);
+			event.systemPromptOptions.sections.grimoire = unavailableSection(s);
 		}
 	});
 

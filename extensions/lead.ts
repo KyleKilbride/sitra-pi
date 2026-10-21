@@ -6,6 +6,12 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Type } from "typebox";
+import {
+	HELPER_REPORT_SCHEMA,
+	helperReportForLead,
+	renderHelperReport,
+	validateHelperReport,
+} from "./helper-report.ts";
 import { paneCommand, readRun, shellQuote } from "./runs.ts";
 import { gitBranch, mainCheckout } from "./sessions.ts";
 
@@ -23,7 +29,7 @@ export function leadRules(name?: string): string {
 - **You do the building.** Write the code yourself, own the branch and the pull request. Hand the builder only small, fully specified pieces (specific files, clear instructions, little decision-making) that can run while you keep going.
 - **Teammates:** scout (digging and history), builder (narrow targeted edits), app-tester (uses the app in Chrome and reads its real state), reviewer (diffs, tests, evals). Steer them only through the subagent tools; never type into their panes.
 - **Read big files in parts** (grep, line ranges), never whole.
-- **Grimoire:** its root and catalogue are in your prompt. Read an entry in full before acting on what it covers, and pass the ones that apply into every teammate's task. Propose what future agents need with grimoire_propose. Keep pi-memory for ${who}'s personal notes only, not for work state.
+- **Grimoire:** its root and catalogue are in your prompt. Read an entry in full before acting on what it covers, and pass the ones that apply into every teammate's task. Propose what future agents need with grimoire_propose. Use Grimoire for approved memory; do not use a separate memory system for work state.
 `;
 }
 
@@ -50,8 +56,10 @@ interface Ctx {
 interface Pi {
 	on(
 		event: "before_agent_start",
-		handler: (event: { systemPromptOptions: { sections: Record<string, string> } }, ctx: Ctx) => void,
+		handler: (event: { systemPromptOptions: { sections: Record<string, string> } }, ctx: Ctx) => unknown,
 	): void;
+	on(event: "context", handler: (event: { messages?: unknown }, ctx: Ctx) => unknown): void;
+	on(event: string, handler: (event: unknown, ctx: Ctx) => unknown): void;
 	registerTool(tool: {
 		name: string;
 		label: string;
@@ -60,7 +68,7 @@ interface Pi {
 		parameters: unknown;
 		execute(
 			id: string,
-			params: { command: string; label: string; log: string },
+			params: Record<string, unknown>,
 			signal: unknown,
 			onUpdate: unknown,
 			ctx: Ctx,
@@ -79,10 +87,27 @@ interface Pi {
 	): void;
 }
 
+type Msg = { role?: string; toolName?: string; content?: unknown };
+const HELPER_RESULT_TOOLS = new Set(["subagent", "task", "agent", "spawn_agent"]);
+
+function contentText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter((part): part is { type?: string; text?: string } => !!part && typeof part === "object")
+		.filter((part) => part.type === "text" && typeof part.text === "string")
+		.map((part) => part.text)
+		.join("\n");
+}
+
+function withText(message: Msg, text: string): Msg {
+	return { ...message, content: [{ type: "text", text }] };
+}
+
 export default function sitraLead(pi: Pi): void {
 	const isTeammate = Boolean(process.env.PI_SUBAGENT_NAME);
 	const isTower = process.env.SITRA_ROLE === "tower";
-	pi.on("before_agent_start", (event, ctx) => {
+	pi.on("before_agent_start", (event: { systemPromptOptions: { sections: Record<string, string> } }, ctx) => {
 		if (!isTeammate && !isTower)
 			event.systemPromptOptions.sections["sitra-lead"] = leadRules(process.env.SITRA_USER_NAME);
 		// Context files from folders above the repo (e.g. a workspace-wide CLAUDE.md mapping other projects) cost every
@@ -95,6 +120,23 @@ export default function sitraLead(pi: Pi): void {
 				(f) => f.path.startsWith(root) || (profile && f.path.startsWith(profile)),
 			);
 		}
+	});
+
+	pi.on("context", (event: { messages?: unknown }) => {
+		if (isTeammate || !Array.isArray(event?.messages)) return undefined;
+		let changed = false;
+		const messages = (event.messages as Msg[]).map((message) => {
+			if (
+				message?.role !== "toolResult" ||
+				typeof message.toolName !== "string" ||
+				!HELPER_RESULT_TOOLS.has(message.toolName.toLowerCase())
+			) {
+				return message;
+			}
+			changed = true;
+			return withText(message, helperReportForLead(contentText(message.content)).text);
+		});
+		return changed ? { messages } : undefined;
 	});
 
 	// A question waiting for the person shows as "blocked" in herdr, so they see that something needs them.
@@ -125,6 +167,30 @@ export default function sitraLead(pi: Pi): void {
 	const runsDir = join(process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent"), "runs");
 
 	pi.registerTool({
+		name: "helper_report",
+		label: "Report helper result",
+		description:
+			"Return a helper or teammate result as structured fields for the lead: status, summary, evidence, open questions for Kyle, and assumptions.",
+		promptSnippet:
+			"helper_report: helpers must call this before their final reply so the lead receives validated status, summary, evidence, open questions and assumptions",
+		parameters: HELPER_REPORT_SCHEMA,
+		async execute(_id, params) {
+			const valid = validateHelperReport(params);
+			if (!valid.ok) throw new Error(`invalid helper_report: ${valid.reason}`);
+			const block = renderHelperReport(valid.report);
+			return {
+				content: [
+					{
+						type: "text",
+						text: `Recorded helper report. Return exactly this block as your final reply so the lead receives the validated fields:\n\n${block}`,
+					},
+				],
+				details: valid.report,
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: "run_in_pane",
 		label: "Run in a pane",
 		description:
@@ -135,15 +201,16 @@ export default function sitraLead(pi: Pi): void {
 			label: Type.String({ description: "A few words for the pane, e.g. 'agent unit tests'." }),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = params as { command: string; label: string };
 			mkdirSync(runsDir, { recursive: true });
-			const slug = params.label
+			const slug = p.label
 				.toLowerCase()
 				.replace(/[^a-z0-9]+/g, "-")
 				.slice(0, 40);
 			const log = join(runsDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${slug}.log`);
 			const branch = gitBranch(ctx.cwd);
-			const line = paneCommand(params.command, log, {
-				label: params.label,
+			const line = paneCommand(p.command, log, {
+				label: p.label,
 				project: basename(mainCheckout(ctx.cwd)),
 				...(branch ? { branch } : {}),
 				agent:
@@ -171,7 +238,7 @@ export default function sitraLead(pi: Pi): void {
 				}
 				const pane = runPane;
 				herdr(["pane", "run", pane, `cd ${shellQuote(ctx.cwd)} && ${line}`]);
-				where = `herdr pane ${pane} ("${params.label}")`;
+				where = `herdr pane ${pane} ("${p.label}")`;
 			} else {
 				spawn("bash", ["-c", line], { cwd: ctx.cwd, detached: true, stdio: "ignore" }).unref();
 				where = "the background (not inside herdr)";
@@ -185,7 +252,7 @@ export default function sitraLead(pi: Pi): void {
 				pi.sendMessage(
 					{
 						customType: "sitra-run",
-						content: `The run "${params.label}" finished with exit code ${status.exitCode}. Last lines:\n${status.tail}\n(Full log: ${log})`,
+						content: `The run "${p.label}" finished with exit code ${status.exitCode}. Last lines:\n${status.tail}\n(Full log: ${log})`,
 						display: true,
 					},
 					// Idle: start a turn now. Busy: queue it for when the current run finishes.
@@ -212,8 +279,9 @@ export default function sitraLead(pi: Pi): void {
 			"Check a run started with run_in_pane: whether it finished, its exit code, and the last lines of output.",
 		parameters: Type.Object({ log: Type.String({ description: "The log path run_in_pane returned." }) }),
 		async execute(_id, params) {
-			if (!existsSync(params.log)) return { content: [{ type: "text", text: "No output yet." }], details: {} };
-			const status = readRun(readFileSync(params.log, "utf8"));
+			const p = params as { log: string };
+			if (!existsSync(p.log)) return { content: [{ type: "text", text: "No output yet." }], details: {} };
+			const status = readRun(readFileSync(p.log, "utf8"));
 			const head = status.done ? `Finished, exit code ${status.exitCode}.` : "Still running.";
 			return { content: [{ type: "text", text: `${head}\nLast lines:\n${status.tail}` }], details: status };
 		},
