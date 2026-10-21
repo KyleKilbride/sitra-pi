@@ -196,8 +196,8 @@ The homebrew parts are small: Grimoire, `run_in_pane`, the lead's rules and `sit
 
 ## Good to know
 
-- Teammate models: scout and builder run on `google/gemini-4-argon`, the reviewer and verifier on
-  `openai/gpt-6.1-sol` (high thinking), the app-tester on `anthropic/claude-sonnet-5-5`, and the advisor profiles pin
+- Teammate models: scout and builder run on `google/gemini-4-argon`, the reviewer on `openai/gpt-6.1-sol` (high
+  thinking), the verifier on `openai/gpt-6.1-sol` (xhigh thinking), the app-tester on `anthropic/claude-sonnet-5-5`, and the advisor profiles pin
   their own models with `allow-model-override: false`. If you use other providers, change `model:` in
   `~/.sitra/profile/agents/<name>.md`.
 - The app-tester needs Chrome 144 or later, running, with remote debugging turned on at

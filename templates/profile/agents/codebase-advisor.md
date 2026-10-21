@@ -6,7 +6,7 @@ auto-exit: true
 tools: read,grep,find,ls,bash,grimoire_search,helper_report
 deny-tools: edit,write
 skills: none
-model: google/gemini-4-argon
+model: anthropic/claude-haiku-5-5
 thinking: medium
 allow-model-override: false
 ---

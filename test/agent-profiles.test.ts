@@ -8,26 +8,36 @@ const roles = [
 	{
 		name: "intent-advisor",
 		mode: "background",
+		model: "anthropic/claude-opus-5-5",
+		thinking: "high",
 		tools: ["read", "grep", "find", "ls", "bash", "grimoire_search", "grimoire_propose", "helper_report"],
 	},
 	{
 		name: "codebase-advisor",
 		mode: "background",
+		model: "anthropic/claude-haiku-5-5",
+		thinking: "medium",
 		tools: ["read", "grep", "find", "ls", "bash", "grimoire_search", "helper_report"],
 	},
 	{
 		name: "test-design-advisor",
 		mode: "background",
+		model: "anthropic/claude-opus-5-5",
+		thinking: "medium",
 		tools: ["read", "grep", "find", "ls", "bash", "grimoire_search", "helper_report"],
 	},
 	{
 		name: "architecture-advisor",
 		mode: "background",
+		model: "openai/gpt-6.1-sol",
+		thinking: "high",
 		tools: ["read", "grep", "find", "ls", "bash", "grimoire_search", "helper_report"],
 	},
 	{
 		name: "verifier",
 		mode: "interactive",
+		model: "openai/gpt-6.1-sol",
+		thinking: "xhigh",
 		tools: ["read", "grep", "find", "ls", "bash", "run_in_pane", "check_run", "grimoire_search", "helper_report"],
 	},
 ];
@@ -53,6 +63,8 @@ describe("advisor and verifier profiles", () => {
 			const tools = list(meta.get("tools"));
 			expect(meta.get("name")).toBe(role.name);
 			expect(meta.get("mode")).toBe(role.mode);
+			expect(meta.get("model")).toBe(role.model);
+			expect(meta.get("thinking")).toBe(role.thinking);
 			expect(meta.get("skills")).toBe("none");
 			expect(meta.get("allow-model-override")).toBe("false");
 			expect(list(meta.get("deny-tools"))).toEqual(["edit", "write"]);
@@ -78,6 +90,12 @@ describe("advisor and verifier profiles", () => {
 		expect(body).toContain("$PI_CODING_AGENT_DIR/agents/checklists/architecture.md");
 		expect(body).toContain("checklist.state 'absent'");
 		expect(body).toContain("unreadable");
+	});
+
+	test("verifier is instructed to report comprehensive findings", () => {
+		const body = agent("verifier").body;
+		expect(body).toContain("Report every issue you find");
+		expect(body).toContain("low-severity or uncertain");
 	});
 });
 

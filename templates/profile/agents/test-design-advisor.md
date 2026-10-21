@@ -6,8 +6,8 @@ auto-exit: true
 tools: read,grep,find,ls,bash,grimoire_search,helper_report
 deny-tools: edit,write
 skills: none
-model: anthropic/claude-sonnet-5-5
-thinking: high
+model: anthropic/claude-opus-5-5
+thinking: medium
 allow-model-override: false
 ---
 
