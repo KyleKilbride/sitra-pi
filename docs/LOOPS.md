@@ -1,281 +1,363 @@
 # Advisor-first agent graph
 
-Kyle's goal is not a builder that fails, loops, and tries again. The goal is a team that gets the important
-understanding in front of the builder before the first change, measures what happened, and learns when it missed.
-
-The first piece should therefore be an **advisor-first graph**:
+The first loop in sitra should be an advisor-first graph, not a blind build -> review -> fix retry loop.
+The graph starts only when the person explicitly asks for it with a command or tool. It gathers advice, asks every
+ready question in one round, freezes a brief, builds once, verifies independently, and turns misses into Grimoire
+proposals the person can approve.
 
 ```
-Kyle's goal -> read-only advisors -> one shared brief -> Kyle approves questions + plan
-             -> one builder -> one independent check -> pass, or classify the rework event
-             -> Grimoire proposal for Kyle -> next brief is better
+explicit start -> advisors + questions -> lead plan -> architecture review -> person approval
+               -> build -> independent verify -> done, blocked, or classified rework proposal
 ```
 
-The independent check stays, but its job changes. It is not a critic that drives an automatic fix loop. It is the
-measurement signal every self-improving system in the research still needed: tests, an environment, or another outside
-evaluator. The check tells sitra what to learn.
+One check stays because every self-improving system in the research needed an outside signal: tests, an environment, or
+an evaluator. The check is measurement and learning, not an automatic fix loop.
 
 ## What success looks like
 
-- The graph is opt-in. The lead chooses it only when a task has enough shape for a brief and acceptance evidence.
-- Advisors run before implementation. They are read-only, role-specific, and useful only when they bring different
-  information.
-- Kyle sees the advisors' questions and the high-level plan before the build starts. He should not have to approve a
-  low-level implementation script while the task is still taking shape.
-- One builder, normally the lead, works from the approved brief.
-- One independent verifier checks the result against acceptance tests agreed before the build. It also checks the
-  original goal and catches weakened tests.
-- The lead opens a draft PR only after the check passes. If the lead bypasses that rule, record it as a rework event
-  and measure it before adding a guardrail.
-- A miss becomes a classified **rework event**, not a blind retry. A second round is allowed only for real new
-  information or a specific learning, never because the builder lacked context it could have had.
-- The metric is first-pass rate and avoidable rework trending down over time, plus per-task tokens. It is not 100%.
+- The person starts the graph explicitly; the lead does not infer it from a normal request.
+- Four read-only advisors run before implementation: intent, codebase, test-design, and architecture.
+- The intake works like a grill-with-docs pattern, but with sitra structure: every ready question is asked in one round,
+  each question includes a recommended answer, agents find facts, the person makes decisions, and intake stops only
+  when nothing is open.
+- One builder, normally the lead, works from a frozen brief.
+- One independent verifier checks the frozen brief, diff, test hashes, and run logs from a fresh context.
+- Misses become classified rework entries and Grimoire proposals. A retry is allowed only for real new information or a
+  specific learning. There are no blind retries.
 
 ## What exists today
 
 Verified against `main` at `997e0e5`:
 
-- **Lead and teammates.** `extensions/lead.ts` gives only the lead the lead rules. It says to plan first, pass Kyle's
-  limits to teammates, and steer teammates only through subagent tools. The profiles in `templates/profile/agents/`
-  already include scout, builder, reviewer and app-tester. Scout and reviewer are read-only.
+- **Lead and teammates.** `extensions/lead.ts` gives only the lead the lead rules. The teammate profiles in
+  `templates/profile/agents/` include scout, builder, reviewer, and app-tester. Scout and reviewer are read-only.
 - **The lead is the normal builder.** `leadRules` says "You do the building"; the builder teammate is for narrow,
   fully specified pieces.
 - **Grimoire reaches helpers.** `extensions/knowledge.ts` injects the Grimoire root and catalogue on every
-  `before_agent_start`, with no helper guard. Action triggers use `extensions/triggers.ts`.
-- **Learning already drafts proposals.** `extensions/learn.ts` records correction moments, classifies correction versus
-  other, drafts proposals into `proposals/`, records repeats, and reports `caught / learned / repeats`.
-- **Kyle approves knowledge.** `grimoire_propose` writes proposals only; `/grimoire` moves accepted entries into
+  `before_agent_start`, with no helper guard.
+- **Learning already drafts proposals.** `extensions/learn.ts` records correction moments, drafts proposals into
+  `proposals/`, records repeats, and reports `caught / learned / repeats`.
+- **The person approves knowledge.** `grimoire_propose` writes proposals only; `/grimoire` moves accepted entries into
   `kinds/`. Agents are told never to edit `root/` or `kinds/`.
 - **Helper briefs and handovers exist.** `extensions/sharpen-pi.ts` appends the helper brief to subagent tasks and
   writes structured handovers at run end and mid-run.
-- **Radar has the data, not the tree.** `extensions/sessions.ts` groups leads and teammates; `extensions/radar.ts` and
-  `radar-view.ts` show helper counts today, not a lead-to-helper tree.
-- **Agent profiles need explicit permissions.** The current scout profile sets both `tools:` and `skills: none`; new
-  advisor and verifier profiles must do the same. Without explicit lists, pi-subagents may load every skill and codemode
-  may expose MCP write tools.
-- **Grimoire currently fails open when unreadable.** The loop must not. If Grimoire cannot be read, the loop is
-  `blocked` because the brief cannot be trusted.
+- **Verifier isolation needs a new path.** `extensions/sharpen-pi.ts` currently appends the lead's latest request and
+  rules to every subagent task at lines 110-112. The verifier must avoid that path so it starts fresh with only the
+  runner-written task.
+- **Profiles need explicit permissions.** `templates/profile/agents/scout.md` has explicit `tools:` and `skills: none`,
+  but it allows `bash`; `bash` is read-only by instruction only. `templates/profile/agents/reviewer.md` has
+  `skills: none` but no `tools:` list. New advisor and verifier profiles must set both lists explicitly, with no MCP
+  write access. The pi-subagents and codemode permission risks come from an audit, not from code verified in this repo.
 
-Observed in the current PR: `docs/LOOPS.md` had a build -> review -> fix framing. Kyle rejected that framing; this
-document replaces it.
+## First-slice files
 
-## Design
+Keep pure logic separate from Pi wiring:
 
-### The runner
+- `extensions/loop.ts`: pure state, TypeBox schemas, stage transitions, report validation, metric helpers.
+- `extensions/loop-pi.ts`: Pi command/tool wiring, helper starts, run_in_pane integration, Grimoire proposal drafting.
+- `package.json`: add `./extensions/loop-pi.ts` to `pi.extensions` when implemented.
+- New profile templates for advisors and verifier: each must set explicit `tools:` and `skills:` lists and use the
+  `helper_report` tool.
 
-Add a thin Pi extension in the lead session. It owns state and step transitions, but the lead remains the user-facing
-agent. The tower still watches, carries mail and reports status; it never assigns work or starts fixes.
+## State and brief schema
 
-The runner stores one JSON state file per worktree under the sitra profile, keyed by worktree path and branch. JSON is
-for validation: product code must not infer state from prose or regex.
+The runner is the only writer of the state file. Helpers report facts; they never mutate state directly. The state lives
+under the private sitra profile, keyed by worktree path and branch.
 
-```json
-{
-  "version": 1,
-  "worktree": "/path/to/worktree",
-  "branch": "cursor/example",
-  "goal": "Kyle's words, quoted where they matter",
-  "stage": "advise",
-  "done": ["What acceptance evidence proves the goal"],
-  "limits": ["No full suites unless Kyle asks", "Do not weaken checks"],
-  "brief": {
-    "intent": { "questions": [], "done": [] },
-    "codebase": { "files": [], "facts": [], "risks": [] },
-    "testDesign": { "acceptanceTests": [], "redRunLog": null },
-    "architecture": { "fit": [], "boundaries": [], "simplerShape": [] },
-    "optional": {}
-  },
-  "plan": ["High-level plan Kyle approved"],
-  "verification": { "status": "pending", "log": null },
-  "rework": []
-}
+Use TypeBox in the implementation because it is already a dependency:
+
+```ts
+import { Type } from "typebox";
+
+const Question = Type.Object({
+	id: Type.String(),
+	text: Type.String(),
+	recommended: Type.String(),
+	answer: Type.Optional(Type.String()),
+});
+
+const Approval = Type.Object({
+	approvedBy: Type.String(),
+	approvedAt: Type.String(),
+	summary: Type.String(),
+});
+
+const AdvisorRun = Type.Object({
+	status: Type.Union([Type.Literal("done"), Type.Literal("blocked"), Type.Literal("needs-input")]),
+	summary: Type.String(),
+	evidence: Type.Array(Type.String()),
+	openQuestions: Type.Array(Question),
+	assumptions: Type.Array(Type.String()),
+	tokenCount: Type.Number(),
+});
+
+const BuildState = Type.Object({
+	testFiles: Type.Array(Type.String()),
+	testHashes: Type.Array(Type.Object({ file: Type.String(), sha256: Type.String() })),
+	redRunLog: Type.Optional(Type.String()),
+	greenRunLog: Type.Optional(Type.String()),
+});
+
+const ReworkClass = Type.Union([
+	Type.Literal("context-missed"),
+	Type.Literal("context-missing"),
+	Type.Literal("wrong-intent"),
+	Type.Literal("new-information"),
+	Type.Literal("execution-slip"),
+	Type.Literal("check-gap"),
+]);
+
+const ReworkEntry = Type.Object({
+	class: ReworkClass,
+	evidence: Type.Array(Type.String()),
+	proposalPath: Type.Optional(Type.String()),
+	overriddenBy: Type.Optional(Type.String()),
+});
+
+export const LoopState = Type.Object({
+	version: Type.Literal(1),
+	worktree: Type.String(),
+	branch: Type.String(),
+	baseHead: Type.String(),
+	stage: Type.Union([
+		Type.Literal("advise"),
+		Type.Literal("needs-person"),
+		Type.Literal("plan"),
+		Type.Literal("architecture-review"),
+		Type.Literal("brief-approved"),
+		Type.Literal("build"),
+		Type.Literal("verify"),
+		Type.Literal("classify"),
+		Type.Literal("blocked"),
+		Type.Literal("done"),
+	]),
+	goal: Type.String(),
+	limits: Type.Array(Type.String()),
+	done: Type.Array(Type.String()),
+	questions: Type.Array(Question),
+	advisorRuns: Type.Object({
+		intent: Type.Optional(AdvisorRun),
+		codebase: Type.Optional(AdvisorRun),
+		testDesign: Type.Optional(AdvisorRun),
+		architecture: Type.Optional(AdvisorRun),
+	}),
+	plan: Type.Optional(Type.Object({ author: Type.Literal("lead"), text: Type.String() })),
+	approval: Type.Optional(Approval),
+	frozenBriefHash: Type.Optional(Type.String()),
+	build: BuildState,
+	verification: Type.Optional(
+		Type.Object({
+			status: Type.Union([Type.Literal("passed"), Type.Literal("missed"), Type.Literal("blocked")]),
+			runLogs: Type.Array(Type.String()),
+			summary: Type.String(),
+		}),
+	),
+	rework: Type.Array(ReworkEntry),
+});
 ```
 
-Valid stages are explicit: `advise`, `needs-kyle`, `brief-approved`, `build`, `verify`, `passed`, `rework`,
-`blocked`. Every helper returns through a structured report tool with fields. If a report is missing or invalid, the
-state becomes `blocked` and the raw report is shown.
+There is one terminal `done` stage. A completed graph can have many advisor runs and rework entries, but only one
+state-level `done`.
 
-### Advisors before the build
+## Helper report contract
 
-Start with four advisors:
+PR #25 adds the shared `helper_report` shape:
 
-| Advisor | Role | Built from |
+```ts
+const HelperReport = Type.Object({
+	status: Type.Union([Type.Literal("done"), Type.Literal("blocked"), Type.Literal("needs-input")]),
+	summary: Type.String(),
+	evidence: Type.Array(Type.String()),
+	openQuestions: Type.Array(Type.String()),
+	assumptions: Type.Array(Type.String()),
+});
+```
+
+Each role uses that transport plus a role-specific schema in `details` or an equivalent validated payload. The transport
+decision is part of the runner slice because PR #25 removes lead-side text parsing. Options:
+
+1. Pi tool result details carry the validated report to the runner.
+2. The helper tool emits a custom message the runner consumes.
+3. The helper writes a report file in the private profile and returns its path.
+
+The doc should not choose the transport yet; it should require that the runner receives validated fields, not prose.
+
+Role schemas:
+
+```ts
+const IntentDetails = Type.Object({
+	questions: Type.Array(Question),
+	doneCandidates: Type.Array(Type.String()),
+	ambiguities: Type.Array(Type.String()),
+});
+
+const CodebaseDetails = Type.Object({
+	files: Type.Array(Type.String()),
+	existingTests: Type.Array(Type.String()),
+	facts: Type.Array(Type.String()),
+	boundaries: Type.Array(Type.String()),
+});
+
+const TestDesignDetails = Type.Object({
+	acceptanceTests: Type.Array(Type.String()),
+	testFiles: Type.Array(Type.String()),
+	commands: Type.Array(Type.String()),
+});
+
+const ArchitectureDetails = Type.Object({
+	fitsExistingArchitecture: Type.Boolean(),
+	boundaryConcerns: Type.Array(Type.String()),
+	needlessLayersOrCode: Type.Array(Type.String()),
+	simplerShape: Type.Array(Type.String()),
+	privateChecklistEntriesUsed: Type.Array(Type.String()),
+});
+
+const VerifierDetails = Type.Object({
+	checksRun: Type.Array(Type.String()),
+	runLogs: Type.Array(Type.String()),
+	testHashesChecked: Type.Array(Type.String()),
+	goalMatched: Type.Boolean(),
+	missClass: Type.Optional(ReworkClass),
+});
+```
+
+## Advisor inputs and ordering
+
+All advisors are read-only and must report through `helper_report`.
+
+| Role | Inputs | Sees other advisor output? | When it runs |
+|---|---|---|---|
+| Intent | Goal, limits, Grimoire root/catalogue, current questions | No | First, in parallel with codebase |
+| Codebase | Goal, limits, Grimoire root/catalogue, repository files/history | No | First, in parallel with intent |
+| Test-design | Goal, limits, Grimoire root/catalogue, intent and codebase reports | Yes: intent and codebase | After intent/codebase are done |
+| Architecture | Goal, limits, frozen advisor brief, lead-authored plan, private checklist from profile or Grimoire | Yes: all brief sections and plan | After the lead drafts the plan |
+
+The architecture checklist is private user material. It lives in the person's profile or Grimoire, not in this repo.
+The repo ships only the generic advisor role.
+
+The intake keeps the good grill-with-docs behavior: ask all ready questions at once, include recommended answers, let
+agents gather facts, leave decisions to the person, and stop only when no open question remains. Sitra adds structured
+brief fields, Grimoire instead of an ad-hoc context file, tests before implementation, and learning from misses.
+
+## Stage transitions
+
+| From | Event | Writer/decider | To |
+|---|---|---|---|
+| none | Person explicitly starts graph with command/tool | Runner | advise |
+| advise | Intent/codebase/test-design reports have open questions | Runner asks one grouped question | needs-person |
+| needs-person | Person answers | Runner updates state | advise |
+| advise | Only affected context changed | Runner reruns affected advisors only | advise |
+| advise | No open questions remain | Lead writes a high-level plan | plan |
+| plan | Plan is ready | Runner starts Architecture advisor | architecture-review |
+| architecture-review | Architecture asks questions or blocks | Runner asks one grouped question | needs-person |
+| architecture-review | Architecture approves or has non-blocking notes | Person approves plan/brief | brief-approved |
+| brief-approved | Build starts | Builder records tests and red run, then implements | build |
+| build | Green run exists | Runner writes verifier task | verify |
+| verify | Verifier passes | Runner marks one terminal state | done |
+| verify | Verifier misses or blocks | Runner records classification request | classify |
+| classify | Real new information confirmed by person | Runner drafts proposal if needed, allows one more build | brief-approved |
+| classify | Same class repeats within this task | Runner asks one question | blocked |
+| classify | Second miss after rework | Runner asks one question | blocked |
+| blocked | Person answers the one blocking question | Runner updates state | advise or brief-approved, depending on answer |
+
+The lead writes the plan. The runner writes state and helper tasks.
+
+## Build and verify
+
+The red run belongs in `build`, not in the frozen brief. The frozen brief says what tests must exist; the builder
+materializes those tests and records:
+
+- `testFiles`;
+- `testHashes` after materializing tests;
+- `redRunLog`;
+- `greenRunLog`.
+
+A missing red run blocks `verify` only. It does not reopen the brief.
+
+The verifier is independent:
+
+- The runner writes the verifier task from the frozen brief, diff, test hashes, and `run_in_pane` log paths.
+- The verifier starts in a fresh context with no builder transcript.
+- Because `sharpen-pi.ts` currently appends lead context to every subagent task, the verifier path must avoid that
+  helper-brief injection.
+- Use a fixed verifier profile: reuse `reviewer.md` only after adding explicit `tools:` and `skills:`, or add
+  `verifier.md`.
+- Prefer a verifier model different from the builder's model.
+- The verifier reruns the agreed checks itself when they are targeted and available. It also inspects the runner's
+  provided red/green logs and test hashes. If it cannot rerun or inspect enough evidence, it reports `blocked`.
+
+## Stop conditions
+
+| Stop | Who decides | Next stage |
 |---|---|---|
-| Intent | Finds ambiguity, writes sharp questions for Kyle, captures "done" in Kyle's words | New read-only profile |
-| Codebase | Finds relevant files, history, existing tests and local patterns | Existing scout role |
-| Test-design | Writes acceptance-test definitions into the brief before the builder starts | New read-only profile |
-| Architecture | Judges whether the plan fits existing architecture and boundaries, adds needless layers or code, and has a simpler shape | New read-only profile, with the checklist later built from Matt Timmermans' real review comments and commits |
+| Open questions remain | Runner from advisor reports | `needs-person` |
+| Grimoire missing or unreadable | Open question for the person: should missing and unreadable both block? | `blocked` until answered |
+| State is stale | Runner | `blocked` |
+| Red run missing | Runner before verifier starts | `build` to record red run, or `blocked` if impossible |
+| Verifier cannot inspect enough evidence | Verifier | `blocked` |
+| Same class repeats within one task | Runner, using `rework[].class` | `blocked` with one question |
+| Real new information claimed | Person decides through a question | `brief-approved` if confirmed, otherwise `blocked` |
+| Second post-check miss after one rework | Runner | `blocked` with one question |
 
-Risk and ops/observability advisors are optional. They run only when the task touches safety, runtime behavior, rollout,
-logs, rate limits or production operations.
+"Same class repeats" means the latest rework class matches an earlier rework class in the same state file for the same
+task. "Stale" means the state no longer matches the current worktree: branch/base head changed, frozen brief hash is
+not current, test hashes do not match test files, or the diff no longer matches what the verifier was asked to inspect.
+Leaving `blocked` always requires one answer from the person; the runner never retries on its own.
 
-The Architecture advisor should aim for "Matt T quality": Matt Timmermans-style pressure toward code that earns its
-place, preserves existing boundaries, and removes needless layers. Do not invent his checklist from vibes. Build it
-later from his actual review comments and commits. Kyle's source corpus for that checklist is Matt Timmermans
-(`mtimmerm-aig`) as CODEOWNERS sole owner of travelagent-ai's planner, agentCore, framework, Trip Doc intents, toolSet
-and functionalWatchers.
+## Metrics and cost
 
-Every advisor and verifier profile must set explicit `skills:` and `tools:` lists. Read-only advisors should deny edit
-and write tools. Verifiers should get only the tools needed to inspect diffs, read logs and run the agreed checks.
+All four advisors run in slice one. Advisors must still earn their tokens, so the runner records token counts per
+advisor and per graph. The initial metric can be a CLI/status line backed by state files, not radar:
 
-External evidence from the research supports this direction, with caveats:
+```
+loops: first-pass 6/8 · avoidable rework context 1 intent 1 check 0 · tokens 42k
+```
 
-- Verified in the research: underspecified coding tasks are common, and asking clarifying questions can improve results
-  (OpenAI SWE-bench Verified, Ambig-SWE, ClarifyGPT).
-- Verified in the research: test design as a separate role and test-first generation improve pass rates (AgentCoder,
-  TDD for code generation).
-- Verified in the research: multi-agent discussion is fragile and costly unless agents bring different information
-  (Anthropic multi-agent research system, Cognition, MAST, "Should we be going MAD?").
+For "accepted without rework", use two data sources:
 
-So advisors must earn their tokens. The runner skips optional advisors when Grimoire, the existing scout, and the lead's
-own plan already cover the task. It records which advisors ran and how many tokens the graph spent.
+- `learn.ts` correction moments on the branch after the graph finishes;
+- follow-up commits on the branch after verifier pass or review.
 
-### Advisor intake
-
-The intake should run like Matt Pocock's grill-with-docs skill, but with sitra's missing structure:
-
-- keep the good parts: ask every question that is ready in one round, include a recommended answer for each, let agents
-  find facts and Kyle make decisions, and stop only when nothing is left open;
-- add structured brief fields instead of a free-form scratchpad;
-- use Grimoire, not an ad-hoc `CONTEXT.md`;
-- make the test-design advisor write acceptance tests before implementation;
-- learn from misses by classifying rework events into Grimoire proposals.
-
-### Approval and build
-
-The lead shows Kyle the advisors' open questions and a short high-level plan. The full brief is available, but Kyle
-should not have to edit it line by line unless he asks. After Kyle answers and approves the plan, the runner freezes the
-brief for the build.
-
-The builder is one agent, normally the lead. A builder teammate can still be used for a narrow, fully specified piece,
-but there are no parallel builders and no voting builders. The first build step is to materialize the agreed acceptance
-tests and record the failing red run, then implement the product change. The builder may not rewrite the agreed
-acceptance tests without the state recording it as a rework risk.
-
-### One check, then classify
-
-The verifier is independent and read-only. It checks:
-
-- the implementation against the agreed acceptance tests and "done" condition;
-- that the red run was recorded before implementation;
-- that tests were not skipped, weakened or moved after agreement;
-- the high-level goal, not just the test output.
-
-Pass clears the lead to open a draft PR. A miss creates a rework event with one of these classes:
-
-| Class | Meaning | Drafted Grimoire proposal |
-|---|---|---|
-| Context existed but did not reach builder | The fact was in Grimoire or the repo but absent from the brief | Trigger, sharper wording, or root move |
-| Context was missing | The fact was not recorded anywhere | New fact, warning or lesson |
-| Wrong intent | The team should have asked Kyle a better question | Intent-advisor question pattern |
-| Genuine new information | Kyle changed the goal or a new fact appeared | No avoidable-rework count; maybe record the decision |
-| Execution slip | The brief was good but the work slipped | Warning or setup, if reusable |
-| Gap in the check | Tests passed but did not prove the goal | Test-design checklist addition |
-
-Kyle approves every proposal. Nothing is auto-written to `root/` or `kinds/`. Lessons evolve in small ACE-style steps:
-add a narrow proposal with evidence, do not rewrite the playbook wholesale.
-
-A second build round is allowed only when the rework event identifies real new information or a specific learning to
-apply. If the same class repeats, the runner stops and asks Kyle one question.
-
-### PR rule and radar
-
-The first slice keeps this simple: the lead opens a draft PR only from `passed`. There is no shell-level guardrail yet.
-If the lead opens or tries to open a PR before the check passes, classify it as a rework event and count it. Add a gate
-later only if measured rework shows the rule is not enough.
-
-Radar stays view-only. Add:
-
-- a live lead -> helper tree;
-- stage and advisors run for the current graph;
-- a line like `first-pass 6/8 · avoidable rework: context 1, intent 1 · tokens 42k`.
-
-The metric should track both "agreed tests passed first time" and "Kyle accepted or merged without asking for rework."
-Those are different signals.
-
-## Anti-gaming
-
-The research makes the metric risky if it becomes a target:
-
-- Verified in the research: DGM faked a log and METR saw reward hacking. Therefore the runner records raw run logs from
-  `run_in_pane`, stores the red-run log before implementation, and treats missing or edited logs as blocked.
-- Verified in the research: AgentPoison and MINJA show memory can be poisoned. Therefore every proposal needs evidence,
-  Kyle approval, and small changes. Proposals never go straight to root.
-- Guess from the research: agents may call a miss "new info" to protect the first-pass metric. Therefore classification
-  uses a separate model and the verifier's evidence, and repeated "new info" calls are surfaced in radar for Kyle.
-- Verified in current code: tests and checks can run through `run_in_pane`; the verifier should cite those log paths,
-  not screenshots or prose summaries alone.
-
-## Cost
-
-Advisors are not free. The research cites Anthropic's multi-agent system using about 15x more tokens than chat, and also
-says coding tasks are less parallel than research tasks. The first slice should therefore:
-
-- run only intent, codebase, test-design and architecture by default while measuring value;
-- skip any advisor whose field is already covered by Grimoire, the codebase scout or the lead's plan;
-- skip optional advisors unless the task asks for their information;
-- record token cost per advisor and per task;
-- compare first-pass and avoidable rework against token cost;
-- drop or narrow an advisor whose output rarely changes the brief.
+These are imperfect but measurable. The metric should track both "agreed checks passed first time" and "no correction or
+follow-up commit after review."
 
 ## Out of scope for the first piece
 
 - A LangGraph-style DSL or runtime.
 - A tower that dispatches work or starts rework by itself.
-- Mandatory advisor -> build -> verify routing for every user request.
-- Parallel builders, voting reviewers or graph optimization.
+- Heuristic auto-start from normal lead requests.
+- Parallel builders, voting reviewers, or graph optimization.
 - A new memory ranker or embeddings service.
-- Automatic merge, auto-merge or non-draft PR creation.
+- PR creation guardrails beyond existing lead rules.
+- Automatic merge, auto-merge, or non-draft PR creation.
 - Codex and Claude Code loop runners. They still get Grimoire and triggers, but the first runner is Pi-only.
-- A full radar redesign. The first radar work is only the live lead -> helper tree and metric line.
-
-## Failure modes and how they surface
-
-| Failure | Surface it this way |
-|---|---|
-| State file missing, invalid or stale | Block the graph and show the validation error. |
-| Grimoire unreadable | Block before advisors run; no fail-open loop. |
-| Advisor returns prose instead of fields | Block the advisor result and show the raw output. |
-| Kyle has unanswered questions | Stage is `needs-kyle`; no build starts. |
-| Red run was not recorded | Block verification; tests were not proven first. |
-| Tests changed after approval | Rework event: likely execution slip or anti-gaming. |
-| Lead opens a PR before check passes | Rework event: measure first; add a gate later only if needed. |
-| Verifier misses the goal but tests pass | Rework event: gap in the check. |
-| Same rework class repeats | Stop and ask Kyle one question. |
-| Radar cannot see a helper | Show unknown helper state; do not pretend the tree is complete. |
+- Radar tree or radar proof work.
 
 ## How to prove it
 
 Use red-then-green tests with a new scripted model fixture, `test/fixtures/loop-model.ts`.
 
-1. Pure state tests: state creation, advisor sections, stage transitions, invalid report blocking, and Grimoire-unreadable
-   blocking.
-2. Brief tests: intent, codebase, test-design and Architecture reports merge into one brief; Kyle's answers and limits
-   travel into the build brief.
-3. Red-run test: test-design records the failing acceptance run before build; missing red evidence blocks build or
-   verify.
-4. PR rule test: opening or attempting a PR before `passed` records a rework event; the first slice measures it rather
-   than preventing the call.
-5. Rework classification tests: each class writes the right proposal shape into `proposals/`, except genuine new
-   information, which is not counted as avoidable rework.
-6. Anti-gaming tests: weakened tests, faked or missing logs, and repeated "new info" classifications stay blocked or
-   visible.
-7. Real Pi e2e: run `pi --mode rpc --no-extensions` with the loop extension and fake model; verify advisor reports,
-   Kyle approval, build, check, classification, handover/continue, and final reply.
-8. Radar test: snapshot shows the lead -> helper tree plus first-pass, rework mix and token line, with no mutation power.
+1. Pure state tests for TypeBox validation, stale detection, stage transitions, stop conditions, and one terminal
+   `done`.
+2. Helper report tests for base `helper_report` validation and each role's detail schema.
+3. Advisor-order tests: intent/codebase in parallel, test-design after those reports, architecture after lead plan, and
+   rerun only affected advisors after answers.
+4. Build tests: builder records test files, test hashes, red run log, and green run log; missing red run blocks verify.
+5. Verifier independence tests: verifier task contains frozen brief, diff, test hashes, and logs; it does not contain
+   builder transcript or sharpen helper brief.
+6. Classification tests: each miss class writes the right proposal shape, except genuine new information until the
+   person confirms it.
+7. E2E test: real `pi --mode rpc --no-extensions` with the loop extension and fake model, driven through explicit
+   graph start, advisor reports, approval, build, verify, classify, and done/blocked.
 
-Stub the module first so these tests run and fail on assertions, then implement only enough behavior to make them pass.
+`check.yml` exists, but CI has not been observed running for this work. Verification for the slice assumes local
+`pnpm check` run through `run_in_pane` under Node >= 24.12, matching `package.json`.
 
-## Open questions for Kyle
+## Open questions for the person
 
-1. **Which advisors ship first?** Kyle's answer: intent, codebase, test-design and Architecture.
-2. **Does Kyle see only the questions or the whole brief?** Recommendation: show questions and the high-level plan by
-   default, with the full brief one command away.
-3. **What does "first-pass accepted" mean?** Recommendation: track both agreed tests passed first time and Kyle accepted
-   or merged without rework.
-4. **Who can classify a rework event?** Recommendation: model drafts the class, verifier evidence is attached, Kyle can
-   override it during proposal review.
-5. **When should optional risk or ops advisors run?** Recommendation: only when paths, Grimoire entries or Kyle's ask
-   mention runtime, rollout, safety, data loss, rate limits, logs or production operations.
-6. **Should state ever live in the application repo?** Recommendation: not first. Keep it in the sitra profile so public
-   repos do not get private process files.
+1. Should missing Grimoire and unreadable Grimoire both block the runner, or should a missing empty Grimoire be allowed
+   for a new profile?
+2. Which transport should carry validated helper reports to the runner: tool result details, custom messages, or private
+   report files?
+3. Should the verifier always rerun agreed checks, or may it accept existing logs for checks that are expensive but
+   already captured by `run_in_pane`?
