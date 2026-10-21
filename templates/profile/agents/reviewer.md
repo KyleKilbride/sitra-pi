@@ -4,6 +4,7 @@ description: Independently reviews a change — the diff, the tests and the eval
 mode: interactive
 auto-exit: true
 trust-project: true
+tools: read,grep,find,ls,bash,helper_report
 deny-tools: edit,write
 skills: none
 model: openai/gpt-6.1-sol

@@ -24,6 +24,113 @@ test("helper reports are validated fields, not accepted prose", () => {
 	expect(validateHelperReport("I did it")).toMatchObject({ ok: false });
 });
 
+test("role reports validate their role-specific details", () => {
+	const details = {
+		intent: {
+			questions: [{ id: "q1", text: "Use the existing CLI shape?", recommended: "Yes, keep it.", dependsOn: [] }],
+			doneCandidates: ["The CLI keeps existing behavior."],
+			ambiguities: [],
+		},
+		codebase: {
+			files: ["cli/init.ts:1"],
+			existingTests: ["test/init.test.ts:1"],
+			facts: ["Verified: init scaffolds recursively."],
+			boundaries: ["Observed: Pi wiring stays out of cli/."],
+			owners: ["Verified: git log -S scaffoldProfile names the relevant maintainer."],
+		},
+		"test-design": {
+			acceptanceTests: [
+				{
+					name: "private profile wins",
+					proves: "existing files are not overwritten",
+					targetFile: "test/init.test.ts",
+					command: "pnpm vitest run test/init.test.ts",
+				},
+			],
+		},
+		architecture: {
+			fitsExistingArchitecture: true,
+			boundaryConcerns: [],
+			needlessLayersOrCode: [],
+			simplerShape: ["Keep validation in helper-report.ts."],
+			checklistEntriesUsed: ["read-only helpers"],
+			checklist: { state: "ok", path: "$PI_CODING_AGENT_DIR/agents/checklists/architecture.md" },
+		},
+		verifier: {
+			checksRun: ["pnpm vitest run test/helper-report.test.ts"],
+			rerunChecks: [{ command: "pnpm vitest run test/helper-report.test.ts", log: "/tmp/run.log", reason: "cheap" }],
+			acceptedLogs: [{ log: "/tmp/red.log", reason: "tied to commit and test hashes" }],
+			testHashesChecked: ["test/helper-report.test.ts sha256:abc"],
+			goalMatched: true,
+		},
+	} as const;
+
+	for (const [role, roleDetails] of Object.entries(details)) {
+		expect(validateHelperReport({ ...report, status: "done", role, details: roleDetails })).toMatchObject({
+			ok: true,
+			report: { role, details: roleDetails },
+		});
+	}
+});
+
+test("mismatched role details are rejected with the field path", () => {
+	expect(
+		validateHelperReport({
+			...report,
+			role: "verifier",
+			details: { checksRun: [], rerunChecks: [], acceptedLogs: [], testHashesChecked: [], goalMatched: "yes" },
+		}),
+	).toMatchObject({ ok: false, reason: expect.stringContaining("/details/goalMatched") });
+});
+
+test("a report without a role still validates as the plain base report", () => {
+	expect(validateHelperReport({ ...report })).toEqual({ ok: true, report });
+});
+
+test("intent questions carry recommended answers and dependencies", () => {
+	const q = { id: "q2", text: "Keep the pure helper?", recommended: "Yes, keep it pure.", dependsOn: ["q1"] };
+	expect(
+		validateHelperReport({
+			...report,
+			role: "intent",
+			details: { questions: [q], doneCandidates: [], ambiguities: [] },
+		}),
+	).toMatchObject({ ok: true, report: { details: { questions: [q] } } });
+});
+
+test("architecture reports carry checklist state and path", () => {
+	for (const state of ["ok", "absent", "unreadable"]) {
+		expect(
+			validateHelperReport({
+				...report,
+				role: "architecture",
+				details: {
+					fitsExistingArchitecture: true,
+					boundaryConcerns: [],
+					needlessLayersOrCode: [],
+					simplerShape: [],
+					checklistEntriesUsed: [],
+					checklist: { state, path: "$PI_CODING_AGENT_DIR/agents/checklists/architecture.md" },
+				},
+			}),
+		).toMatchObject({ ok: true });
+	}
+	expect(
+		validateHelperReport({
+			...report,
+			role: "architecture",
+			details: {
+				fitsExistingArchitecture: true,
+				boundaryConcerns: [],
+				needlessLayersOrCode: [],
+				simplerShape: [],
+				checklistEntriesUsed: [],
+				checklist: { state: "missing", path: "x" },
+			},
+		}),
+	).toMatchObject({ ok: false, reason: expect.stringContaining("/details/checklist/state") });
+});
+
 test("the lead-facing report exposes fields and flags raw missing prose", () => {
 	const rendered = renderHelperReport(report);
 	expect(rendered).toContain(HELPER_REPORT_MARKER);

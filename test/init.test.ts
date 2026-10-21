@@ -142,6 +142,23 @@ test("run again, it offers the saved name and keeps the person's profile edits",
 	expect(readFileSync(join(profileOf(first.home), "AGENTS.md"), "utf8")).toBe("edited\n");
 });
 
+test("init leaves private advisor and checklist files untouched", async () => {
+	const m = machine({});
+	mkdirSync(join(m.repoRoot, "templates", "profile", "agents", "checklists"), { recursive: true });
+	writeFileSync(join(m.repoRoot, "templates", "profile", "agents", "architecture-advisor.md"), "template advisor\n");
+	writeFileSync(
+		join(m.repoRoot, "templates", "profile", "agents", "checklists", "architecture.md"),
+		"template checklist\n",
+	);
+	const profile = profileOf(m.home);
+	mkdirSync(join(profile, "agents", "checklists"), { recursive: true });
+	writeFileSync(join(profile, "agents", "architecture-advisor.md"), "private advisor\n");
+	writeFileSync(join(profile, "agents", "checklists", "architecture.md"), "private checklist\n");
+	await runInit(m.deps);
+	expect(readFileSync(join(profile, "agents", "architecture-advisor.md"), "utf8")).toBe("private advisor\n");
+	expect(readFileSync(join(profile, "agents", "checklists", "architecture.md"), "utf8")).toBe("private checklist\n");
+});
+
 test("with the person's OK it shares their existing Pi sign-ins instead of asking them to log in again", async () => {
 	const m = machine({});
 	mkdirSync(join(m.home, ".pi", "agent"), { recursive: true });

@@ -120,9 +120,14 @@ Old bare-array mail snapshots are not treated as a live inbox.
 | Teammate | Does | Where |
 |---|---|---|
 | scout | Read-only digging: files, git history, owners | Background; the lead gets its summary |
+| intent-advisor | Read-only intake: decision tree, ready questions and recommended yes-answers | Background; reports through `helper_report` |
+| codebase-advisor | Read-only landing map: files, tests, history, owners and boundaries | Background; reports through `helper_report` |
+| test-design-advisor | Read-only acceptance-test definitions from the intent and codebase reports | Background; reports through `helper_report` |
+| architecture-advisor | Read-only fit and boundary review using a private checklist when present | Background; reports through `helper_report` |
 | builder | Small, fully specified edits handed off by the lead, which does most building itself; never pushes or merges | Its own pane |
 | app-tester | Uses the real app in your Chrome (chrome-devtools MCP), reads the app's real state, and reports what it saw | Its own pane |
 | reviewer | Checks the diff, tests and evals; can't edit | Its own pane |
+| verifier | Independent read-only verification of the frozen brief, diff, test hashes and logs | Its own pane |
 
 When a teammate finishes, its pane closes and its report goes back to the lead. You can ask for one directly ("send
 the app-tester to check X"). Watch their panes, but don't type into them: that stops the hand-back. Tell the lead
@@ -192,8 +197,9 @@ The homebrew parts are small: Grimoire, `run_in_pane`, the lead's rules and `sit
 ## Good to know
 
 - Teammate models: scout and builder run on `google/gemini-4-argon`, the reviewer on `openai/gpt-6.1-sol` (high
-  thinking), the app-tester on `anthropic/claude-sonnet-5-5`. Each may only be switched to the models in its
-  `allowed-models:` line. If you use other providers, change `model:` in `~/.sitra/profile/agents/<name>.md`.
+  thinking), the verifier on `openai/gpt-6.1-sol` (xhigh thinking), the app-tester on `anthropic/claude-sonnet-5-5`, and the advisor profiles pin
+  their own models with `allow-model-override: false`. If you use other providers, change `model:` in
+  `~/.sitra/profile/agents/<name>.md`.
 - The app-tester needs Chrome 144 or later, running, with remote debugging turned on at
   `chrome://inspect/#remote-debugging`.
 - Your profile is yours to edit: `~/.sitra/profile/AGENTS.md` (how agents work with you) and `agents/*.md` (the
