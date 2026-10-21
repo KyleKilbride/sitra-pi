@@ -1,12 +1,12 @@
 /** Live, keyboard-driven workspace dashboard with read-only mailbox and run logs. */
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { grimoireDir, listProposals } from "./grimoire.ts";
 import { initialRadarState, type RadarState, type TowerSummary } from "./radar-model.ts";
 import { collectMail, readTowerSummary } from "./radar-store.ts";
 import { buildRadarLayout } from "./radar-view.ts";
-import { readRun } from "./runs.ts";
+import { readRun, readRunHeader } from "./runs.ts";
 import {
 	createTailReader,
 	detectSessionAlerts,
@@ -26,19 +26,50 @@ export interface MailItem {
 	id: string;
 	peer: string;
 	direction: "in" | "out";
-	state: string;
+	/** Deprecated compatibility field: old adapters used this as the row's subject. */
 	summary: string;
+	subject?: string;
+	preview?: string;
+	state: string;
+	delivery?: {
+		confirmed?: boolean;
+		status?: string;
+	};
 	body?: string;
 	updatedAt: string;
+	/** True when `updatedAt` is only when the dashboard first saw the message, not when it was sent or received. */
+	dateApproximate?: boolean;
+}
+
+export type RunState = "running" | "passed" | "failed" | "stopped" | "unknown";
+export type RunLiveness = "running" | "stopped" | "unknown";
+export interface RunProcessIdentity {
+	kind: "proc" | "ps-lstart";
+	value: string;
 }
 
 export interface RunSummary {
 	id: string;
 	label: string;
+	state: RunState;
+	project?: string;
+	branch?: string;
+	agent?: string;
+	sessionId?: string;
 	tail?: string;
 	done: boolean;
 	exitCode?: number;
 	updatedAt: string;
+}
+
+export interface PullRequestSummary {
+	id: string;
+	project: string;
+	number: number;
+	title: string;
+	branch?: string;
+	url?: string;
+	isDraft?: boolean;
 }
 
 export interface WorkerCard {
@@ -63,6 +94,8 @@ export interface RadarSnapshot {
 	workers: WorkerCard[];
 	alerts: SessionAlert[];
 	runs: RunSummary[];
+	pullRequests?: PullRequestSummary[];
+	statusNotices?: string[];
 	pendingProposals: number;
 	mail: MailItem[];
 	mailNotice?: string;
@@ -254,7 +287,104 @@ function readTranscriptInsights(
 	}
 }
 
-function collectRuns(profileDir: string): RunSummary[] {
+/** A run with no recorded owner and no output for this long is assumed dead. */
+const LEGACY_RUN_STALE_MS = 15 * 60_000;
+
+function readFirstLine(file: string): string {
+	const fd = openSync(file, "r");
+	try {
+		const buffer = Buffer.alloc(2048);
+		const read = readSync(fd, buffer, 0, buffer.length, 0);
+		return buffer.toString("utf8", 0, read).split("\n")[0] ?? "";
+	} finally {
+		closeSync(fd);
+	}
+}
+
+function procPidStart(pid: number): string | undefined {
+	if (process.platform !== "linux") return undefined;
+	try {
+		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+		const end = stat.lastIndexOf(") ");
+		if (end < 0) return undefined;
+		// Field 22 is starttime. After the comm field, token 0 is field 3 (`state`).
+		return stat
+			.slice(end + 2)
+			.trim()
+			.split(/\s+/)[19];
+	} catch {
+		return undefined;
+	}
+}
+
+function psPidStart(pid: number): string | undefined {
+	try {
+		const value = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+			encoding: "utf8",
+			timeout: 1000,
+			stdio: ["ignore", "pipe", "ignore"],
+		})
+			.trim()
+			.replace(/\s+/g, " ");
+		return value || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function processLiveness(pid: number, identity?: RunProcessIdentity): RunLiveness {
+	try {
+		process.kill(pid, 0);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EPERM") return "stopped";
+	}
+	if (!identity) return "unknown";
+	const currentStart = identity.kind === "proc" ? procPidStart(pid) : psPidStart(pid);
+	if (currentStart === undefined) return "unknown";
+	return currentStart === identity.value ? "running" : "stopped";
+}
+
+function runIdentity(
+	header: { pidStart?: string; pidStartKind?: "proc" | "ps-lstart" } | undefined,
+): RunProcessIdentity | undefined {
+	if (!header?.pidStart || !header.pidStartKind) return undefined;
+	return { kind: header.pidStartKind, value: header.pidStart };
+}
+
+function normalizeLiveness(value: RunLiveness | boolean): RunLiveness {
+	if (value === true) return "running";
+	if (value === false) return "stopped";
+	return value;
+}
+
+function unfinishedRunState(
+	header: { pid: number; pidStart?: string; pidStartKind?: "proc" | "ps-lstart" } | undefined,
+	mtimeMs: number,
+	nowMs: number,
+	pidAlive: (pid: number, identity?: RunProcessIdentity) => RunLiveness | boolean,
+): RunState {
+	if (!header) return nowMs - mtimeMs < LEGACY_RUN_STALE_MS ? "running" : "stopped";
+	const identity = runIdentity(header);
+	if (!identity) return "unknown";
+	return normalizeLiveness(pidAlive(header.pid, identity));
+}
+
+function sortRunGroup(state: RunState): number {
+	switch (state) {
+		case "running":
+			return 0;
+		case "unknown":
+			return 1;
+		default:
+			return 2;
+	}
+}
+
+function collectRuns(
+	profileDir: string,
+	nowMs: number,
+	pidAlive: (pid: number, identity?: RunProcessIdentity) => RunLiveness | boolean,
+): RunSummary[] {
 	const dir = join(profileDir, "runs");
 	if (!existsSync(dir)) return [];
 	try {
@@ -263,24 +393,80 @@ function collectRuns(profileDir: string): RunSummary[] {
 			.sort()
 			.reverse()
 			.slice(0, 30);
-		return files.map((file) => {
+		const runs = files.map((file): RunSummary => {
 			const full = join(dir, file);
 			// The exit marker is the log's last line, so the end of the log is all that's needed.
 			const status = readRun(readLastLines(full, 100), 80);
-			const label = file.replace(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-/, "").replace(/\.log$/, "");
-			const mtime = statSync(full).mtime.toISOString();
+			const header = readRunHeader(readFirstLine(full));
+			const mtimeMs = statSync(full).mtimeMs;
+			const label =
+				header?.meta.label ?? file.replace(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-/, "").replace(/\.log$/, "");
+			const state: RunState = status.done
+				? status.exitCode === 0
+					? "passed"
+					: "failed"
+				: unfinishedRunState(header, mtimeMs, nowMs, pidAlive);
 			return {
 				id: full,
 				label,
+				state,
+				...(header?.meta.project ? { project: header.meta.project } : {}),
+				...(header?.meta.branch ? { branch: header.meta.branch } : {}),
+				...(header?.meta.agent ? { agent: header.meta.agent } : {}),
+				...(header?.meta.sessionId ? { sessionId: header.meta.sessionId } : {}),
 				tail: status.tail,
 				done: status.done,
 				...(status.exitCode !== undefined ? { exitCode: status.exitCode } : {}),
-				updatedAt: mtime,
+				updatedAt: new Date(mtimeMs).toISOString(),
 			};
 		});
+		// Live runs first so "who is running what" is the top of the list; unknowns stay visible just below them.
+		return runs.toSorted(
+			(a, b) => sortRunGroup(a.state) - sortRunGroup(b.state) || b.updatedAt.localeCompare(a.updatedAt),
+		);
 	} catch {
 		return [];
 	}
+}
+
+function collectOpenPullRequests(repos: readonly string[]): { items: PullRequestSummary[]; notices: string[] } {
+	const items: PullRequestSummary[] = [];
+	const notices: string[] = [];
+	const seenRepos = new Set<string>();
+	for (const repo of repos) {
+		if (seenRepos.has(repo) || !existsSync(repo)) continue;
+		seenRepos.add(repo);
+		const project = basename(repo);
+		try {
+			const raw = execFileSync(
+				"gh",
+				["pr", "list", "--state", "open", "--limit", "20", "--json", "number,title,headRefName,isDraft,url"],
+				{ cwd: repo, encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "pipe"] },
+			);
+			const parsed = JSON.parse(raw) as {
+				number?: unknown;
+				title?: unknown;
+				headRefName?: unknown;
+				isDraft?: unknown;
+				url?: unknown;
+			}[];
+			for (const pr of parsed) {
+				if (typeof pr.number !== "number" || typeof pr.title !== "string") continue;
+				items.push({
+					id: `${project}#${pr.number}`,
+					project,
+					number: pr.number,
+					title: pr.title.slice(0, 200),
+					...(typeof pr.headRefName === "string" ? { branch: pr.headRefName.slice(0, 200) } : {}),
+					...(typeof pr.url === "string" ? { url: pr.url } : {}),
+					...(typeof pr.isDraft === "boolean" ? { isDraft: pr.isDraft } : {}),
+				});
+			}
+		} catch {
+			notices.push(`Open PRs unavailable for ${project}; gh pr list failed.`);
+		}
+	}
+	return { items, notices };
 }
 
 interface HerdrWorkspaceMeta {
@@ -399,7 +585,15 @@ function queryHerdrWorkspaces(
 
 export function collectRadarSnapshot(
 	profileDir: string,
-	options?: { nowMs?: number; towerName?: string; includeHerdr?: boolean; readLines?: (file: string) => string },
+	options?: {
+		nowMs?: number;
+		towerName?: string;
+		includeHerdr?: boolean;
+		includePullRequests?: boolean;
+		listPullRequests?: (repos: string[]) => PullRequestSummary[];
+		readLines?: (file: string) => string;
+		pidAlive?: (pid: number, identity?: RunProcessIdentity) => RunLiveness | boolean;
+	},
 ): RadarSnapshot {
 	const nowMs = options?.nowMs ?? Date.now();
 	const towerName = options?.towerName?.trim() || process.env.SITRA_TOWER_NAME?.trim() || "Tower";
@@ -572,12 +766,28 @@ export function collectRadarSnapshot(
 	} catch {
 		// An unreadable Grimoire just shows nothing to review.
 	}
+	const runSummaries = collectRuns(profileDir, nowMs, options?.pidAlive ?? processLiveness);
+	const repos = Array.from(
+		new Set(
+			workers
+				.map((w) => w.lead.repo || w.lead.cwd)
+				.filter((repo): repo is string => Boolean(repo))
+				.map((repo) => mainCheckout(repo)),
+		),
+	);
+	const pullRequestResult = options?.listPullRequests
+		? { items: options.listPullRequests(repos), notices: [] }
+		: options?.includePullRequests
+			? collectOpenPullRequests(repos)
+			: { items: [], notices: [] };
 
 	return {
 		towerName,
 		workers,
 		alerts,
-		runs: collectRuns(profileDir),
+		runs: runSummaries,
+		...(pullRequestResult.items.length > 0 ? { pullRequests: pullRequestResult.items } : {}),
+		...(pullRequestResult.notices.length > 0 ? { statusNotices: pullRequestResult.notices } : {}),
 		pendingProposals,
 		mail: collectMail(profileDir),
 		summary: readTowerSummary(profileDir),

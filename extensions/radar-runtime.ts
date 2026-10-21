@@ -15,7 +15,12 @@ export function runRadarTui(profileDir: string, options?: { towerName?: string; 
 	const out = process.stdout;
 	const readLines = createTailReader(TRANSCRIPT_TAIL_LINES);
 	const collect = () =>
-		collectRadarSnapshot(profileDir, { towerName: options?.towerName, includeHerdr: true, readLines });
+		collectRadarSnapshot(profileDir, {
+			towerName: options?.towerName,
+			includeHerdr: true,
+			includePullRequests: true,
+			readLines,
+		});
 	let state = initialRadarState();
 	let snapshot = collect();
 	let shown: string[] | undefined;

@@ -37,7 +37,17 @@ const snapshot: RadarSnapshot = {
 	workers: [worker(2), worker(7), worker(12)],
 	alerts: [],
 	pendingProposals: 0,
-	runs: [{ id: "r1", label: "tests", done: true, exitCode: 1, updatedAt: "2026-10-21T10:00:00Z", tail: "a\nb\nc" }],
+	runs: [
+		{
+			id: "r1",
+			label: "tests",
+			state: "failed",
+			done: true,
+			exitCode: 1,
+			updatedAt: "2026-10-21T10:00:00Z",
+			tail: "a\nb\nc",
+		},
+	],
 	mail: [
 		{
 			id: "m1",

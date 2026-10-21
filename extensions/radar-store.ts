@@ -42,13 +42,42 @@ export function parseMailSnapshot(value: unknown): MailSnapshot {
 	if (source.items.length > 500) throw new Error("Mailbox snapshot too large");
 	const seen = new Set<string>();
 	const items = source.items.map((item) => {
+		if (!item || typeof item !== "object") throw new Error("Invalid mailbox item");
+		const raw = item as MailItem & {
+			subject?: unknown;
+			preview?: unknown;
+			summary?: unknown;
+			delivery?: unknown;
+		};
+		const delivery = raw.delivery as { confirmed?: unknown; status?: unknown } | undefined;
+		const deliveryValid =
+			raw.delivery === undefined ||
+			(raw.delivery !== null &&
+				typeof raw.delivery === "object" &&
+				(delivery?.confirmed === undefined || typeof delivery.confirmed === "boolean") &&
+				(delivery?.status === undefined || typeof delivery.status === "string"));
+		const subjectSource =
+			typeof raw.subject === "string" ? raw.subject : typeof raw.summary === "string" ? raw.summary : "";
+		const subject = terminalText(subjectSource).replace(/\s+/g, " ").trim().slice(0, 300);
+		const body = typeof raw.body === "string" ? terminalText(raw.body).slice(0, 256_000) : undefined;
+		const explicitPreview =
+			typeof raw.preview === "string" ? terminalText(raw.preview).replace(/\s+/g, " ").trim().slice(0, 500) : undefined;
+		const preview =
+			explicitPreview ??
+			body
+				?.split("\n")
+				.map((line) => line.trim())
+				.find(Boolean)
+				?.slice(0, 500);
 		if (
-			!item ||
-			typeof item !== "object" ||
-			![item.id, item.peer, item.state, item.summary, item.updatedAt].every((v) => typeof v === "string") ||
+			![item.id, item.peer, item.state, item.updatedAt].every((v) => typeof v === "string") ||
+			!subject ||
 			!["in", "out"].includes(item.direction) ||
 			!Number.isFinite(Date.parse(item.updatedAt)) ||
 			(item.body !== undefined && typeof item.body !== "string") ||
+			(raw.preview !== undefined && typeof raw.preview !== "string") ||
+			(item.dateApproximate !== undefined && typeof item.dateApproximate !== "boolean") ||
+			!deliveryValid ||
 			seen.has(item.id) ||
 			item.id.length > 500
 		)
@@ -58,14 +87,30 @@ export function parseMailSnapshot(value: unknown): MailSnapshot {
 			id: item.id,
 			peer: terminalText(item.peer).slice(0, 200),
 			state: terminalText(item.state).slice(0, 100),
-			summary: terminalText(item.summary).slice(0, 1000),
+			summary: subject,
+			subject,
+			...(preview ? { preview } : {}),
 			direction: item.direction,
 			updatedAt: new Date(item.updatedAt).toISOString(),
-			...(item.body !== undefined ? { body: terminalText(item.body).slice(0, 256_000) } : {}),
+			...(deliveryValid && raw.delivery !== undefined
+				? {
+						delivery: {
+							...(typeof delivery?.confirmed === "boolean" ? { confirmed: delivery.confirmed } : {}),
+							...(typeof delivery?.status === "string" ? { status: terminalText(delivery.status).slice(0, 100) } : {}),
+						},
+					}
+				: {}),
+			...(item.dateApproximate ? { dateApproximate: true } : {}),
+			...(body !== undefined ? { body } : {}),
 		};
 	});
 	return {
-		items: items.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+		items: items.sort(
+			(a, b) =>
+				Number(a.direction === "out") - Number(b.direction === "out") ||
+				Number(a.dateApproximate === true) - Number(b.dateApproximate === true) ||
+				b.updatedAt.localeCompare(a.updatedAt),
+		),
 		...(typeof source.notice === "string" ? { notice: terminalText(source.notice).slice(0, 1000) } : {}),
 		...(typeof source.updatedAt === "string" && Number.isFinite(Date.parse(source.updatedAt))
 			? { updatedAt: new Date(source.updatedAt).toISOString() }

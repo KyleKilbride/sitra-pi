@@ -4,9 +4,10 @@
  */
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { Type } from "typebox";
 import { paneCommand, readRun, shellQuote } from "./runs.ts";
+import { gitBranch, mainCheckout } from "./sessions.ts";
 
 /** The lead's working rules, written for the person it works with (their name, or "the user"). */
 export function leadRules(name?: string): string {
@@ -41,6 +42,9 @@ function herdr(args: string[]): string {
 interface Ctx {
 	cwd: string;
 	isIdle?: () => boolean;
+	sessionManager?: {
+		getSessionId?(): string | undefined;
+	};
 }
 
 interface Pi {
@@ -137,7 +141,16 @@ export default function sitraLead(pi: Pi): void {
 				.replace(/[^a-z0-9]+/g, "-")
 				.slice(0, 40);
 			const log = join(runsDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${slug}.log`);
-			const line = paneCommand(params.command, log);
+			const branch = gitBranch(ctx.cwd);
+			const line = paneCommand(params.command, log, {
+				label: params.label,
+				project: basename(mainCheckout(ctx.cwd)),
+				...(branch ? { branch } : {}),
+				agent:
+					process.env.PI_SUBAGENT_NAME?.trim() ||
+					(isTower ? (process.env.SITRA_TOWER_NAME?.trim() ?? "tower") : "lead"),
+				...(ctx.sessionManager?.getSessionId?.() ? { sessionId: ctx.sessionManager.getSessionId() } : {}),
+			});
 			let where: string;
 			if (process.env.HERDR_ENV === "1" && process.env.HERDR_PANE_ID) {
 				if (!runPane || !paneAlive(runPane)) {
