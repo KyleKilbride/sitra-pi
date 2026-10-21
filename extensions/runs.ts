@@ -20,9 +20,10 @@ export function paneCommand(command: string, log: string, meta: RunMeta = {}): s
 	const q = shellQuote(log);
 	const head = shellQuote(`${HEADER_MARKER}{"pid":`);
 	const pidStart = shellQuote(`,"pidStart":"`);
+	const pidStartKind = shellQuote(`","pidStartKind":"`);
 	const tail = shellQuote(`","meta":${JSON.stringify(meta)}}`);
 	// Always bash, whatever shell the pane runs (herdr panes run the user's zsh).
-	const script = `pid_start=""; if [ -r "/proc/$$/stat" ]; then pid_start=$(awk '{print $22}' "/proc/$$/stat" 2>/dev/null || true); fi; printf '%s%s%s%s%s\\n' ${head} "$$" ${pidStart} "$pid_start" ${tail} > ${q}; { ${command} ; } 2>&1 | tee -a ${q}; echo "${EXIT_MARKER}\${PIPESTATUS[0]}" >> ${q}`;
+	const script = `pid_start=""; pid_start_kind=""; if [ -r "/proc/$$/stat" ]; then pid_start=$(awk '{print $22}' "/proc/$$/stat" 2>/dev/null || true); if [ -n "$pid_start" ]; then pid_start_kind="proc"; fi; fi; if [ -z "$pid_start" ]; then pid_start=$(ps -o lstart= -p "$$" 2>/dev/null | awk '{$1=$1; print}' || true); if [ -n "$pid_start" ]; then pid_start_kind="ps-lstart"; fi; fi; printf '%s%s%s%s%s%s%s\\n' ${head} "$$" ${pidStart} "$pid_start" ${pidStartKind} "$pid_start_kind" ${tail} > ${q}; { ${command} ; } 2>&1 | tee -a ${q}; echo "${EXIT_MARKER}\${PIPESTATUS[0]}" >> ${q}`;
 	return `bash -c ${shellQuote(script)}`;
 }
 
@@ -42,12 +43,19 @@ export function readRun(logText: string, tailLines = 40): RunStatus {
 }
 
 /** The pid and owner recorded on the log's first line, if the run was started by `paneCommand`. */
-export function readRunHeader(firstLine: string): { pid: number; pidStart?: string; meta: RunMeta } | undefined {
+export function readRunHeader(
+	firstLine: string,
+): { pid: number; pidStart?: string; pidStartKind?: "proc" | "ps-lstart"; meta: RunMeta } | undefined {
 	if (!firstLine.startsWith(HEADER_MARKER)) return undefined;
 	try {
 		const value: unknown = JSON.parse(firstLine.slice(HEADER_MARKER.length));
 		if (!value || typeof value !== "object") return undefined;
-		const { pid, pidStart, meta } = value as { pid?: unknown; pidStart?: unknown; meta?: Record<string, unknown> };
+		const { pid, pidStart, pidStartKind, meta } = value as {
+			pid?: unknown;
+			pidStart?: unknown;
+			pidStartKind?: unknown;
+			meta?: Record<string, unknown>;
+		};
 		if (typeof pid !== "number" || !Number.isInteger(pid) || pid < 1) return undefined;
 		const text = (v: unknown) => (typeof v === "string" ? v.slice(0, 200) : undefined);
 		const label = text(meta?.label);
@@ -56,9 +64,17 @@ export function readRunHeader(firstLine: string): { pid: number; pidStart?: stri
 		const agent = text(meta?.agent);
 		const sessionId = text(meta?.sessionId);
 		const pidStartText = text(pidStart);
+		const rawKind = text(pidStartKind);
+		const inferredKind =
+			rawKind === "proc" || rawKind === "ps-lstart"
+				? rawKind
+				: pidStartText && Array.from(pidStartText).every((ch) => ch >= "0" && ch <= "9")
+					? "proc"
+					: undefined;
 		return {
 			pid,
-			...(pidStartText !== undefined ? { pidStart: pidStartText } : {}),
+			...(pidStartText ? { pidStart: pidStartText } : {}),
+			...(pidStartText && inferredKind ? { pidStartKind: inferredKind } : {}),
 			meta: {
 				...(label ? { label } : {}),
 				...(project ? { project } : {}),

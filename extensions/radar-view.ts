@@ -117,7 +117,9 @@ export function buildRadarLayout(
 						? "✓ passed"
 						: r.state === "failed"
 							? `✗ failed (exit ${r.exitCode ?? "?"})`
-							: "◌ stopped";
+							: r.state === "unknown"
+								? "? unknown"
+								: "◌ stopped";
 			const owner = [
 				r.agent,
 				r.sessionId ? `session ${r.sessionId}` : undefined,

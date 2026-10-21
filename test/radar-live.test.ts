@@ -3,7 +3,14 @@ import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { collectRadarSnapshot, type RadarSnapshot, type RunSummary, type WorkerCard } from "../extensions/radar.ts";
+import {
+	collectRadarSnapshot,
+	type RadarSnapshot,
+	type RunLiveness,
+	type RunProcessIdentity,
+	type RunSummary,
+	type WorkerCard,
+} from "../extensions/radar.ts";
 import { initialRadarState, liveStatus } from "../extensions/radar-model.ts";
 import { parseMailSnapshot } from "../extensions/radar-store.ts";
 import { buildRadarLayout } from "../extensions/radar-view.ts";
@@ -11,6 +18,20 @@ import { EXIT_MARKER, paneCommand, type RunMeta, readRun, readRunHeader } from "
 
 const NOW = Date.parse("2026-10-21T16:00:00Z");
 const tmp = () => mkdtempSync(join(tmpdir(), "sitra-radar-live-"));
+const currentProcessIdentity = () => {
+	try {
+		const stat = readFileSync(`/proc/${process.pid}/stat`, "utf8");
+		const start = stat
+			.slice(stat.lastIndexOf(") ") + 2)
+			.trim()
+			.split(/\s+/)[19];
+		if (start) return { kind: "proc", value: start };
+	} catch {}
+	const start = execFileSync("ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8" })
+		.trim()
+		.replace(/\s+/g, " ");
+	return { kind: "ps-lstart", value: start };
+};
 
 const worker = (
 	index: number,
@@ -62,7 +83,8 @@ describe("runs know who started them and whether they are still alive", () => {
 		const text = readFileSync(log, "utf8");
 		const header = readRunHeader(text.split("\n")[0] ?? "");
 		expect(header?.pid).toBeGreaterThan(1);
-		expect((header as { pidStart?: string } | undefined)?.pidStart).toMatch(/^\d*$/);
+		expect((header as { pidStart?: string } | undefined)?.pidStart).toMatch(/\S/);
+		expect((header as { pidStartKind?: string } | undefined)?.pidStartKind).toMatch(/^(proc|ps-lstart)$/);
 		expect(header?.meta).toEqual({
 			label: "unit tests",
 			project: "app",
@@ -75,15 +97,31 @@ describe("runs know who started them and whether they are still alive", () => {
 	test("a log without a header has no owner", () => {
 		expect(readRunHeader("plain")).toBeUndefined();
 	});
+	test("macOS ps start times are parsed from run headers", () => {
+		expect(
+			readRunHeader(
+				'__SITRA_RUN__={"pid":123,"pidStart":"Wed Oct 21 17:31:40 2026","pidStartKind":"ps-lstart","meta":{"label":"tests"}}',
+			),
+		).toMatchObject({
+			pid: 123,
+			pidStart: "Wed Oct 21 17:31:40 2026",
+			pidStartKind: "ps-lstart",
+			meta: { label: "tests" },
+		});
+	});
 
 	const profileWithRuns = () => {
 		const profile = tmp();
 		const dir = join(profile, "runs");
 		mkdirSync(dir, { recursive: true });
-		const header = (pid: number) =>
-			`__SITRA_RUN__={"pid":${pid},"meta":{"label":"evals","project":"app","branch":"feat/y"}}\n`;
+		const liveIdentity = currentProcessIdentity();
+		const header = (pid: number, identity = liveIdentity) =>
+			`__SITRA_RUN__={"pid":${pid},"pidStart":"${identity.value}","pidStartKind":"${identity.kind}","meta":{"label":"evals","project":"app","branch":"feat/y"}}\n`;
 		writeFileSync(join(dir, "2026-10-21T15-55-00-000Z-live.log"), `${header(process.pid)}running…\n`);
-		writeFileSync(join(dir, "2026-10-21T15-50-00-000Z-dead.log"), `${header(2 ** 22 - 3)}died mid-run\n`);
+		writeFileSync(
+			join(dir, "2026-10-21T15-50-00-000Z-dead.log"),
+			`${header(2 ** 22 - 3, { kind: "proc", value: "1" })}died mid-run\n`,
+		);
 		writeFileSync(join(dir, "2026-10-21T15-40-00-000Z-ok.log"), `${header(process.pid)}fine\n${EXIT_MARKER}0\n`);
 		const old = join(dir, "2026-10-08T10-00-00-000Z-legacy.log");
 		writeFileSync(old, "no header, never finished\n");
@@ -117,7 +155,7 @@ describe("runs know who started them and whether they are still alive", () => {
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
 			join(dir, "2026-10-21T15-57-00-000Z-reused.log"),
-			`__SITRA_RUN__={"pid":${process.pid},"pidStart":"definitely-not-this-process","meta":{"label":"reused pid","project":"app","agent":"lead","sessionId":"session-1"}}\nwork still pending\n`,
+			`__SITRA_RUN__={"pid":${process.pid},"pidStart":"definitely-not-this-process","pidStartKind":"proc","meta":{"label":"reused pid","project":"app","agent":"lead","sessionId":"session-1"}}\nwork still pending\n`,
 		);
 		const snap = collectRadarSnapshot(profile, { nowMs: NOW });
 		expect(snap.runs[0]).toMatchObject({
@@ -126,6 +164,39 @@ describe("runs know who started them and whether they are still alive", () => {
 			agent: "lead",
 			sessionId: "session-1",
 		});
+	});
+	test("macOS ps start identity is used to decide whether a run is still running", () => {
+		const profile = tmp();
+		const dir = join(profile, "runs");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(dir, "2026-10-21T15-56-00-000Z-mac.log"),
+			'__SITRA_RUN__={"pid":123,"pidStart":"Wed Oct 21 17:31:40 2026","pidStartKind":"ps-lstart","meta":{"label":"mac run","project":"app"}}\nwork still pending\n',
+		);
+		const identities: unknown[] = [];
+		const snap = collectRadarSnapshot(profile, {
+			nowMs: NOW,
+			pidAlive: (_: number, identity?: RunProcessIdentity): RunLiveness => {
+				identities.push(identity);
+				return identity?.kind === "ps-lstart" && identity.value === "Wed Oct 21 17:31:40 2026" ? "running" : "stopped";
+			},
+		});
+		expect(snap.runs[0]).toMatchObject({ state: "running", project: "app" });
+		expect(identities).toEqual([{ kind: "ps-lstart", value: "Wed Oct 21 17:31:40 2026" }]);
+	});
+	test("a new-format unfinished run with no start identity is unknown, not running", () => {
+		const profile = tmp();
+		const dir = join(profile, "runs");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(dir, "2026-10-21T15-56-30-000Z-no-identity.log"),
+			`__SITRA_RUN__={"pid":${process.pid},"meta":{"label":"no identity","project":"app"}}\nwork still pending\n`,
+		);
+		const snap = collectRadarSnapshot(profile, {
+			nowMs: NOW,
+			pidAlive: (): RunLiveness => "unknown",
+		});
+		expect(snap.runs[0]).toMatchObject({ state: "unknown", project: "app" });
 	});
 });
 

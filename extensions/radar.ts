@@ -41,7 +41,12 @@ export interface MailItem {
 	dateApproximate?: boolean;
 }
 
-export type RunState = "running" | "passed" | "failed" | "stopped";
+export type RunState = "running" | "passed" | "failed" | "stopped" | "unknown";
+export type RunLiveness = "running" | "stopped" | "unknown";
+export interface RunProcessIdentity {
+	kind: "proc" | "ps-lstart";
+	value: string;
+}
 
 export interface RunSummary {
 	id: string;
@@ -312,24 +317,73 @@ function procPidStart(pid: number): string | undefined {
 	}
 }
 
-function processAlive(pid: number, pidStart?: string): boolean {
+function psPidStart(pid: number): string | undefined {
+	try {
+		const value = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+			encoding: "utf8",
+			timeout: 1000,
+			stdio: ["ignore", "pipe", "ignore"],
+		})
+			.trim()
+			.replace(/\s+/g, " ");
+		return value || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function processLiveness(pid: number, identity?: RunProcessIdentity): RunLiveness {
 	try {
 		process.kill(pid, 0);
-		if (!pidStart) return true;
-		const currentStart = procPidStart(pid);
-		return currentStart === undefined ? true : currentStart === pidStart;
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "EPERM") return false;
-		if (!pidStart) return true;
-		const currentStart = procPidStart(pid);
-		return currentStart === undefined ? true : currentStart === pidStart;
+		if ((error as NodeJS.ErrnoException).code !== "EPERM") return "stopped";
+	}
+	if (!identity) return "unknown";
+	const currentStart = identity.kind === "proc" ? procPidStart(pid) : psPidStart(pid);
+	if (currentStart === undefined) return "unknown";
+	return currentStart === identity.value ? "running" : "stopped";
+}
+
+function runIdentity(
+	header: { pidStart?: string; pidStartKind?: "proc" | "ps-lstart" } | undefined,
+): RunProcessIdentity | undefined {
+	if (!header?.pidStart || !header.pidStartKind) return undefined;
+	return { kind: header.pidStartKind, value: header.pidStart };
+}
+
+function normalizeLiveness(value: RunLiveness | boolean): RunLiveness {
+	if (value === true) return "running";
+	if (value === false) return "stopped";
+	return value;
+}
+
+function unfinishedRunState(
+	header: { pid: number; pidStart?: string; pidStartKind?: "proc" | "ps-lstart" } | undefined,
+	mtimeMs: number,
+	nowMs: number,
+	pidAlive: (pid: number, identity?: RunProcessIdentity) => RunLiveness | boolean,
+): RunState {
+	if (!header) return nowMs - mtimeMs < LEGACY_RUN_STALE_MS ? "running" : "stopped";
+	const identity = runIdentity(header);
+	if (!identity) return "unknown";
+	return normalizeLiveness(pidAlive(header.pid, identity));
+}
+
+function sortRunGroup(state: RunState): number {
+	switch (state) {
+		case "running":
+			return 0;
+		case "unknown":
+			return 1;
+		default:
+			return 2;
 	}
 }
 
 function collectRuns(
 	profileDir: string,
 	nowMs: number,
-	pidAlive: (pid: number, pidStart?: string) => boolean,
+	pidAlive: (pid: number, identity?: RunProcessIdentity) => RunLiveness | boolean,
 ): RunSummary[] {
 	const dir = join(profileDir, "runs");
 	if (!existsSync(dir)) return [];
@@ -347,14 +401,11 @@ function collectRuns(
 			const mtimeMs = statSync(full).mtimeMs;
 			const label =
 				header?.meta.label ?? file.replace(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-/, "").replace(/\.log$/, "");
-			const alive = header ? pidAlive(header.pid, header.pidStart) : nowMs - mtimeMs < LEGACY_RUN_STALE_MS;
 			const state: RunState = status.done
 				? status.exitCode === 0
 					? "passed"
 					: "failed"
-				: alive
-					? "running"
-					: "stopped";
+				: unfinishedRunState(header, mtimeMs, nowMs, pidAlive);
 			return {
 				id: full,
 				label,
@@ -369,8 +420,10 @@ function collectRuns(
 				updatedAt: new Date(mtimeMs).toISOString(),
 			};
 		});
-		// Live runs first so "who is running what" is the top of the list; the rest stay newest first.
-		return [...runs.filter((r) => r.state === "running"), ...runs.filter((r) => r.state !== "running")];
+		// Live runs first so "who is running what" is the top of the list; unknowns stay visible just below them.
+		return runs.toSorted(
+			(a, b) => sortRunGroup(a.state) - sortRunGroup(b.state) || b.updatedAt.localeCompare(a.updatedAt),
+		);
 	} catch {
 		return [];
 	}
@@ -539,7 +592,7 @@ export function collectRadarSnapshot(
 		includePullRequests?: boolean;
 		listPullRequests?: (repos: string[]) => PullRequestSummary[];
 		readLines?: (file: string) => string;
-		pidAlive?: (pid: number, pidStart?: string) => boolean;
+		pidAlive?: (pid: number, identity?: RunProcessIdentity) => RunLiveness | boolean;
 	},
 ): RadarSnapshot {
 	const nowMs = options?.nowMs ?? Date.now();
@@ -713,7 +766,7 @@ export function collectRadarSnapshot(
 	} catch {
 		// An unreadable Grimoire just shows nothing to review.
 	}
-	const runSummaries = collectRuns(profileDir, nowMs, options?.pidAlive ?? processAlive);
+	const runSummaries = collectRuns(profileDir, nowMs, options?.pidAlive ?? processLiveness);
 	const repos = Array.from(
 		new Set(
 			workers
