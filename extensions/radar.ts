@@ -1,12 +1,12 @@
 /** Live, keyboard-driven workspace dashboard with read-only mailbox and run logs. */
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { grimoireDir, listProposals } from "./grimoire.ts";
 import { initialRadarState, type RadarState, type TowerSummary } from "./radar-model.ts";
 import { collectMail, readTowerSummary } from "./radar-store.ts";
 import { buildRadarLayout } from "./radar-view.ts";
-import { readRun } from "./runs.ts";
+import { readRun, readRunHeader } from "./runs.ts";
 import {
 	createTailReader,
 	detectSessionAlerts,
@@ -30,11 +30,18 @@ export interface MailItem {
 	summary: string;
 	body?: string;
 	updatedAt: string;
+	/** True when `updatedAt` is only when the dashboard first saw the message, not when it was sent or received. */
+	dateApproximate?: boolean;
 }
+
+export type RunState = "running" | "passed" | "failed" | "stopped";
 
 export interface RunSummary {
 	id: string;
 	label: string;
+	state: RunState;
+	project?: string;
+	branch?: string;
 	tail?: string;
 	done: boolean;
 	exitCode?: number;
@@ -254,7 +261,30 @@ function readTranscriptInsights(
 	}
 }
 
-function collectRuns(profileDir: string): RunSummary[] {
+/** A run with no recorded owner and no output for this long is assumed dead. */
+const LEGACY_RUN_STALE_MS = 15 * 60_000;
+
+function readFirstLine(file: string): string {
+	const fd = openSync(file, "r");
+	try {
+		const buffer = Buffer.alloc(2048);
+		const read = readSync(fd, buffer, 0, buffer.length, 0);
+		return buffer.toString("utf8", 0, read).split("\n")[0] ?? "";
+	} finally {
+		closeSync(fd);
+	}
+}
+
+function processAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+function collectRuns(profileDir: string, nowMs: number, pidAlive: (pid: number) => boolean): RunSummary[] {
 	const dir = join(profileDir, "runs");
 	if (!existsSync(dir)) return [];
 	try {
@@ -263,21 +293,36 @@ function collectRuns(profileDir: string): RunSummary[] {
 			.sort()
 			.reverse()
 			.slice(0, 30);
-		return files.map((file) => {
+		const runs = files.map((file): RunSummary => {
 			const full = join(dir, file);
 			// The exit marker is the log's last line, so the end of the log is all that's needed.
 			const status = readRun(readLastLines(full, 100), 80);
-			const label = file.replace(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-/, "").replace(/\.log$/, "");
-			const mtime = statSync(full).mtime.toISOString();
+			const header = readRunHeader(readFirstLine(full));
+			const mtimeMs = statSync(full).mtimeMs;
+			const label =
+				header?.meta.label ?? file.replace(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-/, "").replace(/\.log$/, "");
+			const alive = header ? pidAlive(header.pid) : nowMs - mtimeMs < LEGACY_RUN_STALE_MS;
+			const state: RunState = status.done
+				? status.exitCode === 0
+					? "passed"
+					: "failed"
+				: alive
+					? "running"
+					: "stopped";
 			return {
 				id: full,
 				label,
+				state,
+				...(header?.meta.project ? { project: header.meta.project } : {}),
+				...(header?.meta.branch ? { branch: header.meta.branch } : {}),
 				tail: status.tail,
 				done: status.done,
 				...(status.exitCode !== undefined ? { exitCode: status.exitCode } : {}),
-				updatedAt: mtime,
+				updatedAt: new Date(mtimeMs).toISOString(),
 			};
 		});
+		// Live runs first so "who is running what" is the top of the list; the rest stay newest first.
+		return [...runs.filter((r) => r.state === "running"), ...runs.filter((r) => r.state !== "running")];
 	} catch {
 		return [];
 	}
@@ -399,7 +444,13 @@ function queryHerdrWorkspaces(
 
 export function collectRadarSnapshot(
 	profileDir: string,
-	options?: { nowMs?: number; towerName?: string; includeHerdr?: boolean; readLines?: (file: string) => string },
+	options?: {
+		nowMs?: number;
+		towerName?: string;
+		includeHerdr?: boolean;
+		readLines?: (file: string) => string;
+		pidAlive?: (pid: number) => boolean;
+	},
 ): RadarSnapshot {
 	const nowMs = options?.nowMs ?? Date.now();
 	const towerName = options?.towerName?.trim() || process.env.SITRA_TOWER_NAME?.trim() || "Tower";
@@ -577,7 +628,7 @@ export function collectRadarSnapshot(
 		towerName,
 		workers,
 		alerts,
-		runs: collectRuns(profileDir),
+		runs: collectRuns(profileDir, nowMs, options?.pidAlive ?? processAlive),
 		pendingProposals,
 		mail: collectMail(profileDir),
 		summary: readTowerSummary(profileDir),

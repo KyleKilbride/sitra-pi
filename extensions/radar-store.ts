@@ -49,6 +49,7 @@ export function parseMailSnapshot(value: unknown): MailSnapshot {
 			!["in", "out"].includes(item.direction) ||
 			!Number.isFinite(Date.parse(item.updatedAt)) ||
 			(item.body !== undefined && typeof item.body !== "string") ||
+			(item.dateApproximate !== undefined && typeof item.dateApproximate !== "boolean") ||
 			seen.has(item.id) ||
 			item.id.length > 500
 		)
@@ -61,11 +62,16 @@ export function parseMailSnapshot(value: unknown): MailSnapshot {
 			summary: terminalText(item.summary).slice(0, 1000),
 			direction: item.direction,
 			updatedAt: new Date(item.updatedAt).toISOString(),
+			...(item.dateApproximate ? { dateApproximate: true } : {}),
 			...(item.body !== undefined ? { body: terminalText(item.body).slice(0, 256_000) } : {}),
 		};
 	});
 	return {
-		items: items.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+		items: items.sort(
+			(a, b) =>
+				Number(a.dateApproximate === true) - Number(b.dateApproximate === true) ||
+				b.updatedAt.localeCompare(a.updatedAt),
+		),
 		...(typeof source.notice === "string" ? { notice: terminalText(source.notice).slice(0, 1000) } : {}),
 		...(typeof source.updatedAt === "string" && Number.isFinite(Date.parse(source.updatedAt))
 			? { updatedAt: new Date(source.updatedAt).toISOString() }

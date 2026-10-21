@@ -69,13 +69,16 @@ from any view. **PgUp/PgDn**, **Home/End** scroll details. The keyboard decoder 
 and Kitty/CSI-u terminal input. A terminal of at least 20 columns by 12 rows is required for the complete view.
 
 - **Workspaces** use live local session records; icons describe session state, not task completion.
-- **Runs** are the latest 30 local logs created by `run_in_pane`: running, passed, or a nonzero exit code. Enter
-  opens their last 80 output lines, updating while they run. This is not a list of every shell process.
-- **Tower status** is an explicit, timestamped snapshot published with `update_radar_status`. The tower replaces
-  all three lists together after checking the source state, including outside work when it has a current owner
-  report. Radar never infers that idle means done or claims remote work is being polled. The summary shows its age;
-  **s** reads every entry when the pinned summary is truncated. No published update means unknown, not success.
-- **Mail** is read-only: opening it does not send, acknowledge, consume or mark remote messages read. It refreshes
+- **Runs** are the latest 30 local logs created by `run_in_pane`, running ones first. Each row names the project and
+  branch that started it. A run records its shell's process id, so one whose process is gone shows as **stopped**
+  instead of running forever; older logs without that record are stopped after 15 minutes of silence. Enter opens the
+  last 80 output lines, updating while they run. This is not a list of every shell process.
+- **Status** is derived live: workers needing you or working (with their current task), running and recently finished
+  runs, and open Grimoire proposals. The tower's own `update_radar_status` notes are appended to it and tagged with
+  their age once older than 30 minutes, so a stale note can never pass as current. Radar never infers that idle
+  means done or claims remote work is being polled. **s** reads every entry when the pinned summary is truncated.
+- **Mail** rows are one line: when, who, subject; newest first. Items flagged `dateApproximate` (the dashboard only
+  saw them locally, so the time is not real) say "date unknown" and sort after dated ones. Mail is read-only: opening it does not send, acknowledge, consume or mark remote messages read. It refreshes
   a local source about every five seconds. No source is shown honestly as disconnected; errors retain last good
   messages with a visible warning. There is no built-in messaging provider or authentication in this repository.
 

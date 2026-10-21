@@ -207,3 +207,60 @@ export function validSummary(value: unknown): value is TowerSummary {
 		)
 	);
 }
+
+/** Tower notes older than this are tagged with their age instead of being presented as current. */
+const NOTES_STALE_MS = 30 * 60_000;
+/** Finished runs count as recent work for this long. */
+const RECENT_RUN_MS = 2 * 60 * 60_000;
+
+/** Compact age such as "5m", "6h" or "2d". */
+export function formatAge(ms: number): string {
+	const minutes = Math.max(0, Math.floor(ms / 60_000));
+	if (minutes < 60) return `${minutes}m`;
+	return minutes < 1440 ? `${Math.floor(minutes / 60)}h` : `${Math.floor(minutes / 1440)}d`;
+}
+
+/**
+ * Done / Being done / Next derived from what is actually happening: workers, tracked runs and open proposals, with the
+ * tower's own notes appended and tagged with their age once stale. Nothing here is inferred from idleness.
+ */
+export function liveStatus(snapshot: RadarSnapshot, nowMs: number): TowerSummary & { notesUpdatedAt?: string } {
+	const owner = (run: RadarSnapshot["runs"][number]) =>
+		[run.project, run.branch ? `(${run.branch})` : undefined].filter(Boolean).join(" ");
+	const where = (text: string, w: WorkerCard) => `${w.title}${w.subtitle ? ` (${w.subtitle})` : ""} — ${text}`;
+	const doing: string[] = [];
+	for (const w of snapshot.workers) {
+		if (w.visualState === "waiting_for_user")
+			doing.push(where(`needs you: ${w.lead.waitingFor ?? w.nowLine ?? "waiting for an answer"}`, w));
+		else if (w.visualState === "error_loop") doing.push(where("stuck repeating a failing step", w));
+	}
+	for (const w of snapshot.workers)
+		if (w.visualState === "working") doing.push(where(w.nowLine ?? w.lead.task ?? "working", w));
+	for (const run of snapshot.runs)
+		if (run.state === "running") doing.push(`${run.label} running${owner(run) ? ` — ${owner(run)}` : ""}`);
+
+	const done: string[] = [];
+	for (const run of snapshot.runs) {
+		if (run.state !== "passed" && run.state !== "failed") continue;
+		if (nowMs - Date.parse(run.updatedAt) > RECENT_RUN_MS) continue;
+		done.push(
+			`${run.label} ${run.state === "passed" ? "passed" : `failed (exit ${run.exitCode ?? "?"})`}${owner(run) ? ` — ${owner(run)}` : ""}`,
+		);
+	}
+
+	const next: string[] = [];
+	if (snapshot.pendingProposals > 0)
+		next.push(`${snapshot.pendingProposals} Grimoire proposal${snapshot.pendingProposals === 1 ? "" : "s"} to review`);
+
+	const notes = snapshot.summary;
+	let notesUpdatedAt: string | undefined;
+	if (notes) {
+		notesUpdatedAt = new Date(notes.updatedAt).toISOString();
+		const age = nowMs - Date.parse(notes.updatedAt);
+		const tag = age > NOTES_STALE_MS ? ` (tower note, ${formatAge(age)} old)` : "";
+		doing.push(...notes.doing.map((line) => `${line}${tag}`));
+		done.push(...notes.done.map((line) => `${line}${tag}`));
+		next.push(...notes.next.map((line) => `${line}${tag}`));
+	}
+	return { done, doing, next, updatedAt: new Date(nowMs).toISOString(), ...(notesUpdatedAt ? { notesUpdatedAt } : {}) };
+}
