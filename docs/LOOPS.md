@@ -25,6 +25,8 @@ evaluator. The check tells sitra what to learn.
 - One builder, normally the lead, works from the approved brief.
 - One independent verifier checks the result against acceptance tests agreed before the build. It also checks the
   original goal and catches weakened tests.
+- The lead opens a draft PR only after the check passes. If the lead bypasses that rule, record it as a rework event
+  and measure it before adding a guardrail.
 - A miss becomes a classified **rework event**, not a blind retry. A second round is allowed only for real new
   information or a specific learning, never because the builder lacked context it could have had.
 - The metric is first-pass rate and avoidable rework trending down over time, plus per-task tokens. It is not 100%.
@@ -48,8 +50,9 @@ Verified against `main` at `997e0e5`:
   writes structured handovers at run end and mid-run.
 - **Radar has the data, not the tree.** `extensions/sessions.ts` groups leads and teammates; `extensions/radar.ts` and
   `radar-view.ts` show helper counts today, not a lead-to-helper tree.
-- **Action triggers can pause shell PR creation, but not yet hard-gate it.** Current triggers block once with "run it
-  again unchanged if it follows them." A loop PR gate must be stricter than today's trigger behavior.
+- **Agent profiles need explicit permissions.** The current scout profile sets both `tools:` and `skills: none`; new
+  advisor and verifier profiles must do the same. Without explicit lists, pi-subagents may load every skill and codemode
+  may expose MCP write tools.
 - **Grimoire currently fails open when unreadable.** The loop must not. If Grimoire cannot be read, the loop is
   `blocked` because the brief cannot be trusted.
 
@@ -79,6 +82,7 @@ for validation: product code must not infer state from prose or regex.
     "intent": { "questions": [], "done": [] },
     "codebase": { "files": [], "facts": [], "risks": [] },
     "testDesign": { "acceptanceTests": [], "redRunLog": null },
+    "architecture": { "fit": [], "boundaries": [], "simplerShape": [] },
     "optional": {}
   },
   "plan": ["High-level plan Kyle approved"],
@@ -93,16 +97,26 @@ state becomes `blocked` and the raw report is shown.
 
 ### Advisors before the build
 
-Start with three advisors:
+Start with four advisors:
 
 | Advisor | Role | Built from |
 |---|---|---|
 | Intent | Finds ambiguity, writes sharp questions for Kyle, captures "done" in Kyle's words | New read-only profile |
 | Codebase | Finds relevant files, history, existing tests and local patterns | Existing scout role |
 | Test-design | Writes acceptance-test definitions into the brief before the builder starts | New read-only profile |
+| Architecture | Judges whether the plan fits existing architecture and boundaries, adds needless layers or code, and has a simpler shape | New read-only profile, with the checklist later built from Matt Timmermans' real review comments and commits |
 
 Risk and ops/observability advisors are optional. They run only when the task touches safety, runtime behavior, rollout,
 logs, rate limits or production operations.
+
+The Architecture advisor should aim for "Matt T quality": Matt Timmermans-style pressure toward code that earns its
+place, preserves existing boundaries, and removes needless layers. Do not invent his checklist from vibes. Build it
+later from his actual review comments and commits. Kyle's source corpus for that checklist is Matt Timmermans
+(`mtimmerm-aig`) as CODEOWNERS sole owner of travelagent-ai's planner, agentCore, framework, Trip Doc intents, toolSet
+and functionalWatchers.
+
+Every advisor and verifier profile must set explicit `skills:` and `tools:` lists. Read-only advisors should deny edit
+and write tools. Verifiers should get only the tools needed to inspect diffs, read logs and run the agreed checks.
 
 External evidence from the research supports this direction, with caveats:
 
@@ -115,6 +129,17 @@ External evidence from the research supports this direction, with caveats:
 
 So advisors must earn their tokens. The runner skips optional advisors when Grimoire, the existing scout, and the lead's
 own plan already cover the task. It records which advisors ran and how many tokens the graph spent.
+
+### Advisor intake
+
+The intake should run like Matt Pocock's grill-with-docs skill, but with sitra's missing structure:
+
+- keep the good parts: ask every question that is ready in one round, include a recommended answer for each, let agents
+  find facts and Kyle make decisions, and stop only when nothing is left open;
+- add structured brief fields instead of a free-form scratchpad;
+- use Grimoire, not an ad-hoc `CONTEXT.md`;
+- make the test-design advisor write acceptance tests before implementation;
+- learn from misses by classifying rework events into Grimoire proposals.
 
 ### Approval and build
 
@@ -136,7 +161,7 @@ The verifier is independent and read-only. It checks:
 - that tests were not skipped, weakened or moved after agreement;
 - the high-level goal, not just the test output.
 
-Pass opens the PR gate. A miss creates a rework event with one of these classes:
+Pass clears the lead to open a draft PR. A miss creates a rework event with one of these classes:
 
 | Class | Meaning | Drafted Grimoire proposal |
 |---|---|---|
@@ -153,11 +178,11 @@ add a narrow proposal with evidence, do not rewrite the playbook wholesale.
 A second build round is allowed only when the rework event identifies real new information or a specific learning to
 apply. If the same class repeats, the runner stops and asks Kyle one question.
 
-### PR gate and radar
+### PR rule and radar
 
-The PR gate is part of the first slice. The lead may open a draft PR only from `passed`. The design should use the
-existing action-matching machinery for `gh pr create`, but today's pause-once trigger is not enough; the loop needs a
-persistent hard block until the state file says `passed`.
+The first slice keeps this simple: the lead opens a draft PR only from `passed`. There is no shell-level guardrail yet.
+If the lead opens or tries to open a PR before the check passes, classify it as a rework event and count it. Add a gate
+later only if measured rework shows the rule is not enough.
 
 Radar stays view-only. Add:
 
@@ -178,8 +203,6 @@ The research makes the metric risky if it becomes a target:
   Kyle approval, and small changes. Proposals never go straight to root.
 - Guess from the research: agents may call a miss "new info" to protect the first-pass metric. Therefore classification
   uses a separate model and the verifier's evidence, and repeated "new info" calls are surfaced in radar for Kyle.
-- Verified in current code: triggers can catch `gh pr create` commands. The loop gate must extend that path so shell PRs
-  cannot bypass state.
 - Verified in current code: tests and checks can run through `run_in_pane`; the verifier should cite those log paths,
   not screenshots or prose summaries alone.
 
@@ -188,7 +211,8 @@ The research makes the metric risky if it becomes a target:
 Advisors are not free. The research cites Anthropic's multi-agent system using about 15x more tokens than chat, and also
 says coding tasks are less parallel than research tasks. The first slice should therefore:
 
-- run only intent, codebase and test-design by default;
+- run only intent, codebase, test-design and architecture by default while measuring value;
+- skip any advisor whose field is already covered by Grimoire, the codebase scout or the lead's plan;
 - skip optional advisors unless the task asks for their information;
 - record token cost per advisor and per task;
 - compare first-pass and avoidable rework against token cost;
@@ -214,7 +238,8 @@ says coding tasks are less parallel than research tasks. The first slice should 
 | Advisor returns prose instead of fields | Block the advisor result and show the raw output. |
 | Kyle has unanswered questions | Stage is `needs-kyle`; no build starts. |
 | Red run was not recorded | Block verification; tests were not proven first. |
-| Tests changed after approval | Rework event: likely execution slip or anti-gaming, PR gate closed. |
+| Tests changed after approval | Rework event: likely execution slip or anti-gaming. |
+| Lead opens a PR before check passes | Rework event: measure first; add a gate later only if needed. |
 | Verifier misses the goal but tests pass | Rework event: gap in the check. |
 | Same rework class repeats | Stop and ask Kyle one question. |
 | Radar cannot see a helper | Show unknown helper state; do not pretend the tree is complete. |
@@ -225,12 +250,12 @@ Use red-then-green tests with a new scripted model fixture, `test/fixtures/loop-
 
 1. Pure state tests: state creation, advisor sections, stage transitions, invalid report blocking, and Grimoire-unreadable
    blocking.
-2. Brief tests: intent, codebase and test-design reports merge into one brief; Kyle's answers and limits travel into
-   the build brief.
+2. Brief tests: intent, codebase, test-design and Architecture reports merge into one brief; Kyle's answers and limits
+   travel into the build brief.
 3. Red-run test: test-design records the failing acceptance run before build; missing red evidence blocks build or
    verify.
-4. PR gate test: `gh pr create` is blocked until state is `passed`, including a repeat call that today's trigger would
-   otherwise allow.
+4. PR rule test: opening or attempting a PR before `passed` records a rework event; the first slice measures it rather
+   than preventing the call.
 5. Rework classification tests: each class writes the right proposal shape into `proposals/`, except genuine new
    information, which is not counted as avoidable rework.
 6. Anti-gaming tests: weakened tests, faked or missing logs, and repeated "new info" classifications stay blocked or
@@ -243,7 +268,7 @@ Stub the module first so these tests run and fail on assertions, then implement 
 
 ## Open questions for Kyle
 
-1. **Which advisors ship first?** Recommendation: intent, codebase and test-design.
+1. **Which advisors ship first?** Kyle's answer: intent, codebase, test-design and Architecture.
 2. **Does Kyle see only the questions or the whole brief?** Recommendation: show questions and the high-level plan by
    default, with the full brief one command away.
 3. **What does "first-pass accepted" mean?** Recommendation: track both agreed tests passed first time and Kyle accepted
