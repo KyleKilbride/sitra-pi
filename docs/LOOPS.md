@@ -37,10 +37,10 @@ When advisors are complete, the lead submits the plan with `loop_submit_plan` (t
 command, not through a tool or agent message. After approval, use `/loop build`. The runner tells the lead the evidence
 recipe up front: commit the acceptance tests alone, run red evidence at that commit with `loop_run_evidence`, implement,
 then run green evidence at the build commit with `loop_run_evidence`. Record both returned run ids with
-`loop_record_build` or `/loop record-build <json>`. `run_in_pane` evidence still works when its logs have loop metadata,
-but `loop_run_evidence` is preferred because it checks out the requested commit in a temporary worktree and stamps the
-log with the commit and test hashes it actually ran. When a `/loop answer` unblocks a stage, the runner tells the lead
-the resumed stage, the answer it recorded, and the next expected action.
+`loop_record_build` or `/loop record-build <json>`. `loop_run_evidence` rejects any command that is not an exact
+frozen test-design command, and `loop_record_build` accepts only those runner-recorded run ids while checking their log
+hashes. When a `/loop answer` unblocks a stage, the runner tells the lead the resumed stage, the answer it recorded,
+and the next expected action.
 
 Other useful verbs:
 
@@ -50,8 +50,8 @@ Other useful verbs:
 | `loop_submit_plan` | lead | Submits the lead plan after advisor intake, using `/loop plan` validation. |
 | `/loop approve <summary>` | person only | Freezes the brief after architecture review. No tool or agent-message path approves. |
 | `/loop build` | person only after approval | Enters build and prints the tests-only red commit -> implementation green commit evidence recipe. |
-| `loop_run_evidence` | lead | Runs the agreed command in a temporary worktree at a named commit and returns a stamped run id. Red should name the tests-only commit; green should name the current build commit. |
-| `loop_record_build` | lead | Records red and green run ids and dispatches the verifier when evidence is valid. If the only block is build evidence, the lead can retry this without a person answer. |
+| `loop_run_evidence` | lead | Runs an exact frozen test-design command in a temporary worktree at a named commit and records the run id plus log hash. Red should name the tests-only commit; green should name the current build commit. |
+| `loop_record_build` | lead | Records red and green runner-recorded run ids and dispatches the verifier when evidence is valid. If the only active block is build evidence, the lead can retry this without a person answer; stale, git, verifier and decision blocks still need the person. |
 | `/loop resume` | person | Re-emits the current runner effect; it can write a stale block if the saved state no longer matches the checkout. |
 | `/loop abandon [reason]` | person | Archives the active loop state for this worktree and branch. |
 

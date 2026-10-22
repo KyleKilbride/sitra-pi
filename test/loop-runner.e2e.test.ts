@@ -1,9 +1,11 @@
 import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
+import { loopStatePath, readLoopStateFile, writeLoopStateFile } from "../extensions/loop-pi.ts";
 import { EXIT_MARKER, HEADER_MARKER } from "../extensions/runs.ts";
 
 const LOOP_EXT = fileURLToPath(new URL("../extensions/loop-pi.ts", import.meta.url));
@@ -62,7 +64,17 @@ function sha256(cwd: string, file: string): string {
 	return execFileSync("sha256sum", [file], { cwd, encoding: "utf8" }).split(/\s+/)[0] ?? "";
 }
 
-function writeRunLog(path: string, commit: string, testHashes: { file: string; sha256: string }[], exitCode: number) {
+function sha256File(path: string): string {
+	return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function writeRunLog(
+	path: string,
+	commit: string,
+	testHashes: { file: string; sha256: string }[],
+	exitCode: number,
+	command = "pnpm vitest run loop.test.ts",
+) {
 	writeFileSync(
 		path,
 		[
@@ -70,7 +82,7 @@ function writeRunLog(path: string, commit: string, testHashes: { file: string; s
 				pid: 12345,
 				pidStart: "1",
 				pidStartKind: "proc",
-				meta: { loop: { commit, testHashes } },
+				meta: { command, loop: { commit, testHashes } },
 			})}`,
 			"output",
 			`${EXIT_MARKER}${exitCode}`,
@@ -442,8 +454,37 @@ async function runBuildVerifyE2e(kind: "pass" | "miss") {
 					const redRunId = `${kind}-red-run`;
 					const greenRunId = `${kind}-green-run`;
 					mkdirSync(join(profile, "runs"), { recursive: true });
-					writeFileSync(join(profile, "runs", `${redRunId}.log`), readFileSync(redLog, "utf8"));
-					writeFileSync(join(profile, "runs", `${greenRunId}.log`), readFileSync(greenLog, "utf8"));
+					const storedRedLog = join(profile, "runs", `${redRunId}.log`);
+					const storedGreenLog = join(profile, "runs", `${greenRunId}.log`);
+					writeFileSync(storedRedLog, readFileSync(redLog, "utf8"));
+					writeFileSync(storedGreenLog, readFileSync(greenLog, "utf8"));
+					const statePath = loopStatePath(profile, cwd, "feature");
+					const state = readLoopStateFile(statePath);
+					writeLoopStateFile(statePath, {
+						...state,
+						build: {
+							...state.build,
+							evidence: [
+								...(state.build.evidence ?? []),
+								{
+									runId: redRunId,
+									sha256: sha256File(storedRedLog),
+									phase: "red",
+									commit: redCommit,
+									command: "pnpm vitest run loop.test.ts",
+									log: storedRedLog,
+								},
+								{
+									runId: greenRunId,
+									sha256: sha256File(storedGreenLog),
+									phase: "green",
+									commit: greenCommit,
+									command: "pnpm vitest run loop.test.ts",
+									log: storedGreenLog,
+								},
+							],
+						},
+					});
 					child.stdin.write(
 						`${JSON.stringify({
 							type: "prompt",

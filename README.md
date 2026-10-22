@@ -150,9 +150,9 @@ When advisors are done, the lead submits its plan with `loop_submit_plan`. Appro
 follow the evidence recipe the runner prints: commit the acceptance tests alone, run red evidence at that commit with
 `loop_run_evidence`, implement, then run green evidence at the build commit with `loop_run_evidence`. Have the lead
 pass both returned run ids to `loop_record_build`. If evidence is blocked, the tool returns the exact reason and what
-would satisfy it; build-evidence-only blocks can be retried without another person touch. `run_in_pane` evidence is
-still accepted when its logs are stamped with loop metadata, but `loop_run_evidence` is the preferred path because the
-runner checks out the named commit in a temporary worktree and stamps the log itself.
+would satisfy it; build-evidence-only blocks can be retried without another person touch. `loop_run_evidence` only
+runs commands that exactly match the frozen test-design commands, and `loop_record_build` accepts only the run ids that
+`loop_run_evidence` recorded with matching log hashes.
 
 **Grimoire** (`/grimoire`): see below.
 

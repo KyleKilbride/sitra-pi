@@ -740,15 +740,19 @@ describe("stale state and validation", () => {
 		expect(blocked.questions.at(-1)?.id).toBe("stale-state");
 	});
 
-	test("an existing block is structural and is not overwritten by later problems", () => {
+	test("a later non-matching block kind replaces the existing structural block", () => {
 		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
 		state = applyAdvisorReport(state, report("intent"), { outputTokens: 1, contextTokens: 0 }).state;
 		const blocked = blockForStaleState(state, { ...context, baseHead: "base-b" }).state;
 		const stacked = blockForAdvisorIntakeFailure(blocked, "codebase", "helper report missing").state;
-		expect(stacked.block).toMatchObject({ kind: "stale", resumeStage: "advise", pendingAdvisors: ["codebase"] });
+		expect(stacked.block).toMatchObject({
+			kind: "intake-failed",
+			resumeStage: "advise",
+			pendingAdvisors: ["codebase"],
+		});
 		expect(stacked.block?.resumeStage).not.toBe("blocked");
 		expect(stacked.block?.resumeStage).not.toBe("needs-person");
-		expect(stacked.questions.at(-1)?.text).toContain("Additional problem");
+		expect(stacked.questions.at(-1)?.text).toContain("helper report missing");
 		const answered = answerLoopQuestion(stacked, {
 			answer: "Continue.",
 			current: { ...context, baseHead: "base-b" },
@@ -772,6 +776,9 @@ describe("stale state and validation", () => {
 describe("build and verify slice", () => {
 	test("starts build only after brief approval, records runner-computed test hashes, and writes an isolated verifier task", () => {
 		let state = approvedState();
+		expect(state.frozenBrief?.advisorRuns.testDesign?.acceptanceTestCommands).toEqual([
+			"pnpm vitest run test/loop.test.ts",
+		]);
 		const started = startBuild(state);
 		state = started.state;
 		expect(state.stage).toBe("build");

@@ -70,6 +70,7 @@ const AdvisorRun = Type.Object(
 		openQuestions: Type.Array(Question),
 		assumptions: Type.Array(Type.String()),
 		acceptanceTestFiles: Type.Optional(Type.Array(Type.String())),
+		acceptanceTestCommands: Type.Optional(Type.Array(Type.String())),
 		outputTokens: Type.Optional(Type.Number()),
 		contextTokens: Type.Optional(Type.Number()),
 	},
@@ -78,6 +79,18 @@ const AdvisorRun = Type.Object(
 
 const TestHash = Type.Object(
 	{ file: Type.String(), sha256: Type.Optional(Type.String()), missing: Type.Optional(Type.Boolean()) },
+	{ additionalProperties: false },
+);
+
+const EvidenceRecord = Type.Object(
+	{
+		runId: Type.String({ minLength: 1 }),
+		sha256: Type.String({ minLength: 1 }),
+		phase: Type.Union([Type.Literal("red"), Type.Literal("green")]),
+		commit: Type.String({ minLength: 1 }),
+		command: Type.String({ minLength: 1 }),
+		log: Type.String({ minLength: 1 }),
+	},
 	{ additionalProperties: false },
 );
 
@@ -91,6 +104,7 @@ const BuildState = Type.Object(
 		greenRunLog: Type.Optional(Type.String()),
 		redRunCommand: Type.Optional(Type.String()),
 		greenRunCommand: Type.Optional(Type.String()),
+		evidence: Type.Optional(Type.Array(EvidenceRecord)),
 	},
 	{ additionalProperties: false },
 );
@@ -579,6 +593,23 @@ function withBlock(
 	},
 ): { state: LoopState; effects: LoopEffect[] } {
 	if (state.block) {
+		if (state.block.kind !== input.kind) {
+			const blocked: LoopState = {
+				...state,
+				stage: input.kind === "questions" ? "needs-person" : "blocked",
+				block: {
+					kind: input.kind,
+					questionId: input.question.id,
+					resumeStage: input.resumeStage ?? state.block.resumeStage,
+					pendingAdvisors: input.pendingAdvisors ?? state.block.pendingAdvisors,
+					...(input.problems ? { problems: input.problems } : {}),
+				},
+				questions: [...state.questions, input.question],
+				dispatchedAdvisors: [],
+				startedAdvisors: [],
+			};
+			return { state: blocked, effects: [{ type: "ask-person", reason: input.kind, question: input.question }] };
+		}
 		if (state.block.questionId === input.question.id) {
 			const current = state.questions.find((question) => question.id === state.block?.questionId) ?? input.question;
 			return {
@@ -692,6 +723,9 @@ function toAdvisorRun(
 			? {
 					acceptanceTestFiles: (report.details as { acceptanceTests: { targetFile: string }[] }).acceptanceTests.map(
 						(test) => test.targetFile,
+					),
+					acceptanceTestCommands: (report.details as { acceptanceTests: { command: string }[] }).acceptanceTests.map(
+						(test) => test.command,
 					),
 				}
 			: {}),
@@ -1128,6 +1162,15 @@ export interface LoopRunEvidence {
 	loop?: { commit: string; testHashes: LoopTestHash[] };
 }
 
+interface BuildEvidenceProblem {
+	reason: string;
+	satisfy: string;
+}
+
+function evidenceProblem(reason: string, satisfy: string): BuildEvidenceProblem {
+	return { reason, satisfy };
+}
+
 function sameHashes(a: LoopTestHash[], b: LoopTestHash[]): boolean {
 	if (a.some((item) => item.missing) || b.some((item) => item.missing)) return false;
 	return (
@@ -1148,14 +1191,27 @@ function redRunProblem(
 	redRun: LoopRunEvidence | undefined,
 	commit: string,
 	testHashes: LoopTestHash[],
-): string | undefined {
-	if (!redRun) return "red run is missing";
-	if (!redRun.done) return "red run has not finished";
-	if (redRun.exitCode === undefined || Number.isNaN(redRun.exitCode)) return "red run has no exit code";
-	if (redRun.exitCode === 0) return "red run passed; it must fail before implementation";
+): BuildEvidenceProblem | undefined {
+	if (!redRun) return evidenceProblem("red run is missing", "Run red evidence at the tests-only commit.");
+	if (!redRun.done) return evidenceProblem("red run has not finished", "Wait for the red evidence run to finish.");
+	if (redRun.exitCode === undefined || Number.isNaN(redRun.exitCode))
+		return evidenceProblem("red run has no exit code", "Rerun red evidence so the log records a structured exit code.");
+	if (redRun.exitCode === 0)
+		return evidenceProblem(
+			"red run passed; it must fail before implementation",
+			"Run the agreed command at the tests-only commit before implementation; it must exit non-zero.",
+		);
 	const tie = runTieProblem(redRun, testHashes);
-	if (tie) return `red run is invalid because ${tie}`;
-	if (redRun.loop?.commit === commit) return "red run must be tied to a tests-only ancestor commit, not HEAD";
+	if (tie)
+		return evidenceProblem(
+			`red run is invalid because ${tie}`,
+			"Use loop_run_evidence for the red phase at the tests-only commit so the log is stamped with the frozen test hashes.",
+		);
+	if (redRun.loop?.commit === commit)
+		return evidenceProblem(
+			"red run commit is HEAD, not a tests-only ancestor",
+			"Use the tests-only commit for red evidence, not the build commit.",
+		);
 	return undefined;
 }
 
@@ -1163,26 +1219,48 @@ function greenRunProblem(
 	greenRun: LoopRunEvidence | undefined,
 	commit: string,
 	testHashes: LoopTestHash[],
-): string | undefined {
-	if (!greenRun) return "green run is missing";
-	if (!greenRun.done) return "green run has not finished";
-	if (greenRun.exitCode !== 0) return `green run did not pass (exit ${greenRun.exitCode ?? "unknown"})`;
+): BuildEvidenceProblem | undefined {
+	if (!greenRun) return evidenceProblem("green run is missing", "Run green evidence at the current build commit.");
+	if (!greenRun.done)
+		return evidenceProblem("green run has not finished", "Wait for the green evidence run to finish.");
+	if (greenRun.exitCode !== 0)
+		return evidenceProblem(
+			`green run did not pass (exit ${greenRun.exitCode ?? "unknown"})`,
+			"Fix the implementation or agreed command, then rerun green evidence at the current build commit.",
+		);
 	const tie = runTieProblem(greenRun, testHashes);
-	if (tie) return `green run is invalid because ${tie}`;
-	if (greenRun.loop?.commit !== commit) return `green run is tied to commit ${greenRun.loop?.commit}, not ${commit}`;
+	if (tie)
+		return evidenceProblem(
+			`green run is invalid because ${tie}`,
+			"Use loop_run_evidence for the green phase at the current build commit so the log is stamped with the frozen test hashes.",
+		);
+	if (greenRun.loop?.commit !== commit)
+		return evidenceProblem(
+			`green run is tied to commit ${greenRun.loop?.commit}, not ${commit}`,
+			"Rerun green evidence at the current build commit.",
+		);
 	return undefined;
 }
 
-function buildBlock(state: LoopState, problem: string): { state: LoopState; effects: LoopEffect[] } {
-	const satisfy = "Record red evidence on a tests-only ancestor commit and green evidence on the current build commit.";
+function buildBlock(
+	state: LoopState,
+	problem: string | BuildEvidenceProblem,
+): { state: LoopState; effects: LoopEffect[] } {
+	const structured =
+		typeof problem === "string"
+			? evidenceProblem(
+					problem,
+					"Record valid red evidence at the tests-only commit and green evidence at the current build commit.",
+				)
+			: problem;
 	return withBlock(state, {
 		kind: "build-evidence",
 		resumeStage: "build",
-		problems: [{ reason: problem, satisfy }],
+		problems: [structured],
 		question: {
 			id: "build-evidence",
-			text: `Build evidence is not ready for verification: ${problem}. Record a valid red run and green run tied to the current commit and test hashes.`,
-			recommended: satisfy,
+			text: `Build evidence is not ready for verification: ${structured.reason}. Record a valid red run and green run tied to the current commit and test hashes.`,
+			recommended: structured.satisfy,
 			dependsOn: [],
 		},
 	});
@@ -1190,7 +1268,7 @@ function buildBlock(state: LoopState, problem: string): { state: LoopState; effe
 
 export function blockForBuildEvidenceFailure(
 	state: LoopState,
-	problem: string,
+	problem: string | BuildEvidenceProblem,
 ): { state: LoopState; effects: LoopEffect[] } {
 	return buildBlock(state, problem);
 }
