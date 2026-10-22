@@ -14,7 +14,14 @@ import {
 import { initialRadarState, liveStatus } from "../extensions/radar-model.ts";
 import { parseMailSnapshot } from "../extensions/radar-store.ts";
 import { buildRadarLayout } from "../extensions/radar-view.ts";
-import { EXIT_MARKER, HEADER_MARKER, paneCommand, type RunMeta, readRun, readRunHeader } from "../extensions/runs.ts";
+import {
+	EXIT_MARKER,
+	HEADER_MARKER,
+	type RunMeta,
+	readRun,
+	readRunHeader,
+	writeRunScript,
+} from "../extensions/runs.ts";
 
 const NOW = Date.parse("2026-10-21T16:00:00Z");
 const tmp = () => mkdtempSync(join(tmpdir(), "sitra-radar-live-"));
@@ -68,18 +75,18 @@ const run = (id: string, state: RunSummary["state"], extra: Partial<RunSummary> 
 const base: RadarSnapshot = { towerName: "Tower", workers: [], alerts: [], runs: [], pendingProposals: 0, mail: [] };
 
 describe("runs know who started them and whether they are still alive", () => {
-	test("the pane command records the shell pid and who started the run, and the header stays out of the output", () => {
-		const log = join(tmp(), "run.log");
-		execFileSync("bash", [
-			"-c",
-			paneCommand("echo hello", log, {
-				label: "unit tests",
-				project: "app",
-				branch: "feat/x",
-				agent: "lead",
-				sessionId: "session-1",
-			} satisfies RunMeta),
-		]);
+	test("the run script records the shell pid and who started the run, and the header stays out of the output", () => {
+		const dir = tmp();
+		const log = join(dir, "run.log");
+		const script = join(dir, "run.sh");
+		writeRunScript(script, dir, "echo hello", log, {
+			label: "unit tests",
+			project: "app",
+			branch: "feat/x",
+			agent: "lead",
+			sessionId: "session-1",
+		} satisfies RunMeta);
+		execFileSync("bash", [script]);
 		const text = readFileSync(log, "utf8");
 		const header = readRunHeader(text.split("\n")[0] ?? "");
 		expect(header?.pid).toBeGreaterThan(1);

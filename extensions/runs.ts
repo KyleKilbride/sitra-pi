@@ -1,6 +1,6 @@
 /** Long commands run in a visible herdr pane with output teed to a log; agents check the log instead of waiting. */
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const EXIT_MARKER = "__SITRA_EXIT__=";
@@ -42,8 +42,14 @@ export function shellQuote(s: string): string {
 	return `'${s.replaceAll("'", "'\\''")}'`;
 }
 
-/** The line typed into the pane: record who runs it, run the command, keep a full log, record the exit code. */
-export function paneCommand(command: string, log: string, meta: RunMeta = {}): string {
+/** Write the script that records who runs it, runs the command, keeps a full log, and records the exit code. */
+export function writeRunScript(
+	scriptPath: string,
+	cwd: string,
+	command: string,
+	log: string,
+	meta: RunMeta = {},
+): { line: string } {
 	const q = shellQuote(log);
 	const nonce = createHash("sha256").update(`${Date.now()}:${Math.random()}:${log}`).digest("hex").slice(0, 16);
 	const metaWithNonce = { ...meta, nonce };
@@ -51,9 +57,30 @@ export function paneCommand(command: string, log: string, meta: RunMeta = {}): s
 	const pidStart = shellQuote(`,"pidStart":"`);
 	const pidStartKind = shellQuote(`","pidStartKind":"`);
 	const tail = shellQuote(`","meta":${JSON.stringify(metaWithNonce)}}`);
-	// Always bash, whatever shell the pane runs (herdr panes run the user's zsh).
-	const script = `pid_start=""; pid_start_kind=""; if [ -r "/proc/$$/stat" ]; then pid_start=$(awk '{print $22}' "/proc/$$/stat" 2>/dev/null || true); if [ -n "$pid_start" ]; then pid_start_kind="proc"; fi; fi; if [ -z "$pid_start" ]; then pid_start=$(ps -o lstart= -p "$$" 2>/dev/null | awk '{$1=$1; print}' || true); if [ -n "$pid_start" ]; then pid_start_kind="ps-lstart"; fi; fi; printf '%s%s%s%s%s%s%s\\n' ${head} "$$" ${pidStart} "$pid_start" ${pidStartKind} "$pid_start_kind" ${tail} > ${q}; { ${command} ; } 2>&1 | tee -a ${q}; echo "${EXIT_MARKER}${nonce}=\${PIPESTATUS[0]}" >> ${q}`;
-	return `bash -c ${shellQuote(script)}`;
+	const script = [
+		"#!/usr/bin/env bash",
+		`cd ${shellQuote(cwd)}`,
+		'pid_start=""',
+		'pid_start_kind=""',
+		'if [ -r "/proc/$$/stat" ]; then',
+		"	pid_start=$(awk '{print $22}' \"/proc/$$/stat\" 2>/dev/null || true)",
+		'	if [ -n "$pid_start" ]; then pid_start_kind="proc"; fi',
+		"fi",
+		'if [ -z "$pid_start" ]; then',
+		"	pid_start=$(ps -o lstart= -p \"$$\" 2>/dev/null | awk '{$1=$1; print}' || true)",
+		'	if [ -n "$pid_start" ]; then pid_start_kind="ps-lstart"; fi',
+		"fi",
+		`printf '%s%s%s%s%s%s%s\\n' ${head} "$$" ${pidStart} "$pid_start" ${pidStartKind} "$pid_start_kind" ${tail} > ${q}`,
+		"{",
+		command,
+		`} 2>&1 | tee -a ${q}`,
+		`status=\${PIPESTATUS[0]}`,
+		`echo ${shellQuote(`${EXIT_MARKER}${nonce}=`)}"$status" >> ${q}`,
+		"",
+	].join("\n");
+	writeFileSync(scriptPath, script, { mode: 0o700 });
+	chmodSync(scriptPath, 0o700);
+	return { line: `bash ${shellQuote(scriptPath)}` };
 }
 
 export interface RunStatus {
@@ -77,7 +104,7 @@ export function readRun(logText: string, tailLines = 40): RunStatus {
 	return { done: true, exitCode: Number(lines[marker]?.slice(prefix.length)), tail };
 }
 
-/** The pid and owner recorded on the log's first line, if the run was started by `paneCommand`. */
+/** The pid and owner recorded on the log's first line, if the run was started by `writeRunScript`. */
 export function readRunHeader(
 	firstLine: string,
 ): { pid: number; pidStart?: string; pidStartKind?: "proc" | "ps-lstart"; nonce?: string; meta: RunMeta } | undefined {

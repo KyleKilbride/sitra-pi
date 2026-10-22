@@ -135,8 +135,10 @@ the app-tester to check X"). Watch their panes, but don't type into them: that s
 instead.
 
 **Long runs never block.** `run_in_pane` runs tests, builds and installs in a pane you can watch, with the output
-logged. Each agent gets one run pane that it reuses (a new run queues behind one still going), closed when the agent
-exits. When the run ends, the lead gets the result as a message and picks up from there. No sleep or poll loops.
+logged. Each run is written as a bash script beside its log, and the pane only receives a short `bash '<script>'`
+line. Each agent gets one run pane that it reuses (a new run queues behind one still going), closed when the agent
+exits. A freshly split run pane is first checked with a ready marker before the run line is typed. When the run ends,
+the lead gets the result as a message and picks up from there. No sleep or poll loops.
 
 ## Using /loop
 

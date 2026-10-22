@@ -3,13 +3,14 @@
  * visible herdr panes instead of blocking, and a "needs you" signal in herdr when a question is waiting.
  */
 import { execFileSync, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Type } from "typebox";
 import { dirtyFiles } from "./git-status.ts";
 import { HELPER_REPORT_TOOL_SCHEMA, renderHelperReport, validateHelperReport } from "./helper-report.ts";
 import { loopStatePath, readLoopStateFile } from "./loop-state.ts";
-import { hashFiles, paneCommand, type RunMeta, readRun, shellQuote } from "./runs.ts";
+import { hashFiles, type RunMeta, readRun, shellQuote, writeRunScript } from "./runs.ts";
 import { gitBranch, mainCheckout } from "./sessions.ts";
 
 /** The lead's working rules, written for the person it works with (their name, or "the user"). */
@@ -41,6 +42,17 @@ function repoRoot(cwd: string): string {
 
 function herdr(args: string[]): string {
 	return execFileSync("herdr", args, { encoding: "utf8" });
+}
+
+function paneIdFromSplit(output: string): string | undefined {
+	try {
+		const value: unknown = JSON.parse(output);
+		if (!value || typeof value !== "object") return undefined;
+		const paneId = (value as { pane_id?: unknown }).pane_id;
+		return typeof paneId === "string" && paneId ? paneId : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 interface Ctx {
@@ -198,9 +210,10 @@ export default function sitraLead(pi: Pi): void {
 				.slice(0, 40);
 			const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${slug}`;
 			const log = join(runsDir, `${runId}.log`);
+			const script = join(runsDir, `${runId}.sh`);
 			const branch = gitBranch(ctx.cwd);
 			const loopEvidence = loopRunMeta(ctx.cwd, branch);
-			const line = paneCommand(p.command, log, {
+			const { line } = writeRunScript(script, ctx.cwd, p.command, log, {
 				label: p.label,
 				project: basename(mainCheckout(ctx.cwd)),
 				...(branch ? { branch } : {}),
@@ -213,6 +226,7 @@ export default function sitraLead(pi: Pi): void {
 			});
 			let where: string;
 			if (process.env.HERDR_ENV === "1" && process.env.HERDR_PANE_ID) {
+				let freshPane = false;
 				if (!runPane || !paneAlive(runPane)) {
 					const split = herdr([
 						"pane",
@@ -226,14 +240,32 @@ export default function sitraLead(pi: Pi): void {
 						"--cwd",
 						ctx.cwd,
 					]);
-					runPane = /"pane_id":"([^"]+)"/.exec(split)?.[1];
+					runPane = paneIdFromSplit(split);
 					if (!runPane) throw new Error(`could not open a pane: ${split.slice(0, 200)}`);
+					freshPane = true;
 				}
 				const pane = runPane;
-				herdr(["pane", "run", pane, `cd ${shellQuote(ctx.cwd)} && ${line}`]);
+				if (freshPane) {
+					const nonce = randomBytes(8).toString("hex");
+					herdr(["pane", "run", pane, `printf 'sitra-%s\\n' ${shellQuote(`ready-${nonce}`)}`]);
+					try {
+						herdr(["pane", "wait-output", pane, "--match", `sitra-ready-${nonce}`, "--timeout", "15000"]);
+					} catch {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `The run "${p.label}" was not started: pane shell never became ready (${pane}). Log: ${log}`,
+								},
+							],
+							details: { log, runId, pane, error: "pane shell never became ready" },
+						};
+					}
+				}
+				herdr(["pane", "run", pane, line]);
 				where = `herdr pane ${pane} ("${p.label}")`;
 			} else {
-				spawn("bash", ["-c", line], { cwd: ctx.cwd, detached: true, stdio: "ignore" }).unref();
+				spawn("bash", [script], { detached: true, stdio: "ignore" }).unref();
 				where = "the background (not inside herdr)";
 			}
 			// The extension watches the run, not the model: when it ends, the result arrives as a message on its own.

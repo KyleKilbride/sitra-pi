@@ -13,7 +13,7 @@ sitra is a Pi package plus a small CLI. One package, no workspace. Read this bef
 | `extensions/replycheck.ts` / `replycheck-pi.ts` | The end-of-reply PR check: PR links the agent didn't look up this turn are checked with `gh` before the reply settles. |
 | `extensions/knowledge.ts` | Pi extension: Grimoire in every prompt, `grimoire_propose`, `grimoire_search`, `/grimoire`, `/grimoire-reflect`, the status line. |
 | `extensions/lead.ts` | Pi extension: the lead's rules (lead only, never teammates), the context-file filter, `run_in_pane` / `check_run`, the herdr "needs you" signal. |
-| `extensions/runs.ts` | Pure helpers for `run_in_pane`: the bash command that logs output and the exit code, and reading a log back. |
+| `extensions/runs.ts` | Pure helpers for `run_in_pane`: the bash script that logs output and the exit code, and reading a log back. |
 | `extensions/sessions.ts` | Session registry, inbox messages, alerts, and friction audit across worker sessions. No Pi imports. |
 | `extensions/tower.ts` | Pi extension: records every session, delivers between-step inbox messages, and gives the tower its tools and `/radar`. |
 | `extensions/sharpen.ts` | Keeping long conversations sharp: stubbing old tool output, helper hand-off briefs, the handover threshold and instructions. No Pi imports. |
