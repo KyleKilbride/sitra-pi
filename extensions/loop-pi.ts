@@ -231,6 +231,17 @@ function buildEvidenceProblem(reason: string, satisfy: string): { reason: string
 	return { reason, satisfy };
 }
 
+function isDecisionBlock(state: LoopState): boolean {
+	const kind = state.block?.kind;
+	return (
+		kind === "new-information" ||
+		kind === "new-information-denied" ||
+		kind === "rework-learning" ||
+		kind === "same-rework-class" ||
+		kind === "second-rework"
+	);
+}
+
 function answerBuildEvidenceQuestions(state: LoopState): LoopState {
 	return {
 		...state,
@@ -329,7 +340,7 @@ function evidenceCommand(command: string, log: string, meta: RunMeta): string {
 	const metaJson = shellQuote(JSON.stringify({ ...meta, nonce }));
 	const header = shellQuote(HEADER_MARKER);
 	const exitPrefix = `${EXIT_MARKER}${nonce}=`;
-	const script = `printf '%s{"pid":%s,"meta":%s}\\n' ${header} "$$" ${metaJson} > ${q}; { ${command} ; } 2>&1 | tee -a ${q}; code=\${PIPESTATUS[0]}; echo "${exitPrefix}\${code}" >> ${q}; exit "\${code}"`;
+	const script = `printf '%s{"pid":%s,"meta":%s}\\n' ${header} "$$" ${metaJson} > ${q}; { ${command}\n} 2>&1 | tee -a ${q}; code=\${PIPESTATUS[0]}; echo "${exitPrefix}\${code}" >> ${q}; exit "\${code}"`;
 	return script;
 }
 
@@ -436,6 +447,9 @@ async function runEvidenceInWorktree(input: {
 	if (commands.length === 0) throw new Error("frozen brief has no agreed acceptance commands");
 	if (!commands.includes(input.command)) {
 		throw new Error(`command is not an agreed loop acceptance command: ${input.command}`);
+	}
+	if (input.command.includes("#")) {
+		throw new Error("agreed loop acceptance command contains a shell comment; shell comments are not supported");
 	}
 	mkdirSync(runsDir(), { recursive: true });
 	const id = runId(`loop-${input.phase}-evidence`);
@@ -1009,7 +1023,9 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 		const rawState = currentState;
 		const isStaleAnswer = rawState.stage === "blocked" && rawState.block?.kind === "stale";
 		if (!isStaleAnswer && rawState.block) {
-			const answered = recordBlockAnswer(rawState, rest);
+			const staleReasonBeforeAnswer = staleReason(rawState, { branch: gitState.branch, baseHead: gitState.baseHead });
+			const answered =
+				staleReasonBeforeAnswer && isDecisionBlock(rawState) ? rawState : recordBlockAnswer(rawState, rest);
 			writeLoopStateFile(path, answered);
 			const stale = replaceBlockWithStale(answered, { branch: gitState.branch, baseHead: gitState.baseHead });
 			if (stale.effects.length > 0) {

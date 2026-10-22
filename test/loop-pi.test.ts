@@ -1180,6 +1180,54 @@ describe("Pi wiring", () => {
 		expect(resumed.dispatchedAdvisors).toEqual(["intent", "codebase"]);
 	});
 
+	test("/loop answer on a stale checkout preserves a pending new-information decision", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands } = fakePi();
+		const { cwd } = gitWorktree();
+		approvedLoop(profile, cwd);
+		const path = loopStatePath(profile, cwd, "feature");
+		const state = readLoopStateFile(path);
+		writeLoopStateFile(path, {
+			...state,
+			stage: "blocked",
+			block: {
+				kind: "new-information",
+				questionId: "new-information",
+				resumeStage: "classify",
+				pendingAdvisors: [],
+			},
+			questions: [
+				{
+					id: "new-information",
+					text: "Confirm whether this is real new information.",
+					recommended: "Answer only if this is real new information.",
+					dependsOn: [],
+				},
+			],
+		});
+		const movedBase = moveBase(cwd);
+
+		await commands.get("loop")?.handler("answer fixed stale base", ctx(cwd));
+
+		let stale = readLoopStateFile(path);
+		expect(stale.stage).toBe("blocked");
+		expect(stale.block).toMatchObject({ kind: "stale" });
+		expect(stale.deferredBlock).toMatchObject({ kind: "new-information", resumeStage: "classify" });
+		expect(stale.questions.find((question) => question.id === "new-information")?.answer).toBeUndefined();
+
+		await commands.get("loop")?.handler("answer continue on moved base", ctx(cwd));
+
+		stale = readLoopStateFile(path);
+		expect(stale.stage).toBe("blocked");
+		expect(stale.branch).toBe("feature");
+		expect(stale.baseHead).toBe(movedBase);
+		expect(stale.block).toMatchObject({ kind: "new-information", resumeStage: "classify" });
+		expect(stale.deferredBlock).toBeUndefined();
+		expect(stale.questions.find((question) => question.id === "new-information")?.answer).toBeUndefined();
+		expect(stale.questions.find((question) => question.id === "stale-state")?.answer).toBe("continue on moved base");
+	});
+
 	test("answering a questions block after base moves saves the answer before making a stale block", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
@@ -1380,6 +1428,24 @@ describe("Pi wiring", () => {
 				.get("loop_run_evidence")
 				?.execute("red", { phase: "red", commit: redCommit, command: "false" }, undefined, undefined, ctx(cwd)),
 		).rejects.toThrow(/not an agreed loop acceptance command/);
+	});
+
+	test("loop_run_evidence refuses an agreed command ending in a shell comment with a clear reason", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		const agreed = "test -f impl.ts # agreed comment";
+		approvedLoop(profile, cwd, agreed);
+		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
+		const redCommit = commitAll(cwd, "add tests alone");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+
+		await expect(
+			tools
+				.get("loop_run_evidence")
+				?.execute("red", { phase: "red", commit: redCommit, command: agreed }, undefined, undefined, ctx(cwd)),
+		).rejects.toThrow(/shell comments are not supported/);
 	});
 
 	test("loop_record_build accepts only runner-recorded evidence ids and matching log hashes", async () => {

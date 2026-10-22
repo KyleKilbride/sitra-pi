@@ -1333,17 +1333,18 @@ describe("build and verify slice", () => {
 			acceptedLogs: [],
 		}).state;
 		const gitBlocked = blockForGitFailure(classified, "missing origin/main").state;
-		expect(gitBlocked.block).toMatchObject({ kind: "new-information", resumeStage: "classify" });
-		expect(gitBlocked.questions.at(-1)?.text).toContain("Additional problem");
+		expect(gitBlocked.block).toMatchObject({ kind: "git", resumeStage: "blocked" });
+		expect(gitBlocked.deferredBlock).toMatchObject({ kind: "new-information", resumeStage: "classify" });
 		expect(gitBlocked.questions.at(-1)?.text).toContain("missing origin/main");
 		const gitAnswered = answerLoopQuestion(gitBlocked, { answer: "fixed git", current: context });
 		expect(gitAnswered.state.stage).toBe("blocked");
 		expect(gitAnswered.state.block).toMatchObject({ kind: "new-information", resumeStage: "classify" });
-		expect(gitAnswered.effects).toEqual([]);
+		expect(gitAnswered.state.questions.find((question) => question.id === "new-information")?.answer).toBeUndefined();
+		expect(gitAnswered.effects).toMatchObject([{ type: "ask-person", reason: "new-information" }]);
 
 		const staleBlocked = blockForStaleState(classified, { ...context, baseHead: "base-b" }).state;
-		expect(staleBlocked.block).toMatchObject({ kind: "new-information", resumeStage: "classify" });
-		expect(staleBlocked.questions.at(-1)?.text).toContain("Additional problem");
+		expect(staleBlocked.block).toMatchObject({ kind: "stale", resumeStage: "blocked" });
+		expect(staleBlocked.deferredBlock).toMatchObject({ kind: "new-information", resumeStage: "classify" });
 		expect(staleBlocked.questions.at(-1)?.text).toContain("base head changed");
 		const staleAnswered = answerLoopQuestion(staleBlocked, {
 			answer: "fixed stale",
@@ -1351,7 +1352,8 @@ describe("build and verify slice", () => {
 		});
 		expect(staleAnswered.state.stage).toBe("blocked");
 		expect(staleAnswered.state.block).toMatchObject({ kind: "new-information", resumeStage: "classify" });
-		expect(staleAnswered.effects).toEqual([]);
+		expect(staleAnswered.state.questions.find((question) => question.id === "new-information")?.answer).toBeUndefined();
+		expect(staleAnswered.effects).toMatchObject([{ type: "ask-person", reason: "new-information" }]);
 	});
 
 	test("rework proposals require recorded verification summary", () => {

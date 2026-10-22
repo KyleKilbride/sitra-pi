@@ -219,6 +219,7 @@ export const LOOP_STATE_SCHEMA = Type.Object(
 		baseHead: Type.String(),
 		stage: LoopStageSchema,
 		block: Type.Optional(Block),
+		deferredBlock: Type.Optional(Type.Unknown()),
 		goal: Type.String(),
 		limits: Type.Array(Type.String()),
 		done: Type.Array(Type.String()),
@@ -582,6 +583,16 @@ function pendingAdvisorsForResume(state: LoopState): AdvisorRole[] {
 	return [];
 }
 
+function isDecisionBlockKind(kind: NonNullable<LoopState["block"]>["kind"]): boolean {
+	return (
+		kind === "new-information" ||
+		kind === "new-information-denied" ||
+		kind === "rework-learning" ||
+		kind === "same-rework-class" ||
+		kind === "second-rework"
+	);
+}
+
 function withBlock(
 	state: LoopState,
 	input: {
@@ -593,6 +604,24 @@ function withBlock(
 	},
 ): { state: LoopState; effects: LoopEffect[] } {
 	if (state.block) {
+		if ((input.kind === "stale" || input.kind === "git") && isDecisionBlockKind(state.block.kind)) {
+			const blocked: LoopState = {
+				...state,
+				stage: "blocked",
+				block: {
+					kind: input.kind,
+					questionId: input.question.id,
+					resumeStage: input.resumeStage ?? state.stage,
+					pendingAdvisors: input.pendingAdvisors ?? [],
+					...(input.problems ? { problems: input.problems } : {}),
+				},
+				deferredBlock: state.block,
+				questions: [...state.questions, input.question],
+				dispatchedAdvisors: [],
+				startedAdvisors: [],
+			};
+			return { state: blocked, effects: [{ type: "ask-person", reason: input.kind, question: input.question }] };
+		}
 		if (state.block.kind === "build-evidence" && state.block.kind !== input.kind) {
 			const blocked: LoopState = {
 				...state,
@@ -925,7 +954,26 @@ export function answerLoopQuestion(
 		question.answer || question.id !== state.block?.questionId ? question : { ...question, answer: input.answer },
 	);
 	if (!state.block) throw new Error("blocked state is missing block details");
+	const deferredBlock = state.deferredBlock as LoopState["block"] | undefined;
 	if (state.block.kind === "stale") {
+		if (deferredBlock) {
+			const restored: LoopState = {
+				...state,
+				stage: "blocked",
+				block: deferredBlock,
+				deferredBlock: undefined,
+				branch: input.current.branch,
+				baseHead: input.current.baseHead,
+				questions: answered,
+				dispatchedAdvisors: [],
+			};
+			const block = restored.block;
+			const question = restored.questions.find((item) => item.id === block?.questionId);
+			return {
+				state: restored,
+				effects: question && block ? [{ type: "ask-person", reason: block.kind, question }] : [],
+			};
+		}
 		const nextStage = state.block.resumeStage;
 		const updated: LoopState = {
 			...state,
@@ -951,6 +999,22 @@ export function answerLoopQuestion(
 		state.block.kind === "grimoire-unreadable" ||
 		state.block.kind === "git"
 	) {
+		if (state.block.kind === "git" && deferredBlock) {
+			const restored: LoopState = {
+				...state,
+				stage: "blocked",
+				block: deferredBlock,
+				deferredBlock: undefined,
+				questions: answered,
+				dispatchedAdvisors: [],
+			};
+			const block = restored.block;
+			const question = restored.questions.find((item) => item.id === block?.questionId);
+			return {
+				state: restored,
+				effects: question && block ? [{ type: "ask-person", reason: block.kind, question }] : [],
+			};
+		}
 		const verifierRequest =
 			state.block.kind === "intake-failed" && state.block.resumeStage === "verify" && state.verifierRequest
 				? {
@@ -1077,6 +1141,22 @@ export function replaceBlockWithStale(
 		recommended: "Answer how to proceed before the runner dispatches more work.",
 		dependsOn: [],
 	};
+	if (isDecisionBlockKind(state.block.kind)) {
+		const blocked: LoopState = {
+			...state,
+			stage: "blocked",
+			block: {
+				kind: "stale",
+				questionId: question.id,
+				resumeStage: state.stage,
+				pendingAdvisors: [],
+			},
+			deferredBlock: state.block,
+			questions: [...state.questions, question],
+			dispatchedAdvisors: [],
+		};
+		return { state: blocked, effects: [{ type: "ask-person", reason: "stale", question }] };
+	}
 	const blocked: LoopState = {
 		...state,
 		stage: "blocked",
