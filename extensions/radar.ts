@@ -65,6 +65,7 @@ export interface RunSummary {
 
 export interface PullRequestSummary {
 	id: string;
+	repo: string;
 	project: string;
 	number: number;
 	title: string;
@@ -595,7 +596,7 @@ function collectRuns(
 
 export interface PullRequestSnapshot {
 	items: PullRequestSummary[];
-	notices: string[];
+	notices: { repo?: string; text: string }[];
 }
 
 const PULL_REQUEST_CONCURRENCY = 4;
@@ -616,7 +617,7 @@ function ghPrList(repo: string, signal?: AbortSignal): Promise<string> {
 
 export async function loadPullRequests(repos: readonly string[], signal?: AbortSignal): Promise<PullRequestSnapshot> {
 	const items: PullRequestSummary[] = [];
-	const notices: string[] = [];
+	const notices: PullRequestSnapshot["notices"] = [];
 	const seenRepos = new Set<string>();
 	const uniqueRepos = repos.filter((repo) => {
 		if (seenRepos.has(repo) || !existsSync(repo)) return false;
@@ -639,6 +640,7 @@ export async function loadPullRequests(repos: readonly string[], signal?: AbortS
 				if (typeof pr.number !== "number" || typeof pr.title !== "string") continue;
 				items.push({
 					id: `${project}#${pr.number}`,
+					repo,
 					project,
 					number: pr.number,
 					title: pr.title.slice(0, 200),
@@ -648,7 +650,7 @@ export async function loadPullRequests(repos: readonly string[], signal?: AbortS
 				});
 			}
 		} catch {
-			notices.push(`Open PRs unavailable for ${project}; gh pr list failed.`);
+			notices.push({ repo, text: `Open PRs unavailable for ${project}; gh pr list failed.` });
 		}
 	};
 	await Promise.all(
@@ -982,7 +984,9 @@ export function collectRadarSnapshot(
 		alerts,
 		runs: runSummaries,
 		...(pullRequestResult.items.length > 0 ? { pullRequests: pullRequestResult.items } : {}),
-		...(pullRequestResult.notices.length > 0 ? { statusNotices: pullRequestResult.notices } : {}),
+		...(pullRequestResult.notices.length > 0
+			? { statusNotices: pullRequestResult.notices.map((notice) => notice.text) }
+			: {}),
 		pendingProposals,
 		mail: collectMail(profileDir),
 		summary: readTowerSummary(profileDir),

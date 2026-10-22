@@ -444,8 +444,8 @@ describe("radar refresh cost", () => {
 		let calls = 0;
 		let firstResolve:
 			| ((value: {
-					items: { id: string; project: string; number: number; title: string }[];
-					notices: string[];
+					items: { id: string; project: string; repo: string; number: number; title: string }[];
+					notices: { repo: string; text: string }[];
 			  }) => void)
 			| undefined;
 		let aborts = 0;
@@ -459,7 +459,10 @@ describe("radar refresh cost", () => {
 					});
 				}
 				if (calls === 2)
-					return Promise.resolve({ items: [], notices: ["Open PRs unavailable for kept; gh pr list failed."] });
+					return Promise.resolve({
+						items: [],
+						notices: [{ repo: "/repos/kept", text: "Open PRs unavailable for kept; gh pr list failed." }],
+					});
 				return new Promise(() => {});
 			},
 			{ intervalMs: 60_000, now: () => now },
@@ -472,19 +475,63 @@ describe("radar refresh cost", () => {
 		expect(calls).toBe(1);
 
 		scheduler.retain(["/repos/kept"]);
-		firstResolve?.({ items: [{ id: "old#1", project: "old", number: 1, title: "stale" }], notices: [] });
+		firstResolve?.({
+			items: [{ id: "old#1", project: "old", repo: "/repos/old", number: 1, title: "stale" }],
+			notices: [],
+		});
 		await scheduler.whenIdle();
 		expect(scheduler.snapshot().items).toEqual([]);
 
 		now += 60_001;
 		expect(scheduler.request(["/repos/kept"])).toBe(true);
 		await scheduler.whenIdle();
-		expect(scheduler.snapshot().notices).toEqual(["Open PRs unavailable for kept; gh pr list failed."]);
+		expect(scheduler.snapshot().notices).toEqual([
+			{ repo: "/repos/kept", text: "Open PRs unavailable for kept; gh pr list failed." },
+		]);
 
 		now += 60_001;
 		expect(scheduler.request(["/repos/kept"])).toBe(true);
 		scheduler.cleanup();
 		expect(aborts).toBeGreaterThan(0);
+	});
+
+	test("pull request scheduler filters loaded PR data by repo path only", async () => {
+		const scheduler = createPullRequestScheduler(
+			() =>
+				Promise.resolve({
+					items: [
+						{ id: "app#1", project: "app", repo: "/a/app", number: 1, title: "wrong repo" },
+						{ id: "app#2", project: "app", repo: "/b/app", number: 2, title: "kept repo" },
+					],
+					notices: [{ repo: "/b/app-old", text: "Open PRs unavailable for app-old; gh pr list failed." }],
+				}),
+			{ intervalMs: 0 },
+		);
+		expect(scheduler.request(["/a/app", "/b/app-old", "/b/app"])).toBe(true);
+		await scheduler.whenIdle();
+		scheduler.retain(["/b/app"]);
+		expect(scheduler.snapshot().items.map((item) => item.title)).toEqual(["kept repo"]);
+		expect(scheduler.snapshot().notices).toEqual([]);
+	});
+
+	test("pull request scheduler keeps its own failure notice until the next successful load", async () => {
+		let fail = true;
+		const scheduler = createPullRequestScheduler(
+			() => {
+				if (fail) return Promise.reject(new Error("boom"));
+				return Promise.resolve({ items: [], notices: [] });
+			},
+			{ intervalMs: 0 },
+		);
+		expect(scheduler.request(["/repos/app"])).toBe(true);
+		await scheduler.whenIdle();
+		scheduler.retain(["/repos/app"]);
+		expect(scheduler.snapshot().notices).toEqual([{ text: "Open PRs unavailable; boom." }]);
+
+		fail = false;
+		expect(scheduler.request(["/repos/app"])).toBe(true);
+		await scheduler.whenIdle();
+		expect(scheduler.snapshot().notices).toEqual([]);
 	});
 
 	test("herdr-only workspace rereads the branch after checkout changes", () => {

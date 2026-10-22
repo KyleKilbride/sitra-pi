@@ -23,12 +23,14 @@ import {
 	groupWorkerSessions,
 	listSessions,
 	prepareWorktree,
+	readGitHeadBranch,
 	readLastLines,
 	readTranscriptTail,
 	removeSession,
 	type SessionRecord,
 	sendInboxMessage,
 	spawnPaneCommand,
+	transcriptItemFromEntry,
 	updateSession,
 	writeSession,
 } from "../extensions/sessions.ts";
@@ -796,6 +798,36 @@ describe("reading the end of big transcripts", () => {
 		const file = join(dir, "oversized.jsonl");
 		writeFileSync(file, `${"x".repeat(1024 * 1024 + 1)}\n`);
 		expect(readLastLines(file, 1)).toBe("");
+	});
+
+	test("transcript item parsing ignores non-object entries", () => {
+		expect(transcriptItemFromEntry(null)).toBeUndefined();
+		expect(readTranscriptTail("null\n")).toEqual([]);
+	});
+});
+
+describe("cheap git branch reads", () => {
+	test("surfaces unreadable .git files instead of walking up to a parent repo", () => {
+		const parent = tmp();
+		mkdirSync(join(parent, ".git"), { recursive: true });
+		writeFileSync(join(parent, ".git", "HEAD"), "ref: refs/heads/parent\n");
+		const child = join(parent, "child");
+		mkdirSync(child);
+		const dotGit = join(child, ".git");
+		writeFileSync(dotGit, "gitdir: ../missing\n");
+		chmodSync(dotGit, 0);
+		try {
+			expect(() => readGitHeadBranch(child)).toThrow();
+		} finally {
+			chmodSync(dotGit, 0o644);
+		}
+	});
+
+	test("shows HEAD for detached checkouts", () => {
+		const repo = tmp();
+		mkdirSync(join(repo, ".git"), { recursive: true });
+		writeFileSync(join(repo, ".git", "HEAD"), "0123456789abcdef0123456789abcdef01234567\n");
+		expect(readGitHeadBranch(repo)).toBe("HEAD");
 	});
 });
 

@@ -285,7 +285,9 @@ function gitDirFor(cwd: string): string | undefined {
 				if (!raw) return undefined;
 				return isAbsolute(raw) ? raw : resolve(dir, raw);
 			}
-		} catch {}
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
 		const parent = dirname(dir);
 		if (parent === dir) return undefined;
 		dir = parent;
@@ -297,7 +299,7 @@ export function readGitHeadBranch(cwd: string): string | undefined {
 	if (!gitDir) return undefined;
 	try {
 		const head = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
-		if (!head.startsWith("ref: ")) return undefined;
+		if (!head.startsWith("ref: ")) return head ? "HEAD" : undefined;
 		const ref = head.slice("ref: ".length).trim();
 		const prefix = "refs/heads/";
 		return ref.startsWith(prefix) ? ref.slice(prefix.length) || undefined : undefined;
@@ -549,6 +551,7 @@ export function createTailReader(
 }
 
 export function transcriptItemFromEntry(entry: unknown): TranscriptItem | undefined {
+	if (!entry || typeof entry !== "object") return undefined;
 	const value = entry as {
 		type?: string;
 		content?: unknown;

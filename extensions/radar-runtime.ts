@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, watch } from "node:fs";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { grimoireDir } from "./grimoire.ts";
 import {
@@ -29,10 +29,9 @@ interface PullRequestScheduler {
 }
 
 function filterPullRequestSnapshot(value: PullRequestSnapshot, repos: ReadonlySet<string>): PullRequestSnapshot {
-	const projects = new Set(Array.from(repos, (repo) => basename(repo)));
 	return {
-		items: value.items.filter((item) => projects.has(item.project)),
-		notices: value.notices.filter((notice) => Array.from(projects).some((project) => notice.includes(project))),
+		items: value.items.filter((item) => repos.has(item.repo)),
+		notices: value.notices.filter((notice) => !notice.repo || repos.has(notice.repo)),
 	};
 }
 
@@ -75,7 +74,7 @@ export function createPullRequestScheduler(
 					(error: unknown) => {
 						if (!abort.signal.aborted) {
 							const message = error instanceof Error && error.message ? error.message : "gh pr list failed";
-							current = { items: [], notices: [`Open PRs unavailable; ${message}.`] };
+							current = { items: [], notices: [{ text: `Open PRs unavailable; ${message}.` }] };
 						}
 					},
 				)
