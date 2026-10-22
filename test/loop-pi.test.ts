@@ -1221,7 +1221,7 @@ describe("Pi wiring", () => {
 		await commands.get("loop")?.handler("answer git fixed now", ctx(cwd));
 
 		blocked = readLoopStateFile(path);
-		expect(blocked.stage).toBe("blocked");
+		expect(blocked.stage).toBe("needs-person");
 		expect(blocked.block).toMatchObject({ kind: "questions", questionId: "advisor-questions-test" });
 		expect(blocked.questions.find((question) => question.id === "advisor-questions-test")?.answer).toBeUndefined();
 		expect(blocked.questions.find((question) => question.id === "git-state")?.answer).toBe("git fixed now");
@@ -1514,6 +1514,47 @@ describe("Pi wiring", () => {
 			?.execute("green", { phase: "green", commit, command: agreed }, undefined, undefined, ctx(cwd));
 
 		expect(green?.content[0]?.text).toContain("exit: 0");
+	});
+
+	test("loop_run_evidence does not append evidence when the loop state changed before the run finished", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		const agreed = "node -e 'setTimeout(() => process.exit(0), 100)'";
+		approvedLoop(profile, cwd, agreed);
+		writeFileSync(join(cwd, "loop.test.ts"), "green\n");
+		const commit = commitAll(cwd, "add test");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		const path = loopStatePath(profile, cwd, "feature");
+
+		const run = tools
+			.get("loop_run_evidence")
+			?.execute("green", { phase: "green", commit, command: agreed }, undefined, undefined, ctx(cwd));
+		const state = readLoopStateFile(path);
+		writeLoopStateFile(path, { ...state, stage: "done" });
+		const result = await run;
+
+		expect(result?.content[0]?.text).toContain("not recorded");
+		expect(readLoopStateFile(path).build.evidence).toBeUndefined();
+	});
+
+	test("loop_run_evidence refuses an agreed command ending in a trailing backslash with a clear reason", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		const agreed = "printf ok \\";
+		approvedLoop(profile, cwd, agreed);
+		writeFileSync(join(cwd, "loop.test.ts"), "green\n");
+		const commit = commitAll(cwd, "add test");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+
+		await expect(
+			tools
+				.get("loop_run_evidence")
+				?.execute("green", { phase: "green", commit, command: agreed }, undefined, undefined, ctx(cwd)),
+		).rejects.toThrow(/trailing line-continuation backslash/);
 	});
 
 	test("loop_record_build accepts only runner-recorded evidence ids and matching log hashes", async () => {

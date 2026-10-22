@@ -220,6 +220,7 @@ export const LOOP_STATE_SCHEMA = Type.Object(
 		stage: LoopStageSchema,
 		block: Type.Optional(Block),
 		deferredBlock: Type.Optional(Type.Unknown()),
+		deferredStage: Type.Optional(LoopStageSchema),
 		goal: Type.String(),
 		limits: Type.Array(Type.String()),
 		done: Type.Array(Type.String()),
@@ -619,6 +620,7 @@ function withBlock(
 					...(input.problems ? { problems: input.problems } : {}),
 				},
 				deferredBlock: state.block,
+				deferredStage: state.stage,
 				questions: [...state.questions, input.question],
 				dispatchedAdvisors: [],
 				startedAdvisors: [],
@@ -962,9 +964,10 @@ export function answerLoopQuestion(
 		if (deferredBlock) {
 			const restored: LoopState = {
 				...state,
-				stage: "blocked",
+				stage: state.deferredStage ?? "blocked",
 				block: deferredBlock,
 				deferredBlock: undefined,
+				deferredStage: undefined,
 				branch: input.current.branch,
 				baseHead: input.current.baseHead,
 				questions: answered,
@@ -1005,9 +1008,10 @@ export function answerLoopQuestion(
 		if (state.block.kind === "git" && deferredBlock) {
 			const restored: LoopState = {
 				...state,
-				stage: "blocked",
+				stage: state.deferredStage ?? "blocked",
 				block: deferredBlock,
 				deferredBlock: undefined,
+				deferredStage: undefined,
 				questions: answered,
 				dispatchedAdvisors: [],
 			};
@@ -1155,6 +1159,7 @@ export function replaceBlockWithStale(
 				pendingAdvisors: [],
 			},
 			deferredBlock: state.block,
+			deferredStage: state.stage,
 			questions: [...state.questions, question],
 			dispatchedAdvisors: [],
 		};

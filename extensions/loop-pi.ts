@@ -231,6 +231,16 @@ function buildEvidenceProblem(reason: string, satisfy: string): { reason: string
 	return { reason, satisfy };
 }
 
+function hasTrailingLineContinuation(command: string): boolean {
+	let index = command.length - 1;
+	while (index >= 0) {
+		const char = command[index] ?? "";
+		if (char !== " " && char !== "\t" && char !== "\n" && char !== "\r") break;
+		index -= 1;
+	}
+	return command[index] === "\\";
+}
+
 function isDecisionBlock(state: LoopState): boolean {
 	const kind = state.block?.kind;
 	return (
@@ -340,7 +350,7 @@ function evidenceCommand(command: string, log: string, meta: RunMeta): string {
 	const metaJson = shellQuote(JSON.stringify({ ...meta, nonce }));
 	const header = shellQuote(HEADER_MARKER);
 	const exitPrefix = `${EXIT_MARKER}${nonce}=`;
-	const script = `printf '%s{"pid":%s,"meta":%s}\\n' ${header} "$$" ${metaJson} > ${q}; { ${command}\n} 2>&1 | tee -a ${q}; code=\${PIPESTATUS[0]}; echo "${exitPrefix}\${code}" >> ${q}; exit "\${code}"`;
+	const script = `printf '%s{"pid":%s,"meta":%s}\\n' ${header} "$$" ${metaJson} > ${q}; { ${command}\n\n} 2>&1 | tee -a ${q}; code=\${PIPESTATUS[0]}; echo "${exitPrefix}\${code}" >> ${q}; exit "\${code}"`;
 	return script;
 }
 
@@ -447,6 +457,9 @@ async function runEvidenceInWorktree(input: {
 	if (commands.length === 0) throw new Error("frozen brief has no agreed acceptance commands");
 	if (!commands.includes(input.command)) {
 		throw new Error(`command is not an agreed loop acceptance command: ${input.command}`);
+	}
+	if (hasTrailingLineContinuation(input.command)) {
+		throw new Error("agreed loop acceptance command ends with a trailing line-continuation backslash");
 	}
 	mkdirSync(runsDir(), { recursive: true });
 	const id = runId(`loop-${input.phase}-evidence`);
@@ -1349,13 +1362,52 @@ export default function sitraLoop(pi: Pi): void {
 				timeoutMs: p.timeoutMs ?? 120_000,
 				...(signal ? { signal } : {}),
 			});
-			const latest = readLoopStateFile(path);
+			let latest: LoopState;
+			try {
+				latest = readLoopStateFile(path);
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `phase: ${p.phase}\ncommit: ${result.commit}\nexit: ${result.exitCode}\nrunId: ${result.runId}\nlog: ${result.log}\nnot recorded: loop state could not be read after the run finished (${String(error)})`,
+						},
+					],
+					details: { ...result, recorded: false },
+				};
+			}
+			const latestRecordingState = buildEvidenceRecordingState(latest);
+			if (
+				latestRecordingState.stage !== "build" ||
+				(latestRecordingState.block && latestRecordingState.block.kind !== "build-evidence")
+			) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `phase: ${p.phase}\ncommit: ${result.commit}\nexit: ${result.exitCode}\nrunId: ${result.runId}\nlog: ${result.log}\nnot recorded: loop stage changed to ${latest.stage}`,
+						},
+					],
+					details: { ...result, recorded: false },
+				};
+			}
+			if (latestRecordingState.build.evidence?.some((item) => item.runId === result.runId)) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `phase: ${p.phase}\ncommit: ${result.commit}\nexit: ${result.exitCode}\nrunId: ${result.runId}\nlog: ${result.log}\nnot recorded: evidence run id already exists in loop state`,
+						},
+					],
+					details: { ...result, recorded: false },
+				};
+			}
 			writeLoopStateFile(path, {
-				...latest,
+				...latestRecordingState,
 				build: {
-					...latest.build,
+					...latestRecordingState.build,
 					evidence: [
-						...(latest.build.evidence ?? []),
+						...(latestRecordingState.build.evidence ?? []),
 						{
 							runId: result.runId,
 							sha256: result.sha256,
