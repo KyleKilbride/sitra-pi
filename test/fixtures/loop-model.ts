@@ -40,7 +40,12 @@ function addVerifierTask(details, task) {
 	const marker = "Verifier dispatchId: ";
 	const dispatchStart = exactTask.indexOf(marker);
 	const dispatchId =
-		dispatchStart >= 0 ? exactTask.slice(dispatchStart + marker.length).split("\n")[0]?.trim() : undefined;
+		dispatchStart >= 0
+			? exactTask
+					.slice(dispatchStart + marker.length)
+					.split("\n")[0]
+					?.trim()
+			: undefined;
 	const lines = raw
 		.split("\n")
 		.filter(Boolean)
@@ -52,7 +57,10 @@ function addVerifierTask(details, task) {
 			return JSON.stringify(parsed);
 		})
 		.join("\n");
-	writeFileSync(details.sessionFile, `${JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: exactTask }] } })}\n${lines}\n`);
+	writeFileSync(
+		details.sessionFile,
+		`${JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: exactTask }] } })}\n${lines}\n`,
+	);
 	return details;
 }
 

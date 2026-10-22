@@ -100,9 +100,16 @@ function sessionFileWithVerifierReport(report: unknown, task: string): string {
 	const marker = "Verifier dispatchId: ";
 	const dispatchStart = task.indexOf(marker);
 	const dispatchId =
-		dispatchStart >= 0 ? task.slice(dispatchStart + marker.length).split("\n")[0]?.trim() : undefined;
+		dispatchStart >= 0
+			? task
+					.slice(dispatchStart + marker.length)
+					.split("\n")[0]
+					?.trim()
+			: undefined;
 	const withDispatch =
-		report && typeof report === "object" && dispatchId ? { ...(report as Record<string, unknown>), dispatchId } : report;
+		report && typeof report === "object" && dispatchId
+			? { ...(report as Record<string, unknown>), dispatchId }
+			: report;
 	return sessionFileWithEntries([
 		{ type: "message", message: { role: "user", content: [{ type: "text", text: task }] } },
 		{ type: "message", message: { role: "toolResult", toolName: "helper_report", details: withDispatch } },

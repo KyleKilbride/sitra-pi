@@ -220,7 +220,7 @@ export default function sitraLead(pi: Pi): void {
 			// The extension watches the run, not the model: when it ends, the result arrives as a message on its own.
 			const watcher = setInterval(() => {
 				if (!existsSync(log)) return;
-				let status;
+				let status: ReturnType<typeof readRun>;
 				try {
 					status = readRun(readFileSync(log, "utf8"), 15);
 				} catch (error) {
