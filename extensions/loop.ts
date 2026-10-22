@@ -138,6 +138,7 @@ const VerifierRequest = Type.Object(
 		testHashes: Type.Array(TestHash),
 		task: Type.String({ minLength: 1 }),
 		taskHash: Type.String({ minLength: 1 }),
+		dispatchId: Type.String({ minLength: 1 }),
 		runLogs: Type.Array(Type.String()),
 		maxVerifierRerunMs: Type.Number(),
 	},
@@ -831,12 +832,15 @@ export function verifierTask(input: {
 	greenRunLog: string;
 	redRunCommand?: string;
 	greenRunCommand?: string;
+	dispatchId?: string;
 	maxVerifierRerunMs: number;
 }): string {
 	return [
 		"You are the independent LOOPS verifier. Start from this runner-written evidence only.",
 		`maxVerifierRerunMs: ${input.maxVerifierRerunMs}`,
 		`Commit: ${input.commit}`,
+		`Verifier dispatchId: ${input.dispatchId ?? ""}`,
+		"Set this exact dispatchId in helper_report.",
 		"Frozen brief:",
 		JSON.stringify(input.brief, null, "\t"),
 		"Diff against baseRef:",
@@ -862,6 +866,7 @@ export function recordBuildEvidence(
 		testHashes: LoopTestHash[];
 		redRun?: LoopRunEvidence;
 		greenRun?: LoopRunEvidence;
+		dispatchId?: string;
 		maxVerifierRerunMs: number;
 	},
 ): { state: LoopState; effects: LoopEffect[] } {
@@ -888,6 +893,7 @@ export function recordBuildEvidence(
 	const redRunLog = input.redRun?.log;
 	const greenRunLog = input.greenRun?.log;
 	if (!redRunLog || !greenRunLog) return buildBlock(buildState, "run logs are missing");
+	const dispatchId = input.dispatchId ?? sha256Text(`${input.commit}:${input.diff}:${Date.now()}:${Math.random()}`);
 	const task = verifierTask({
 		brief: buildBrief(buildState),
 		diff: input.diff,
@@ -897,6 +903,7 @@ export function recordBuildEvidence(
 		greenRunLog,
 		redRunCommand: input.redRun?.command,
 		greenRunCommand: input.greenRun?.command,
+		dispatchId,
 		maxVerifierRerunMs: input.maxVerifierRerunMs,
 	});
 	const next: LoopState = {
@@ -909,6 +916,7 @@ export function recordBuildEvidence(
 			testHashes: input.testHashes,
 			task,
 			taskHash: sha256Text(task),
+			dispatchId,
 			runLogs: [redRunLog, greenRunLog],
 			maxVerifierRerunMs: input.maxVerifierRerunMs,
 		},

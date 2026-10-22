@@ -37,10 +37,22 @@ function addVerifierTask(details, task) {
 	if (raw.includes('"role":"user"')) return details;
 	const taskStart = task.indexOf("You are the independent LOOPS verifier.");
 	const exactTask = taskStart >= 0 ? task.slice(taskStart) : task;
-	writeFileSync(
-		details.sessionFile,
-		`${JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: exactTask }] } })}\n${raw}`,
-	);
+	const marker = "Verifier dispatchId: ";
+	const dispatchStart = exactTask.indexOf(marker);
+	const dispatchId =
+		dispatchStart >= 0 ? exactTask.slice(dispatchStart + marker.length).split("\n")[0]?.trim() : undefined;
+	const lines = raw
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => {
+			const parsed = JSON.parse(line);
+			if (dispatchId && parsed?.message?.toolName === "helper_report" && parsed.message.details) {
+				parsed.message.details = { ...parsed.message.details, dispatchId };
+			}
+			return JSON.stringify(parsed);
+		})
+		.join("\n");
+	writeFileSync(details.sessionFile, `${JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: exactTask }] } })}\n${lines}\n`);
 	return details;
 }
 

@@ -9,6 +9,7 @@ const BaseFields = {
 	evidence: Type.Array(Type.String()),
 	openQuestions: Type.Array(Type.String()),
 	assumptions: Type.Array(Type.String()),
+	dispatchId: Type.Optional(Type.String({ minLength: 1 })),
 };
 
 export const ReworkClass = Type.Union([
@@ -178,6 +179,7 @@ export interface HelperReport {
 	evidence: string[];
 	openQuestions: string[];
 	assumptions: string[];
+	dispatchId?: string;
 	role?: HelperReportRole;
 	details?: unknown;
 }
@@ -207,6 +209,7 @@ export function validateHelperReport(
 		openQuestions: value.openQuestions,
 		assumptions: value.assumptions,
 	};
+	if (value.dispatchId) report.dispatchId = value.dispatchId;
 	if (value.role) report.role = value.role;
 	if (value.details !== undefined) report.details = value.details;
 	return { ok: true, report };

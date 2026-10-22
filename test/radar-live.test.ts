@@ -14,7 +14,7 @@ import {
 import { initialRadarState, liveStatus } from "../extensions/radar-model.ts";
 import { parseMailSnapshot } from "../extensions/radar-store.ts";
 import { buildRadarLayout } from "../extensions/radar-view.ts";
-import { EXIT_MARKER, paneCommand, type RunMeta, readRun, readRunHeader } from "../extensions/runs.ts";
+import { EXIT_MARKER, HEADER_MARKER, paneCommand, type RunMeta, readRun, readRunHeader } from "../extensions/runs.ts";
 
 const NOW = Date.parse("2026-10-21T16:00:00Z");
 const tmp = () => mkdtempSync(join(tmpdir(), "sitra-radar-live-"));
@@ -148,6 +148,29 @@ describe("runs know who started them and whether they are still alive", () => {
 		const states = snap.runs.map((r) => r.state);
 		expect(states.indexOf("running")).toBeLessThan(states.indexOf("passed"));
 		expect(states.lastIndexOf("running")).toBeLessThan(states.indexOf("passed"));
+	});
+	test("nonce exit parsing uses the first header even when the tail omits it", () => {
+		const profile = tmp();
+		const dir = join(profile, "runs");
+		mkdirSync(dir, { recursive: true });
+		const body = Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n");
+		writeFileSync(
+			join(dir, "2026-10-21T15-59-00-000Z-long.log"),
+			`${HEADER_MARKER}${JSON.stringify({ pid: process.pid, pidStart: currentProcessIdentity().value, pidStartKind: currentProcessIdentity().kind, meta: { label: "long", nonce: "abc" } })}\n${body}\n${EXIT_MARKER}abc=0\n`,
+		);
+		const snap = collectRadarSnapshot(profile, { nowMs: NOW });
+		expect(snap.runs[0]).toMatchObject({ label: "long", state: "passed", done: true, exitCode: 0 });
+	});
+	test("an invalid run header affects only that run", () => {
+		const profile = tmp();
+		const dir = join(profile, "runs");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "2026-10-21T15-59-00-000Z-bad.log"), `${HEADER_MARKER}{bad}\n${EXIT_MARKER}0\n`);
+		writeFileSync(join(dir, "2026-10-21T15-58-00-000Z-good.log"), `legacy ok\n${EXIT_MARKER}0\n`);
+		const snap = collectRadarSnapshot(profile, { nowMs: NOW });
+		expect(snap.runs).toHaveLength(2);
+		expect(snap.runs.find((run) => run.label === "bad")).toMatchObject({ state: "unknown", done: false });
+		expect(snap.runs.find((run) => run.label === "good")).toMatchObject({ state: "passed", done: true });
 	});
 	test("a reused pid with a different process start token is stopped", () => {
 		const profile = tmp();

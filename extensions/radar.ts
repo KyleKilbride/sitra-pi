@@ -387,17 +387,17 @@ function collectRuns(
 ): RunSummary[] {
 	const dir = join(profileDir, "runs");
 	if (!existsSync(dir)) return [];
-	try {
-		const files = readdirSync(dir)
-			.filter((f) => f.endsWith(".log"))
-			.sort()
-			.reverse()
-			.slice(0, 30);
-		const runs = files.map((file): RunSummary => {
+	const files = readdirSync(dir)
+		.filter((f) => f.endsWith(".log"))
+		.sort()
+		.reverse()
+		.slice(0, 30);
+	const runs = files.map((file): RunSummary => {
+		try {
 			const full = join(dir, file);
-			// The exit marker is the log's last line, so the end of the log is all that's needed.
-			const status = readRun(readLastLines(full, 100), 80);
-			const header = readRunHeader(readFirstLine(full));
+			const firstLine = readFirstLine(full);
+			const status = readRun(`${firstLine}\n${readLastLines(full, 100)}`, 80);
+			const header = readRunHeader(firstLine);
 			const mtimeMs = statSync(full).mtimeMs;
 			const label =
 				header?.meta.label ?? file.replace(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-/, "").replace(/\.log$/, "");
@@ -419,14 +419,23 @@ function collectRuns(
 				...(status.exitCode !== undefined ? { exitCode: status.exitCode } : {}),
 				updatedAt: new Date(mtimeMs).toISOString(),
 			};
-		});
-		// Live runs first so "who is running what" is the top of the list; unknowns stay visible just below them.
-		return runs.toSorted(
-			(a, b) => sortRunGroup(a.state) - sortRunGroup(b.state) || b.updatedAt.localeCompare(a.updatedAt),
-		);
-	} catch {
-		return [];
-	}
+		} catch (error) {
+			const full = join(dir, file);
+			const mtimeMs = statSync(full).mtimeMs;
+			return {
+				id: full,
+				label: file.replace(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-/, "").replace(/\.log$/, ""),
+				state: "unknown",
+				tail: `Run log error: ${String(error)}`,
+				done: false,
+				updatedAt: new Date(mtimeMs).toISOString(),
+			};
+		}
+	});
+	// Live runs first so "who is running what" is the top of the list; unknowns stay visible just below them.
+	return runs.toSorted(
+		(a, b) => sortRunGroup(a.state) - sortRunGroup(b.state) || b.updatedAt.localeCompare(a.updatedAt),
+	);
 }
 
 function collectOpenPullRequests(repos: readonly string[]): { items: PullRequestSummary[]; notices: string[] } {

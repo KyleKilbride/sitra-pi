@@ -422,6 +422,7 @@ function recordBuildFromParams(
 		testHashes: hashes,
 		redRun,
 		greenRun,
+		dispatchId: createHash("sha256").update(`${Date.now()}:${Math.random()}:${path}`).digest("hex"),
 		maxVerifierRerunMs: params.maxVerifierRerunMs ?? 120_000,
 	});
 	writeLoopStateFile(path, result.state);
@@ -591,13 +592,6 @@ async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<v
 			block("subagent_result is missing sessionFile");
 			return;
 		}
-		let taskHash: string | undefined;
-		try {
-			taskHash = readVerifierTaskHash(raw.sessionFile);
-		} catch {
-			return;
-		}
-		if (taskHash !== state.verifierRequest.taskHash) return;
 		let report: unknown;
 		try {
 			report = readHelperReport(raw.sessionFile);
@@ -608,6 +602,14 @@ async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<v
 		const valid = validateHelperReport(report);
 		if (!valid.ok) {
 			block(`invalid helper_report from ${raw.sessionFile}: ${valid.reason}`);
+			return;
+		}
+		if (valid.report.dispatchId !== state.verifierRequest.dispatchId) {
+			block(
+				valid.report.dispatchId
+					? `verifier dispatchId ${valid.report.dispatchId} did not match the pending verifier request`
+					: "verifier report is missing dispatchId for the pending verifier request",
+			);
 			return;
 		}
 		let result: { state: LoopState; effects: LoopEffect[] };
@@ -719,37 +721,6 @@ function readHelperReport(sessionFile: string): unknown {
 	}
 	if (latest !== undefined) return latest;
 	throw new Error(`helper_report tool result not found in ${sessionFile}`);
-}
-
-function textContent(input: unknown): string | undefined {
-	if (typeof input === "string") return input;
-	if (!Array.isArray(input)) return undefined;
-	const text = input
-		.filter((part): part is { type: string; text: string } => {
-			return (
-				part !== null &&
-				typeof part === "object" &&
-				(part as { type?: unknown }).type === "text" &&
-				typeof (part as { text?: unknown }).text === "string"
-			);
-		})
-		.map((part) => part.text)
-		.join("\n");
-	return text || undefined;
-}
-
-function readVerifierTaskHash(sessionFile: string): string | undefined {
-	const raw = readFileSync(sessionFile, "utf8");
-	for (const line of raw.split("\n")) {
-		const trimmed = line.trim();
-		if (!trimmed) continue;
-		const parsed = JSON.parse(trimmed) as { message?: { role?: unknown; content?: unknown } };
-		if (parsed.message?.role !== "user") continue;
-		const text = textContent(parsed.message.content);
-		if (!text) continue;
-		return createHash("sha256").update(text).digest("hex");
-	}
-	return undefined;
 }
 
 function subagentResultFromMessageEnd(event: unknown): unknown | undefined {

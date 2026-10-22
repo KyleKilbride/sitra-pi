@@ -220,7 +220,21 @@ export default function sitraLead(pi: Pi): void {
 			// The extension watches the run, not the model: when it ends, the result arrives as a message on its own.
 			const watcher = setInterval(() => {
 				if (!existsSync(log)) return;
-				const status = readRun(readFileSync(log, "utf8"), 15);
+				let status;
+				try {
+					status = readRun(readFileSync(log, "utf8"), 15);
+				} catch (error) {
+					clearInterval(watcher);
+					pi.sendMessage(
+						{
+							customType: "sitra-run",
+							content: `The run "${p.label}" could not be read: ${String(error)}\n(Full log: ${log})`,
+							display: true,
+						},
+						ctx.isIdle?.() === false ? { triggerTurn: true, deliverAs: "followUp" } : { triggerTurn: true },
+					);
+					return;
+				}
 				if (!status.done) return;
 				clearInterval(watcher);
 				pi.sendMessage(

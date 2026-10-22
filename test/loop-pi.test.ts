@@ -97,9 +97,15 @@ function sessionFileWithHelperReport(report: unknown): string {
 }
 
 function sessionFileWithVerifierReport(report: unknown, task: string): string {
+	const marker = "Verifier dispatchId: ";
+	const dispatchStart = task.indexOf(marker);
+	const dispatchId =
+		dispatchStart >= 0 ? task.slice(dispatchStart + marker.length).split("\n")[0]?.trim() : undefined;
+	const withDispatch =
+		report && typeof report === "object" && dispatchId ? { ...(report as Record<string, unknown>), dispatchId } : report;
 	return sessionFileWithEntries([
 		{ type: "message", message: { role: "user", content: [{ type: "text", text: task }] } },
-		{ type: "message", message: { role: "toolResult", toolName: "helper_report", details: report } },
+		{ type: "message", message: { role: "toolResult", toolName: "helper_report", details: withDispatch } },
 	]);
 }
 
@@ -1068,7 +1074,7 @@ describe("Pi wiring", () => {
 		expect(readFileSync(loopStatePath(profile, cwd, "feature"), "utf8")).toBe(before);
 	});
 
-	test("verifier intake ignores reports whose child task hash does not match the recorded dispatch", async () => {
+	test("verifier intake blocks reports whose dispatchId does not match the recorded dispatch", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
 		const { commands, handlers, tools } = fakePi();
@@ -1107,8 +1113,12 @@ describe("Pi wiring", () => {
 			subagentResult("verifier", sessionFileWithVerifierReport(verifierReport, "different task")),
 			ctx(cwd),
 		);
-		expect(readLoopStateFile(path)).toEqual(verifyState);
+		const blocked = readLoopStateFile(path);
+		expect(blocked.stage).toBe("blocked");
+		expect(blocked.block).toMatchObject({ kind: "intake-failed", resumeStage: "verify" });
+		expect(blocked.questions.at(-1)?.text).toContain("missing dispatchId");
 
+		writeLoopStateFile(path, verifyState);
 		await handlers.get("message_end")?.(
 			subagentResult(
 				"verifier",
