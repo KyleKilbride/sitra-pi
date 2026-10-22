@@ -7,7 +7,6 @@ import {
 	briefHash,
 	buildBrief,
 	createLoopState,
-	LOOP_RUN_MARKER,
 	type LoopState,
 	staleReason,
 } from "../extensions/loop.ts";
@@ -15,6 +14,8 @@ import sitraLoop, { loopStatePath, readLoopStateFile, writeLoopStateFile } from 
 import { EXIT_MARKER, HEADER_MARKER } from "../extensions/runs.ts";
 
 vi.setConfig({ testTimeout: 30_000 });
+
+const FORGED_LOOP_MARKER = "__SITRA_LOOP_CHECK__=";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
@@ -152,7 +153,7 @@ function writeLoopLog(
 	writeFileSync(
 		file,
 		[
-			`${LOOP_RUN_MARKER}${JSON.stringify({ commit: input.commit, testHashes: input.testHashes })}`,
+			`${FORGED_LOOP_MARKER}${JSON.stringify({ commit: input.commit, testHashes: input.testHashes })}`,
 			"test output",
 			`${EXIT_MARKER}${input.exitCode}`,
 		].join("\n"),
@@ -172,7 +173,7 @@ function writeHeaderLoopLog(
 				pidStartKind: "proc",
 				meta: { loop: { commit: input.commit, testHashes: input.testHashes } },
 			})}`,
-			`${LOOP_RUN_MARKER}${JSON.stringify({ commit: "forged", testHashes: [] })}`,
+			`${FORGED_LOOP_MARKER}${JSON.stringify({ commit: "forged", testHashes: [] })}`,
 			"test output",
 			`${EXIT_MARKER}${input.exitCode}`,
 		].join("\n"),
@@ -666,7 +667,9 @@ describe("Pi wiring", () => {
 		const { cwd } = gitWorktree();
 		approvedLoop(profile, cwd);
 		writeFileSync(join(cwd, "loop.test.ts"), "expect(true).toBe(true)\n");
-		const commit = commitAll(cwd, "add tests");
+		const redCommit = commitAll(cwd, "add tests");
+		writeFileSync(join(cwd, "impl.ts"), "green\n");
+		const greenCommit = commitAll(cwd, "implement");
 		await commands.get("loop")?.handler("build", ctx(cwd));
 		expect(readLoopStateFile(loopStatePath(profile, cwd, "feature")).stage).toBe("build");
 		const redLog = join(profile, "red.log");
@@ -675,8 +678,12 @@ describe("Pi wiring", () => {
 		expect(hashBefore).toEqual([]);
 
 		const expectedHash = sha256sum(cwd, "loop.test.ts");
-		writeLoopLog(redLog, { commit, testHashes: [{ file: "loop.test.ts", sha256: expectedHash }], exitCode: 1 });
-		writeLoopLog(greenLog, { commit, testHashes: [{ file: "loop.test.ts", sha256: expectedHash }], exitCode: 0 });
+		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: expectedHash }], exitCode: 1 });
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: expectedHash }],
+			exitCode: 0,
+		});
 		const result = await tools
 			.get("loop_record_build")
 			?.execute(
@@ -795,13 +802,19 @@ describe("Pi wiring", () => {
 		const { cwd } = gitWorktree();
 		approvedLoop(profile, cwd);
 		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
-		const commit = commitAll(cwd, "add tests");
+		const redCommit = commitAll(cwd, "add tests");
+		writeFileSync(join(cwd, "impl.ts"), "green\n");
+		const greenCommit = commitAll(cwd, "implement");
 		await commands.get("loop")?.handler("build", ctx(cwd));
 		const originalHash = sha256sum(cwd, "loop.test.ts");
 		const redLog = join(profile, "red.log");
 		const greenLog = join(profile, "green.log");
-		writeLoopLog(redLog, { commit, testHashes: [{ file: "loop.test.ts", sha256: originalHash }], exitCode: 1 });
-		writeLoopLog(greenLog, { commit, testHashes: [{ file: "loop.test.ts", sha256: originalHash }], exitCode: 0 });
+		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: originalHash }], exitCode: 1 });
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: originalHash }],
+			exitCode: 0,
+		});
 		writeFileSync(join(cwd, "loop.test.ts"), "changed after logs\n");
 		await tools
 			.get("loop_record_build")
@@ -813,7 +826,7 @@ describe("Pi wiring", () => {
 				ctx(cwd),
 			);
 		const state = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
-		expect(state.stage).toBe("build");
+		expect(state.stage).toBe("blocked");
 		expect(state.block).toMatchObject({ kind: "questions", resumeStage: "build" });
 		expect(state.questions.at(-1)?.text).toContain("red run");
 	});
@@ -825,13 +838,15 @@ describe("Pi wiring", () => {
 		const { cwd } = gitWorktree();
 		approvedLoop(profile, cwd);
 		writeFileSync(join(cwd, "loop.test.ts"), "ok\n");
-		const commit = commitAll(cwd, "add tests");
+		const redCommit = commitAll(cwd, "add tests");
+		writeFileSync(join(cwd, "impl.ts"), "green\n");
+		const greenCommit = commitAll(cwd, "implement");
 		await commands.get("loop")?.handler("build", ctx(cwd));
 		const hash = sha256sum(cwd, "loop.test.ts");
 		const redLog = join(profile, "red.log");
 		const greenLog = join(profile, "green.log");
-		writeLoopLog(redLog, { commit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
-		writeLoopLog(greenLog, { commit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
+		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
 		await tools
 			.get("loop_record_build")
 			?.execute(
@@ -870,7 +885,7 @@ describe("Pi wiring", () => {
 				undefined,
 				ctx(cwd),
 			);
-		writeLoopLog(greenLog, { commit: "stale", testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		writeHeaderLoopLog(greenLog, { commit: "stale", testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
 		await handlers.get("message_end")?.(
 			subagentResult(
 				"verifier",
@@ -887,12 +902,12 @@ describe("Pi wiring", () => {
 			ctx(cwd),
 		);
 		const blocked = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
-		expect(blocked.stage).toBe("verify");
+		expect(blocked.stage).toBe("blocked");
 		expect(blocked.block).toMatchObject({ kind: "intake-failed" });
 
 		approvedLoop(profile, cwd);
 		await commands.get("loop")?.handler("build", ctx(cwd));
-		writeLoopLog(greenLog, { commit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
 		await tools
 			.get("loop_record_build")
 			?.execute(
@@ -920,7 +935,7 @@ describe("Pi wiring", () => {
 			ctx(cwd),
 		);
 		const missed = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
-		expect(missed.stage).toBe("classify");
+		expect(missed.stage).toBe("blocked");
 		expect(missed.block).toMatchObject({ kind: "questions", resumeStage: "classify" });
 		expect(missed.verification).toMatchObject({ status: "missed", summary: "Verifier found a miss." });
 	});
@@ -993,7 +1008,7 @@ describe("Pi wiring", () => {
 			),
 			ctx(cwd),
 		);
-		expect(readFileSync(loopStatePath(profile, cwd, "feature"))).toBe(before);
+		expect(readFileSync(loopStatePath(profile, cwd, "feature"), "utf8")).toBe(before);
 	});
 
 	test("loop_status reports test-hash and diff staleness without writing", async () => {

@@ -9,6 +9,10 @@ export interface RunMeta {
 	branch?: string;
 	agent?: string;
 	sessionId?: string;
+	loop?: {
+		commit: string;
+		testHashes: { file: string; sha256: string }[];
+	};
 }
 
 export function shellQuote(s: string): string {
@@ -63,6 +67,26 @@ export function readRunHeader(
 		const branch = text(meta?.branch);
 		const agent = text(meta?.agent);
 		const sessionId = text(meta?.sessionId);
+		const loop =
+			meta?.loop &&
+			typeof meta.loop === "object" &&
+			typeof (meta.loop as { commit?: unknown }).commit === "string" &&
+			Array.isArray((meta.loop as { testHashes?: unknown }).testHashes) &&
+			(meta.loop as { testHashes: unknown[] }).testHashes.every(
+				(item) =>
+					item &&
+					typeof item === "object" &&
+					typeof (item as { file?: unknown }).file === "string" &&
+					typeof (item as { sha256?: unknown }).sha256 === "string",
+			)
+				? {
+						commit: (meta.loop as { commit: string }).commit.slice(0, 200),
+						testHashes: (meta.loop as { testHashes: { file: string; sha256: string }[] }).testHashes.map((item) => ({
+							file: item.file.slice(0, 500),
+							sha256: item.sha256.slice(0, 200),
+						})),
+					}
+				: undefined;
 		const pidStartText = text(pidStart);
 		const rawKind = text(pidStartKind);
 		const inferredKind =
@@ -81,6 +105,7 @@ export function readRunHeader(
 				...(branch ? { branch } : {}),
 				...(agent ? { agent } : {}),
 				...(sessionId ? { sessionId } : {}),
+				...(loop ? { loop } : {}),
 			},
 		};
 	} catch {

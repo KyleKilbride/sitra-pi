@@ -12,7 +12,6 @@ import {
 	briefHash,
 	buildBrief,
 	createLoopState,
-	LOOP_RUN_MARKER,
 	nextLoopEffects,
 	recordBuildEvidence,
 	staleReason,
@@ -522,7 +521,7 @@ describe("build and verify slice", () => {
 			diff: "diff --git a/extensions/loop.ts b/extensions/loop.ts",
 			testFiles: ["test/loop.test.ts"],
 			testHashes,
-			redRun: run({ log: "/tmp/red.log", exitCode: 1 }),
+			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
 			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
 			maxVerifierRerunMs: 120_000,
 		});
@@ -627,7 +626,7 @@ describe("build and verify slice", () => {
 			diff: "original diff",
 			testFiles: ["test/loop.test.ts"],
 			testHashes,
-			redRun: run({ log: "/tmp/red.log", exitCode: 1 }),
+			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
 			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
 			maxVerifierRerunMs: 120_000,
 		}).state;
@@ -664,7 +663,7 @@ describe("build and verify slice", () => {
 			diff: "diff",
 			testFiles: ["test/loop.test.ts"],
 			testHashes,
-			redRun: run({ log: "/tmp/red.log", exitCode: 1 }),
+			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
 			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
 			maxVerifierRerunMs: 120_000,
 		}).state;
@@ -744,7 +743,7 @@ describe("build and verify slice", () => {
 			diff: "diff",
 			testFiles: ["test/loop.test.ts"],
 			testHashes,
-			redRun: run({ log: "/tmp/red.log", exitCode: 1 }),
+			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
 			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
 			maxVerifierRerunMs: 120_000,
 		}).state;
@@ -800,7 +799,7 @@ describe("build and verify slice", () => {
 			diff: "diff",
 			testFiles: ["test/loop.test.ts"],
 			testHashes,
-			redRun: run({ log: "/tmp/red.log", exitCode: 1 }),
+			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
 			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
 			maxVerifierRerunMs: 120_000,
 		}).state;
@@ -812,8 +811,7 @@ describe("build and verify slice", () => {
 		expect(blocked.block).toMatchObject({ kind: "stale", resumeStage: "build" });
 	});
 
-	test("exports the loop run marker so build logs do not rely on prose", () => {
-		expect(LOOP_RUN_MARKER).toBe("__SITRA_LOOP_CHECK__=");
+	test("exports the verifier task builder for isolated verifier dispatch", () => {
 		expect(verifierTask).toBeTypeOf("function");
 	});
 });

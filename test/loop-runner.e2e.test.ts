@@ -4,8 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
-import { LOOP_RUN_MARKER } from "../extensions/loop.ts";
-import { EXIT_MARKER } from "../extensions/runs.ts";
+import { EXIT_MARKER, HEADER_MARKER } from "../extensions/runs.ts";
 
 const LOOP_EXT = fileURLToPath(new URL("../extensions/loop-pi.ts", import.meta.url));
 const MODEL = fileURLToPath(new URL("./fixtures/loop-model.ts", import.meta.url));
@@ -66,7 +65,16 @@ function sha256(cwd: string, file: string): string {
 function writeRunLog(path: string, commit: string, testHashes: { file: string; sha256: string }[], exitCode: number) {
 	writeFileSync(
 		path,
-		`${LOOP_RUN_MARKER}${JSON.stringify({ commit, testHashes })}\noutput\n${EXIT_MARKER}${exitCode}\n`,
+		[
+			`${HEADER_MARKER}${JSON.stringify({
+				pid: 12345,
+				pidStart: "1",
+				pidStartKind: "proc",
+				meta: { loop: { commit, testHashes } },
+			})}`,
+			"output",
+			`${EXIT_MARKER}${exitCode}`,
+		].join("\n"),
 	);
 }
 
@@ -425,10 +433,12 @@ async function runBuildVerifyE2e(kind: "pass" | "miss") {
 				if (!recordRequested && text.includes("stage: build")) {
 					recordRequested = true;
 					writeFileSync(join(cwd, "loop.test.ts"), "expect(true).toBe(true)\n");
-					const commit = commitAll(cwd, "materialize loop test");
+					const redCommit = commitAll(cwd, "materialize loop test");
+					writeFileSync(join(cwd, "impl.ts"), "green\n");
+					const greenCommit = commitAll(cwd, "implement");
 					const hashes = [{ file: "loop.test.ts", sha256: sha256(cwd, "loop.test.ts") }];
-					writeRunLog(redLog, commit, hashes, 1);
-					writeRunLog(greenLog, commit, hashes, 0);
+					writeRunLog(redLog, redCommit, hashes, 1);
+					writeRunLog(greenLog, greenCommit, hashes, 0);
 					child.stdin.write(
 						`${JSON.stringify({
 							type: "prompt",
@@ -440,7 +450,7 @@ async function runBuildVerifyE2e(kind: "pass" | "miss") {
 						})}\n`,
 					);
 				}
-				if (!finished && text.includes(kind === "pass" ? "stage: done" : "stage: classify")) {
+				if (!finished && text.includes(kind === "pass" ? "stage: done" : "stage: blocked")) {
 					finished = true;
 					clearTimeout(fail);
 					child.stdin.end();
@@ -460,7 +470,8 @@ async function runBuildVerifyE2e(kind: "pass" | "miss") {
 	});
 	const transcript = JSON.stringify(records);
 	expect(transcript).toContain("Start verifier");
-	expect(transcript).toContain(kind === "pass" ? "stage: done" : "stage: classify");
+	expect(transcript).toContain(kind === "pass" ? "stage: done" : "stage: blocked");
+	if (kind === "miss") expect(transcript).toContain("Verifier found a miss");
 }
 
 test("loop runner e2e: explicit build and verifier pass reach done", async () => {
