@@ -57,7 +57,8 @@ the tower (or running `/radar`) opens **sitra radar** in a right-hand pane: a lo
 icons, scrollable workspaces, a read-only mailbox, and test/build logs. The tower's **Done / Being done / Next** summary
 and keyboard controls stay pinned below every view. You can also ask the tower to spin up a new worker (`spawn_session`) in its own herdr workspace and
 git worktree (branched from the base branch you choose, with `.env` files copied over, `pnpm i && pnpm run build`, and
-an initial grounding prompt so it reads the repo's docs and rules and waits for you to drive it).
+an initial grounding prompt so it reads the repo's docs and rules and waits for you to drive it). When the tower adds a
+spawn brief to that prompt, it is labelled as the tower's brief and the person's own messages and commands override it.
 
 ### Radar controls and data
 

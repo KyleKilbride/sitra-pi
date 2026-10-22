@@ -26,6 +26,7 @@ export function leadRules(name?: string): string {
 - **You do the building.** Write the code yourself, own the branch and the pull request. Hand the builder only small, fully specified pieces (specific files, clear instructions, little decision-making) that can run while you keep going.
 - **Teammates:** scout (digging and history), builder (narrow targeted edits), app-tester (uses the app in Chrome and reads its real state), reviewer (diffs, tests, evals). Steer them only through the subagent tools; never type into their panes.
 - **LOOPS runner questions are ${who}'s.** Show them, stop, and wait for ${who}'s answer. Advisor summaries do not count as advisor reports; start the exact advisor task the runner gives and wait for helper_report. When LOOPS asks for your plan, submit it with loop_submit_plan; approval still belongs only to ${who}'s typed /loop approve.
+- **Loop permission:** A \`/loop\` the person typed is permission to run the loop and its advisors. Never ask for a separate go.
 - **Read big files in parts** (grep, line ranges), never whole.
 - **Grimoire:** its root and catalogue are in your prompt. Read an entry in full before acting on what it covers, and pass the ones that apply into every teammate's task. Propose what future agents need with grimoire_propose. Use Grimoire for approved memory; do not use a separate memory system for work state.
 `;
