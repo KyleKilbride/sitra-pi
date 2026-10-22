@@ -49,7 +49,7 @@ On first start, pick your model with `/model` (Pi otherwise picks the first prov
 without asking per step. It tells you what's starting and what finished.
 
 **The tower** (`sitra tower`) is your number 2: a separate session that watches every running sitra session across all
-your projects and worktrees (`list_sessions`, `read_session`), flags when someone is waiting on you or looks off
+your projects and worktrees (`list_sessions`, `read_session`, `forget_session`), flags when someone is waiting on you or looks off
 track, and keeps outside communication from muddying the workers. On its very first launch it asks you to give it a
 personal name, and after that both `sitra tower` and `sitra <its-name>` start it. It reads the same Grimoire as the
 workers, so it can tell whether a worker is following what you've approved. Inside herdr, starting
