@@ -293,9 +293,21 @@ const LEGACY_RUN_STALE_MS = 15 * 60_000;
 function readFirstLine(file: string): string {
 	const fd = openSync(file, "r");
 	try {
+		const chunks: Buffer[] = [];
 		const buffer = Buffer.alloc(2048);
-		const read = readSync(fd, buffer, 0, buffer.length, 0);
-		return buffer.toString("utf8", 0, read).split("\n")[0] ?? "";
+		let position = 0;
+		while (true) {
+			const read = readSync(fd, buffer, 0, buffer.length, position);
+			if (read <= 0) break;
+			const newline = buffer.subarray(0, read).indexOf(10);
+			if (newline >= 0) {
+				chunks.push(Buffer.from(buffer.subarray(0, newline)));
+				break;
+			}
+			chunks.push(Buffer.from(buffer.subarray(0, read)));
+			position += read;
+		}
+		return Buffer.concat(chunks).toString("utf8");
 	} finally {
 		closeSync(fd);
 	}

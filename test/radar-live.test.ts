@@ -156,7 +156,7 @@ describe("runs know who started them and whether they are still alive", () => {
 		const body = Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n");
 		writeFileSync(
 			join(dir, "2026-10-21T15-59-00-000Z-long.log"),
-			`${HEADER_MARKER}${JSON.stringify({ pid: process.pid, pidStart: currentProcessIdentity().value, pidStartKind: currentProcessIdentity().kind, meta: { label: "long", nonce: "abc" } })}\n${body}\n${EXIT_MARKER}abc=0\n`,
+			`${HEADER_MARKER}${JSON.stringify({ pid: process.pid, pidStart: currentProcessIdentity().value, pidStartKind: currentProcessIdentity().kind, meta: { label: "long", nonce: "abc", command: "x".repeat(3000) } })}\n${body}\n${EXIT_MARKER}abc=0\n`,
 		);
 		const snap = collectRadarSnapshot(profile, { nowMs: NOW });
 		expect(snap.runs[0]).toMatchObject({ label: "long", state: "passed", done: true, exitCode: 0 });
