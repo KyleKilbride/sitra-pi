@@ -8,7 +8,7 @@ import { basename, join } from "node:path";
 import { Type } from "typebox";
 import { HELPER_REPORT_TOOL_SCHEMA, renderHelperReport, validateHelperReport } from "./helper-report.ts";
 import { loopStatePath, readLoopStateFile } from "./loop-pi.ts";
-import { hashFiles, paneCommand, readRun, shellQuote, type RunMeta } from "./runs.ts";
+import { hashFiles, paneCommand, type RunMeta, readRun, shellQuote } from "./runs.ts";
 import { gitBranch, mainCheckout } from "./sessions.ts";
 
 /** The lead's working rules, written for the person it works with (their name, or "the user"). */

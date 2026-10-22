@@ -22,7 +22,9 @@ export interface RunMeta {
 export function hashFiles(worktree: string, files: string[]): { file: string; sha256: string }[] {
 	return files.map((file) => ({
 		file,
-		sha256: createHash("sha256").update(readFileSync(file.startsWith("/") ? file : join(worktree, file))).digest("hex"),
+		sha256: createHash("sha256")
+			.update(readFileSync(file.startsWith("/") ? file : join(worktree, file)))
+			.digest("hex"),
 	}));
 }
 

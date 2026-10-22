@@ -843,7 +843,9 @@ describe("build and verify slice", () => {
 			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
 			maxVerifierRerunMs: 120_000,
 		}).state;
-		expect(staleReason(state, { ...context, testHashes: [{ file: "test/loop.test.ts", sha256: "changed" }] })).toMatchObject({
+		expect(
+			staleReason(state, { ...context, testHashes: [{ file: "test/loop.test.ts", sha256: "changed" }] }),
+		).toMatchObject({
 			kind: "test-hashes",
 		});
 		expect(staleReason(state, { ...context, testHashes, diffHash: "changed" })).toMatchObject({ kind: "diff" });

@@ -193,9 +193,7 @@ async function recordBuildWithLogs(
 	const greenRunId = `green-${nextRunId++}`;
 	writeRunIdLog(profile, redRunId, readFileSync(redLog, "utf8"));
 	writeRunIdLog(profile, greenRunId, readFileSync(greenLog, "utf8"));
-	return tools
-		.get("loop_record_build")
-		?.execute("1", { redRunId, greenRunId }, undefined, undefined, ctx(cwd));
+	return tools.get("loop_record_build")?.execute("1", { redRunId, greenRunId }, undefined, undefined, ctx(cwd));
 }
 
 function status(cwd: string): string {
@@ -776,8 +774,16 @@ describe("Pi wiring", () => {
 		const hash = sha256sum(cwd, "loop.test.ts");
 		const redLog = join(profile, "red-source.log");
 		const greenLog = join(profile, "green-source.log");
-		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
-		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		writeHeaderLoopLog(redLog, {
+			commit: redCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 1,
+		});
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 0,
+		});
 		writeRunIdLog(profile, "red-run", readFileSync(redLog, "utf8"));
 		writeRunIdLog(profile, "green-run", readFileSync(greenLog, "utf8"));
 

@@ -1,12 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, realpathSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { createLoopState, type LoopState } from "../extensions/loop.ts";
-import { loopStatePath, writeLoopStateFile } from "../extensions/loop-pi.ts";
 import { type HelperReport, renderHelperReport } from "../extensions/helper-report.ts";
 import sitraLead from "../extensions/lead.ts";
+import { createLoopState, type LoopState } from "../extensions/loop.ts";
+import { loopStatePath, writeLoopStateFile } from "../extensions/loop-pi.ts";
 import { readRunHeader } from "../extensions/runs.ts";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
@@ -57,7 +57,10 @@ function gitWorktree(): { cwd: string; head: string } {
 	const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
 	execFileSync("git", ["remote", "add", "origin", cwd], { cwd, stdio: "ignore" });
 	execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd, stdio: "ignore" });
-	execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], { cwd, stdio: "ignore" });
+	execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], {
+		cwd,
+		stdio: "ignore",
+	});
 	execFileSync("git", ["checkout", "-b", "feature"], { cwd, stdio: "ignore" });
 	return { cwd, head };
 }
@@ -167,13 +170,9 @@ describe("run_in_pane loop metadata", () => {
 		};
 		writeLoopStateFile(loopStatePath(profile, cwd, "feature"), state);
 
-		const result = await tools.get("run_in_pane")?.execute(
-			"1",
-			{ command: "true", label: "loop red" },
-			undefined,
-			undefined,
-			{ cwd },
-		);
+		const result = await tools
+			.get("run_in_pane")
+			?.execute("1", { command: "true", label: "loop red" }, undefined, undefined, { cwd });
 		const details = result?.details as { log: string; runId: string };
 		const log = details.log;
 		execFileSync("bash", [

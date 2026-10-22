@@ -987,7 +987,13 @@ export function applyVerifierReport(
 
 export function staleReason(
 	state: LoopState,
-	current: { branch: string; baseHead: string; testHashes?: LoopTestHash[]; diffHash?: string; dirtyWorktree?: boolean },
+	current: {
+		branch: string;
+		baseHead: string;
+		testHashes?: LoopTestHash[];
+		diffHash?: string;
+		dirtyWorktree?: boolean;
+	},
 ): StaleReason | undefined {
 	if (state.branch !== current.branch)
 		return { kind: "branch-changed", detail: `branch changed from ${state.branch} to ${current.branch}` };
@@ -1016,7 +1022,13 @@ export function staleReasonText(reason: StaleReason): string {
 
 export function blockForStaleState(
 	state: LoopState,
-	current: { branch: string; baseHead: string; testHashes?: LoopTestHash[]; diffHash?: string; dirtyWorktree?: boolean },
+	current: {
+		branch: string;
+		baseHead: string;
+		testHashes?: LoopTestHash[];
+		diffHash?: string;
+		dirtyWorktree?: boolean;
+	},
 ): { state: LoopState; effects: LoopEffect[] } {
 	const reason = staleReason(state, current);
 	if (!reason) return { state, effects: [] };

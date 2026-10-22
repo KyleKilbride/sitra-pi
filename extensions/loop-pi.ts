@@ -155,19 +155,20 @@ function runsDir(): string {
 }
 
 function runLogForId(runId: string): string {
-	if (!runId || runId.includes("/") || runId.includes("\\")) throw new Error("run id must be a file id from run_in_pane");
+	if (!runId || runId.includes("/") || runId.includes("\\"))
+		throw new Error("run id must be a file id from run_in_pane");
 	return join(runsDir(), `${runId}.log`);
 }
 
 function frozenTestFiles(state: LoopState): string[] {
-	return state.frozenBrief?.advisorRuns.testDesign?.acceptanceTestFiles ?? state.advisorRuns.testDesign?.acceptanceTestFiles ?? [];
+	return (
+		state.frozenBrief?.advisorRuns.testDesign?.acceptanceTestFiles ??
+		state.advisorRuns.testDesign?.acceptanceTestFiles ??
+		[]
+	);
 }
 
-function testsOnlyAncestorProblem(
-	cwd: string,
-	testHashes: LoopTestHash[],
-	redCommit: string,
-): string | undefined {
+function testsOnlyAncestorProblem(cwd: string, testHashes: LoopTestHash[], redCommit: string): string | undefined {
 	try {
 		execFileSync("git", ["merge-base", "--is-ancestor", redCommit, "HEAD"], { cwd, stdio: "ignore" });
 	} catch {
@@ -186,7 +187,8 @@ function testsOnlyAncestorProblem(
 			return `test file ${expected.file} does not exist at red run commit ${redCommit}`;
 		}
 		const actual = createHash("sha256").update(raw).digest("hex");
-		if (actual !== expected.sha256) return `test file ${expected.file} has a different hash at red run commit ${redCommit}`;
+		if (actual !== expected.sha256)
+			return `test file ${expected.file} has a different hash at red run commit ${redCommit}`;
 	}
 	return undefined;
 }
