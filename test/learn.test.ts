@@ -228,9 +228,7 @@ describe("capturing moments in Pi, Claude Code and Codex", () => {
 		const session = join(dir, "session.jsonl");
 		writeFileSync(
 			session,
-			jsonl([
-				{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Waiting." }] } },
-			]),
+			jsonl([{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Waiting." }] } }]),
 		);
 		const saved = { ...process.env };
 		Object.assign(process.env, { SITRA_GRIMOIRE: dir, SITRA_LEARN_SPAWN: "0" });
@@ -250,10 +248,9 @@ describe("capturing moments in Pi, Claude Code and Codex", () => {
 				ui: { setStatus() {}, notify() {} },
 				sessionManager: { getSessionFile: () => session, getSessionId: () => "s1" },
 			};
-			const dispatch = [
-				"LOOPS runner dispatch for stage advise:",
-				'Goal: "Understand what changes in PR 3"',
-			].join("\n");
+			const dispatch = ["LOOPS runner dispatch for stage advise:", 'Goal: "Understand what changes in PR 3"'].join(
+				"\n",
+			);
 			handlers.get("input")?.({ type: "input", source: "extension", text: dispatch }, ctx);
 			handlers.get("before_agent_start")?.(
 				{ systemPromptOptions: { sections: {} }, messageType: "user", prompt: dispatch },
