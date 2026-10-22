@@ -174,6 +174,13 @@ function writeHeaderLoopLog(
 	);
 }
 
+function writeRunIdLog(profile: string, runId: string, contents: string): string {
+	const file = join(profile, "runs", `${runId}.log`);
+	mkdirSync(join(profile, "runs"), { recursive: true });
+	writeFileSync(file, contents);
+	return file;
+}
+
 function status(cwd: string): string {
 	return execFileSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" });
 }
@@ -751,6 +758,39 @@ describe("Pi wiring", () => {
 		const rejected = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
 		expect(rejected.stage).toBe("blocked");
 		expect(rejected.questions.at(-1)?.text).toContain("run header");
+	});
+
+	test("loop_record_build records by run id from the private runs directory, not arbitrary log paths", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		approvedLoop(profile, cwd);
+		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
+		const redCommit = commitAll(cwd, "add tests");
+		writeFileSync(join(cwd, "impl.ts"), "green\n");
+		const greenCommit = commitAll(cwd, "implement");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		const hash = sha256sum(cwd, "loop.test.ts");
+		const redLog = join(profile, "red-source.log");
+		const greenLog = join(profile, "green-source.log");
+		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
+		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		writeRunIdLog(profile, "red-run", readFileSync(redLog, "utf8"));
+		writeRunIdLog(profile, "green-run", readFileSync(greenLog, "utf8"));
+
+		const result = await tools
+			.get("loop_record_build")
+			?.execute("1", { redRunId: "red-run", greenRunId: "green-run" }, undefined, undefined, ctx(cwd));
+		expect(result?.content[0]?.text).toContain("stage: verify");
+		const state = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		expect(state.build.redRunLog).toContain("red-run.log");
+
+		await expect(
+			tools
+				.get("loop_record_build")
+				?.execute("1", { redRunLog: redLog, greenRunLog: greenLog }, undefined, undefined, ctx(cwd)),
+		).rejects.toThrow(/redRunId/);
 	});
 
 	test("loop_record_build requires a clean worktree and a tests-only red ancestor", async () => {

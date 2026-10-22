@@ -1,6 +1,13 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, realpathSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { createLoopState, type LoopState } from "../extensions/loop.ts";
+import { loopStatePath, writeLoopStateFile } from "../extensions/loop-pi.ts";
 import { type HelperReport, renderHelperReport } from "../extensions/helper-report.ts";
 import sitraLead from "../extensions/lead.ts";
+import { readRunHeader } from "../extensions/runs.ts";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
@@ -36,6 +43,24 @@ function fakePi() {
 const content = (text: string) => [{ type: "text", text }];
 
 afterEach(() => vi.unstubAllEnvs());
+
+function gitWorktree(): { cwd: string; head: string } {
+	const cwd = realpathSync(mkdtempSync(join(tmpdir(), "sitra-lead-loop-")));
+	execFileSync("git", ["init", "-b", "main"], { cwd, stdio: "ignore" });
+	writeFileSync(join(cwd, "README.md"), "test\n");
+	writeFileSync(join(cwd, "loop.test.ts"), "expect(true).toBe(true)\n");
+	execFileSync("git", ["add", "."], { cwd, stdio: "ignore" });
+	execFileSync("git", ["-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", "initial"], {
+		cwd,
+		stdio: "ignore",
+	});
+	const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
+	execFileSync("git", ["remote", "add", "origin", cwd], { cwd, stdio: "ignore" });
+	execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd, stdio: "ignore" });
+	execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], { cwd, stdio: "ignore" });
+	execFileSync("git", ["checkout", "-b", "feature"], { cwd, stdio: "ignore" });
+	return { cwd, head };
+}
 
 describe("helper_report", () => {
 	test("only helper sessions get a schema-validated report tool", async () => {
@@ -109,5 +134,56 @@ describe("helper_report", () => {
 		expect(rewritten).toBeUndefined();
 		expect(messages[0]?.content[0]?.text).toBe(renderHelperReport(report));
 		expect(messages[1]?.content[0]?.text).toBe("All good, no details.");
+	});
+});
+
+describe("run_in_pane loop metadata", () => {
+	test("writes active build loop commit and frozen test hashes into the run header", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-lead-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { tools } = fakePi();
+		const { cwd, head } = gitWorktree();
+		const state: LoopState = {
+			...createLoopState({
+				worktree: cwd,
+				branch: "feature",
+				baseRef: "origin/main",
+				baseHead: head,
+				goal: "Add the runner",
+				limits: [],
+				done: [],
+			}),
+			stage: "build",
+			advisorRuns: {
+				testDesign: {
+					status: "done",
+					summary: "tests",
+					evidence: [],
+					openQuestions: [],
+					assumptions: [],
+					acceptanceTestFiles: ["loop.test.ts"],
+				},
+			},
+		};
+		writeLoopStateFile(loopStatePath(profile, cwd, "feature"), state);
+
+		const result = await tools.get("run_in_pane")?.execute(
+			"1",
+			{ command: "true", label: "loop red" },
+			undefined,
+			undefined,
+			{ cwd },
+		);
+		const log = result?.details.log as string;
+		for (let i = 0; i < 100 && !readFileSync(log, "utf8").trim(); i++);
+		const header = readRunHeader(readFileSync(log, "utf8").split("\n")[0] ?? "");
+		expect(header?.meta.loop?.commit).toBe(head);
+		expect(header?.meta.loop?.testHashes).toEqual([
+			{
+				file: "loop.test.ts",
+				sha256: execFileSync("sha256sum", ["loop.test.ts"], { cwd, encoding: "utf8" }).split(/\s+/)[0],
+			},
+		]);
+		expect(result?.details.runId).toBeTypeOf("string");
 	});
 });

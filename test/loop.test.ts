@@ -660,6 +660,25 @@ describe("build and verify slice", () => {
 		expect(answered.frozenBriefHash).toBe(originalHash);
 	});
 
+	test("freezes a brief snapshot at approval instead of filtering post-approval questions by id", () => {
+		const approved = approvedState();
+		const originalHash = approved.frozenBriefHash;
+		const withGitQuestion = {
+			...approved,
+			questions: [
+				...approved.questions,
+				{
+					id: "git-state",
+					text: "Git failed during build.",
+					recommended: "Fix git.",
+					dependsOn: [],
+				},
+			],
+		};
+		expect(briefHash(buildBrief(withGitQuestion))).toBe(originalHash);
+		expect(staleReason(withGitQuestion, context)).toBeUndefined();
+	});
+
 	test("accepts verifier pass to the single done state and miss or blocked reports to classify with a structural block", () => {
 		let state = recordBuildEvidence(startBuild(approvedState()).state, {
 			commit: "commit-a",
@@ -812,6 +831,22 @@ describe("build and verify slice", () => {
 		}).state;
 		expect(blocked.stage).toBe("blocked");
 		expect(blocked.block).toMatchObject({ kind: "stale", resumeStage: "build" });
+	});
+
+	test("stale reasons are structured and not inferred from message text", () => {
+		const state = recordBuildEvidence(startBuild(approvedState()).state, {
+			commit: "commit-a",
+			diff: "diff",
+			testFiles: ["test/loop.test.ts"],
+			testHashes,
+			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
+			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+			maxVerifierRerunMs: 120_000,
+		}).state;
+		expect(staleReason(state, { ...context, testHashes: [{ file: "test/loop.test.ts", sha256: "changed" }] })).toMatchObject({
+			kind: "test-hashes",
+		});
+		expect(staleReason(state, { ...context, testHashes, diffHash: "changed" })).toMatchObject({ kind: "diff" });
 	});
 
 	test("exports the verifier task builder for isolated verifier dispatch", () => {
