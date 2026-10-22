@@ -21,7 +21,9 @@ how agents run, hand back, or wait.
 - **Agents that sleep or poll waste hours.** A broken helper extension (pi-herdr 0.4.0 against herdr 0.9.1) made
   agents fall back to `sleep 60` loops. `run_in_pane` returns at once, and the extension, not the model, watches the run.
 - **`PIPESTATUS` is bash-only.** herdr panes run the person's shell (often zsh), so the exit code came back blank.
-  `paneCommand` always wraps the run in `bash -c` (a zsh test covers it).
+  `run_in_pane` writes a bash script beside the log and types only `bash '<script>'` into the pane.
+- **Fresh herdr panes are not ready immediately.** Shell startup output can drop typed text, so a newly split run pane
+  must first execute a ready-marker `printf` and pass `herdr pane wait-output` before the real run line is typed.
 - **Pi opens a new agent run before delivering a `triggerTurn` message.** The order is `agent_start`, then the custom
   message, then the reply. Test for an assistant reply after the message, not for `agent_start` after it.
 

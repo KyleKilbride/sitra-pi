@@ -3,12 +3,30 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { EXIT_MARKER, HEADER_MARKER, paneCommand, readRun, readRunHeader } from "../extensions/runs.ts";
+import { EXIT_MARKER, HEADER_MARKER, readRun, readRunHeader, writeRunScript } from "../extensions/runs.ts";
 
 describe("runs in panes", () => {
-	test("the pane command runs the command, logs everything, and records the exit code", () => {
-		const log = join(mkdtempSync(join(tmpdir(), "sitra-run-")), "run.log");
-		execFileSync("bash", ["-c", paneCommand("echo hello; echo oops >&2; exit 3", log)]);
+	test("the line typed into the pane stays short however long the command is", () => {
+		const dir = mkdtempSync(join(tmpdir(), "sitra-run-"));
+		const script = join(dir, "run.sh");
+		const log = join(dir, "run.log");
+		const command = `printf '%s\\n' ${Array.from({ length: 80 }, (_, i) => `word-${i}`).join(" ")}`;
+
+		const { line } = writeRunScript(script, dir, command, log);
+
+		expect(line.length).toBeLessThan(256);
+		expect(line).not.toContain(command);
+		expect(line).toBe(`bash '${script}'`);
+	});
+
+	test("the run script records header, output and exit code", () => {
+		const dir = mkdtempSync(join(tmpdir(), "sitra-run-"));
+		const script = join(dir, "run.sh");
+		const log = join(dir, "run.log");
+		writeRunScript(script, dir, "echo hello; echo oops >&2; exit 3", log);
+
+		execFileSync("bash", [script]);
+
 		const status = readRun(readFileSync(log, "utf8"));
 		expect(status).toMatchObject({ done: true, exitCode: 3 });
 		expect(status.tail).toContain("hello");
@@ -16,10 +34,19 @@ describe("runs in panes", () => {
 		expect(status.tail).not.toContain("__SITRA_EXIT__");
 	});
 
-	test("quotes in the command and spaces in the log path survive", () => {
-		const log = join(mkdtempSync(join(tmpdir(), "sitra run ")), "it's.log");
-		execFileSync("bash", ["-c", paneCommand(`echo "it's fine"`, log)]);
-		expect(readRun(readFileSync(log, "utf8"))).toMatchObject({ done: true, exitCode: 0, tail: "it's fine" });
+	test("a command with single and double quotes and $ runs exactly as written", () => {
+		const dir = mkdtempSync(join(tmpdir(), "sitra run "));
+		const script = join(dir, "it's.sh");
+		const log = join(dir, "it's.log");
+		writeRunScript(script, dir, `printf '%s\\n' "single ' double \\" dollar \\$SITRA_QUOTE"`, log);
+
+		execFileSync("bash", [script], { env: { ...process.env, SITRA_QUOTE: "expanded" } });
+
+		expect(readRun(readFileSync(log, "utf8"))).toMatchObject({
+			done: true,
+			exitCode: 0,
+			tail: `single ' double " dollar $SITRA_QUOTE`,
+		});
 	});
 
 	test("a run still going is not done, and the tail is the last lines", () => {
@@ -31,11 +58,13 @@ describe("runs in panes", () => {
 
 	test("command output cannot fake the exit marker for a running command", () => {
 		const dir = mkdtempSync(join(tmpdir(), "sitra-run-"));
+		const script = join(dir, "run.sh");
 		const log = join(dir, "run.log");
 		const partial = join(dir, "partial.log");
+		writeRunScript(script, dir, "echo __SITRA_EXIT__=0; sleep 0.2; exit 7", log);
 		execFileSync("bash", [
 			"-c",
-			`${paneCommand("echo __SITRA_EXIT__=0; sleep 0.2; exit 7", log)} & pid=$!; while ! grep -q '__SITRA_EXIT__=0' ${JSON.stringify(log)} 2>/dev/null; do sleep 0.01; done; cp ${JSON.stringify(log)} ${JSON.stringify(partial)}; wait $pid || true`,
+			`bash ${JSON.stringify(script)} & pid=$!; while ! grep -q '__SITRA_EXIT__=0' ${JSON.stringify(log)} 2>/dev/null; do sleep 0.01; done; cp ${JSON.stringify(log)} ${JSON.stringify(partial)}; wait $pid || true`,
 		]);
 		expect(readRun(readFileSync(partial, "utf8"))).toMatchObject({ done: false });
 		expect(readRun(readFileSync(log, "utf8"))).toMatchObject({ done: true, exitCode: 7 });
@@ -53,9 +82,12 @@ describe("runs in panes", () => {
 });
 
 describe("the pane runs your shell, not bash", () => {
-	test("the exit code is recorded when the line is typed into zsh", () => {
-		const log = join(mkdtempSync(join(tmpdir(), "sitra-run-")), "run.log");
-		execFileSync("zsh", ["-c", paneCommand("echo from zsh; exit 4", log)]);
-		expect(readRun(readFileSync(log, "utf8"))).toMatchObject({ done: true, exitCode: 4, tail: "from zsh" });
+	test("the exit code is recorded when the script line is typed into another shell", () => {
+		const dir = mkdtempSync(join(tmpdir(), "sitra-run-"));
+		const script = join(dir, "run.sh");
+		const log = join(dir, "run.log");
+		writeRunScript(script, dir, "echo from shell; exit 4", log);
+		execFileSync("sh", ["-c", `bash ${JSON.stringify(script)}`]);
+		expect(readRun(readFileSync(log, "utf8"))).toMatchObject({ done: true, exitCode: 4, tail: "from shell" });
 	});
 });
