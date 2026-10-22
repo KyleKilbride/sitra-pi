@@ -175,7 +175,10 @@ describe("run_in_pane loop metadata", () => {
 			{ cwd },
 		);
 		const log = result?.details.log as string;
-		for (let i = 0; i < 100 && (!existsSync(log) || !readFileSync(log, "utf8").trim()); i++);
+		execFileSync("bash", [
+			"-c",
+			`for i in {1..50}; do [ -s ${JSON.stringify(log)} ] && exit 0; sleep 0.05; done; exit 1`,
+		]);
 		const header = readRunHeader(readFileSync(log, "utf8").split("\n")[0] ?? "");
 		expect(header?.meta.loop?.commit).toBe(head);
 		expect(header?.meta.loop?.testHashes).toEqual([

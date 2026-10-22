@@ -792,7 +792,7 @@ describe("Pi wiring", () => {
 			tools
 				.get("loop_record_build")
 				?.execute("1", { redRunLog: redLog, greenRunLog: greenLog }, undefined, undefined, ctx(cwd)),
-		).rejects.toThrow(/redRunId/);
+		).rejects.toThrow(/run id/);
 	});
 
 	test("loop_record_build requires a clean worktree and a tests-only red ancestor", async () => {
@@ -1074,6 +1074,7 @@ describe("Pi wiring", () => {
 			?.handler(`record-build ${JSON.stringify({ redRunId: "status-red", greenRunId: "status-green" })}`, ctx(cwd));
 		const path = loopStatePath(profile, cwd, "feature");
 		writeFileSync(join(cwd, "loop.test.ts"), "changed\n");
+		commitAll(cwd, "change test after verifier dispatch");
 		const before = readFileSync(path, "utf8");
 		const result = await tools.get("loop_status")?.execute("1", {}, undefined, undefined, ctx(cwd));
 		expect(result?.content[0]?.text).toContain("stale: test hashes");
