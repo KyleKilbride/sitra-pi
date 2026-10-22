@@ -17,6 +17,14 @@ function gitWorktree(): string {
 		cwd,
 		stdio: "ignore",
 	});
+	const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
+	execFileSync("git", ["remote", "add", "origin", cwd], { cwd, stdio: "ignore" });
+	execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd, stdio: "ignore" });
+	execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], {
+		cwd,
+		stdio: "ignore",
+	});
+	execFileSync("git", ["checkout", "-b", "feature"], { cwd, stdio: "ignore" });
 	return cwd;
 }
 

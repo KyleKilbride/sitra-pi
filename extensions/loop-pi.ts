@@ -14,13 +14,15 @@ import {
 	applyAdvisorReport,
 	applyLeadPlan,
 	approveBrief,
+	blockForAdvisorIntakeFailure,
 	blockForStaleState,
 	type LoopEffect,
 	type LoopState,
 	roleForAgent,
+	STALE_STATE_QUESTION_ID,
 	staleReason,
 	startLoop,
-	tokenCountFromSubagentResult,
+	tokensFromSubagentResult,
 	validateLoopState,
 } from "./loop.ts";
 
@@ -113,11 +115,19 @@ interface GitState {
 	baseHead: string;
 }
 
-function currentGit(cwd: string, baseRef = "main"): GitState {
+function currentGit(cwd: string, baseRef = defaultBaseRef(cwd)): GitState {
 	const worktree = git(cwd, ["rev-parse", "--show-toplevel"]);
 	const branch = git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
 	const baseHead = git(cwd, ["rev-parse", baseRef]);
 	return { worktree, branch, baseRef, baseHead };
+}
+
+function defaultBaseRef(cwd: string): string {
+	return git(cwd, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+}
+
+function currentGitForState(cwd: string, state: LoopState): GitState {
+	return currentGit(cwd, state.baseRef);
 }
 
 function tryCurrentGit(cwd: string): GitState | undefined {
@@ -139,6 +149,19 @@ function splitCommand(args: string): { verb: string; rest: string } {
 	return { verb: trimmed.slice(0, space), rest: trimmed.slice(space + 1).trim() };
 }
 
+function parseStart(rest: string): { baseRef?: string; goal: string } {
+	const prefix = "--base ";
+	if (!rest.startsWith(prefix)) return { goal: rest };
+	const after = rest.slice(prefix.length).trim();
+	const space = after.indexOf(" ");
+	if (space < 0) throw new Error("usage: /loop start [--base <ref>] <task>");
+	return { baseRef: after.slice(0, space), goal: after.slice(space + 1).trim() };
+}
+
+function isBaseBranch(branch: string, baseRef: string): boolean {
+	return branch === baseRef || `origin/${branch}` === baseRef || baseRef.endsWith(`/${branch}`);
+}
+
 function loadCurrentState(gitState: GitState): LoopState {
 	return readLoopStateFile(statePathFor(gitState));
 }
@@ -146,12 +169,11 @@ function loadCurrentState(gitState: GitState): LoopState {
 function loadMutableState(gitState: GitState): LoopState {
 	const path = statePathFor(gitState);
 	const state = readLoopStateFile(path);
+	const reason = staleReason(state, { branch: gitState.branch, baseHead: gitState.baseHead });
+	if (!reason) return state;
 	const blocked = blockForStaleState(state, { branch: gitState.branch, baseHead: gitState.baseHead });
-	if (blocked.state.stage !== "blocked") return state;
 	writeLoopStateFile(path, blocked.state);
-	throw new Error(
-		`loop state is stale: ${staleReason(state, { branch: gitState.branch, baseHead: gitState.baseHead })}`,
-	);
+	throw new Error(`loop state is stale: ${reason}`);
 }
 
 function advisorName(role: AdvisorRole): string {
@@ -191,17 +213,19 @@ function emitEffects(pi: Pi, state: LoopState, effects: LoopEffect[]): void {
 
 async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> {
 	const { verb, rest } = splitCommand(args);
-	const gitState = currentGit(ctx.cwd);
-	const path = statePathFor(gitState);
 	if (verb === "start") {
 		if (!rest) throw new Error("usage: /loop start <task>");
+		const parsed = parseStart(rest);
+		const gitState = currentGit(ctx.cwd, parsed.baseRef ?? defaultBaseRef(ctx.cwd));
+		if (isBaseBranch(gitState.branch, gitState.baseRef)) throw new Error("refusing to start a loop on the base branch");
+		const path = statePathFor(gitState);
 		if (existsSync(path)) throw new Error(`loop state already exists for ${gitState.worktree} on ${gitState.branch}`);
 		const result = startLoop({
 			worktree: gitState.worktree,
 			branch: gitState.branch,
 			baseRef: gitState.baseRef,
 			baseHead: gitState.baseHead,
-			goal: rest,
+			goal: parsed.goal,
 			limits: [],
 			done: [],
 			grimoire: grimoireStoreStatus(grimoireDir(process.env)),
@@ -210,9 +234,16 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 		emitEffects(pi, result.state, result.effects);
 		return;
 	}
+	const initial = currentGit(ctx.cwd);
+	const path = statePathFor(initial);
+	const currentState = readLoopStateFile(path);
+	const gitState = currentGitForState(ctx.cwd, currentState);
 	if (verb === "answer") {
 		if (!rest) throw new Error("usage: /loop answer <answer>");
-		const state = readLoopStateFile(path);
+		const rawState = currentState;
+		const isStaleAnswer =
+			rawState.stage === "blocked" && rawState.questions.some((question) => question.id === STALE_STATE_QUESTION_ID);
+		const state = isStaleAnswer ? rawState : loadMutableState(gitState);
 		const result = answerLoopQuestion(state, { answer: rest, current: gitState });
 		writeLoopStateFile(path, result.state);
 		emitEffects(pi, result.state, result.effects);
@@ -241,24 +272,55 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 
 async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<void> {
 	if (!event || typeof event !== "object") return;
-	const gitState = tryCurrentGit(ctx.cwd);
-	if (!gitState) return;
-	const path = statePathFor(gitState);
+	const initial = tryCurrentGit(ctx.cwd);
+	if (!initial) return;
+	const path = statePathFor(initial);
 	if (!existsSync(path)) return;
 	const state = readLoopStateFile(path);
+	const gitState = currentGitForState(ctx.cwd, state);
 	const raw = event as Record<string, unknown>;
 	const role = roleForAgent(raw.agent);
 	if (!role || !state.dispatchedAdvisors.includes(role)) return;
 	if (state.stage !== "advise" && state.stage !== "architecture-review") return;
-	if (typeof raw.sessionFile !== "string" || !raw.sessionFile)
-		throw new Error("subagent_result is missing sessionFile");
-	const tokenCount = tokenCountFromSubagentResult(raw);
-	if (tokenCount === undefined) throw new Error("subagent_result is missing outputTokens/contextTokens");
-	const report = readHelperReport(raw.sessionFile);
+	const stale = blockForStaleState(state, { branch: gitState.branch, baseHead: gitState.baseHead });
+	if (stale.state.stage === "blocked") {
+		writeLoopStateFile(path, stale.state);
+		emitEffects(pi, stale.state, stale.effects);
+		return;
+	}
+	const block = (reason: string) => {
+		const blocked = blockForAdvisorIntakeFailure(state, role, reason);
+		writeLoopStateFile(path, blocked.state);
+		emitEffects(pi, blocked.state, blocked.effects);
+	};
+	if (typeof raw.sessionFile !== "string" || !raw.sessionFile) {
+		block("subagent_result is missing sessionFile");
+		return;
+	}
+	const tokens = tokensFromSubagentResult(raw);
+	let report: unknown;
+	try {
+		report = readHelperReport(raw.sessionFile);
+	} catch (error) {
+		block(String(error));
+		return;
+	}
 	const valid = validateHelperReport(report);
-	if (!valid.ok) throw new Error(`invalid helper_report from ${raw.sessionFile}: ${valid.reason}`);
-	if (!valid.report.role) throw new Error(`invalid helper_report from ${raw.sessionFile}: missing role`);
-	const result = applyAdvisorReport(state, valid.report, { tokenCount });
+	if (!valid.ok) {
+		block(`invalid helper_report from ${raw.sessionFile}: ${valid.reason}`);
+		return;
+	}
+	if (!valid.report.role) {
+		block(`invalid helper_report from ${raw.sessionFile}: missing role`);
+		return;
+	}
+	let result: { state: LoopState; effects: LoopEffect[] };
+	try {
+		result = applyAdvisorReport(state, valid.report, tokens);
+	} catch (error) {
+		block(String(error));
+		return;
+	}
 	writeLoopStateFile(path, result.state);
 	emitEffects(pi, result.state, result.effects);
 }
@@ -266,16 +328,10 @@ async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<v
 function findHelperReport(input: unknown): unknown | undefined {
 	if (!input || typeof input !== "object") return undefined;
 	const record = input as Record<string, unknown>;
-	if (record.toolName === "helper_report" && "details" in record) return record.details;
+	if (record.toolName === "helper_report" && record.isError !== true && "details" in record) return record.details;
 	if (record.message) {
 		const found = findHelperReport(record.message);
 		if (found !== undefined) return found;
-	}
-	if (Array.isArray(record.entries)) {
-		for (const entry of record.entries) {
-			const found = findHelperReport(entry);
-			if (found !== undefined) return found;
-		}
 	}
 	return undefined;
 }
@@ -287,6 +343,7 @@ function readHelperReport(sessionFile: string): unknown {
 	} catch (error) {
 		throw new Error(`could not read helper session file ${sessionFile}: ${String(error)}`);
 	}
+	let latest: unknown;
 	for (const line of raw.split("\n")) {
 		const trimmed = line.trim();
 		if (!trimmed) continue;
@@ -297,8 +354,9 @@ function readHelperReport(sessionFile: string): unknown {
 			throw new Error(`invalid helper session JSON in ${sessionFile}: ${String(error)}`);
 		}
 		const report = findHelperReport(parsed);
-		if (report !== undefined) return report;
+		if (report !== undefined) latest = report;
 	}
+	if (latest !== undefined) return latest;
 	throw new Error(`helper_report tool result not found in ${sessionFile}`);
 }
 
@@ -324,10 +382,14 @@ export default function sitraLoop(pi: Pi): void {
 		promptSnippet: "loop_status: read the current LOOPS runner stage and frozen brief status",
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
-			const gitState = currentGit(ctx.cwd);
-			const state = loadCurrentState(gitState);
+			const initial = currentGit(ctx.cwd);
+			const state = loadCurrentState(initial);
+			const gitState = currentGitForState(ctx.cwd, state);
 			const stale = staleReason(state, { branch: gitState.branch, baseHead: gitState.baseHead });
-			const tokens = Object.values(state.advisorRuns).reduce((sum, run) => sum + (run?.tokenCount ?? 0), 0);
+			const tokens = Object.values(state.advisorRuns).reduce(
+				(sum, run) => sum + (run?.outputTokens ?? 0) + (run?.contextTokens ?? 0),
+				0,
+			);
 			return {
 				content: [
 					{

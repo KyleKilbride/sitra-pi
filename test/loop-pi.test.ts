@@ -55,6 +55,13 @@ function gitWorktree(): { cwd: string; head: string } {
 		stdio: "ignore",
 	});
 	const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
+	execFileSync("git", ["remote", "add", "origin", cwd], { cwd, stdio: "ignore" });
+	execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd, stdio: "ignore" });
+	execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], {
+		cwd,
+		stdio: "ignore",
+	});
+	execFileSync("git", ["checkout", "-b", "feature"], { cwd, stdio: "ignore" });
 	return { cwd, head };
 }
 
@@ -70,14 +77,21 @@ function helperReport(role: string, details: unknown, openQuestions: string[] = 
 	};
 }
 
-function sessionFileWithHelperReport(report: unknown): string {
+function sessionFileWithEntries(entries: unknown[]): string {
 	const dir = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-session-")));
 	const file = join(dir, "session.jsonl");
-	writeFileSync(
-		file,
-		`${JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "helper_report", details: report } })}\n`,
-	);
+	writeFileSync(file, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
 	return file;
+}
+
+function sessionFileWithHelperReport(report: unknown): string {
+	return sessionFileWithEntries([
+		{ type: "message", message: { role: "toolResult", toolName: "helper_report", details: report } },
+	]);
+}
+
+function failedHelperEntry() {
+	return { type: "message", message: { role: "toolResult", toolName: "helper_report", isError: true, details: {} } };
 }
 
 function subagentResult(agent: string, sessionFile: string, tokens = { outputTokens: 30, contextTokens: 70 }) {
@@ -115,7 +129,15 @@ describe("loop state files", () => {
 		writeFileSync(
 			file,
 			JSON.stringify(
-				createLoopState({ worktree: "/repo", branch: "main", baseHead: "base", goal: "goal", limits: [], done: [] }),
+				createLoopState({
+					worktree: "/repo",
+					branch: "main",
+					baseRef: "origin/main",
+					baseHead: "base",
+					goal: "goal",
+					limits: [],
+					done: [],
+				}),
 			),
 		);
 		expect(readLoopStateFile(file).stage).toBe("advise");
@@ -138,9 +160,10 @@ describe("Pi wiring", () => {
 
 		await commands.get("loop")?.handler("start Add the runner", ctx(cwd));
 
-		const files = readFileSync(loopStatePath(profile, cwd, "main"), "utf8");
+		const files = readFileSync(loopStatePath(profile, cwd, "feature"), "utf8");
 		expect(files).toContain("Add the runner");
 		expect(files).toContain(head);
+		expect(files).toContain("origin/main");
 		expect(userMessages.join("\n")).toContain("intent-advisor");
 		expect(userMessages.join("\n")).toContain("codebase-advisor");
 		await expect(commands.get("loop")?.handler("start Again", ctx(cwd))).rejects.toThrow(/already exists/);
@@ -152,7 +175,7 @@ describe("Pi wiring", () => {
 		const { commands, tools } = fakePi();
 		const { cwd } = gitWorktree();
 		await commands.get("loop")?.handler("start Add the runner", ctx(cwd));
-		const path = loopStatePath(profile, cwd, "main");
+		const path = loopStatePath(profile, cwd, "feature");
 		const state = readLoopStateFile(path);
 		writeLoopStateFile(path, { ...state, branch: "old-main" });
 		const before = readFileSync(path, "utf8");
@@ -194,15 +217,24 @@ describe("Pi wiring", () => {
 			ctx(cwd),
 		);
 
-		expect(readLoopStateFile(loopStatePath(profile, cwd, "main")).advisorRuns.intent?.tokenCount).toBe(100);
+		const sessionFile = sessionFileWithEntries([
+			failedHelperEntry(),
+			{
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolName: "helper_report",
+					details: helperReport("test-design", {
+						acceptanceTests: [{ name: "x", proves: "y", targetFile: "z", command: "pnpm test" }],
+					}),
+				},
+			},
+		]);
+		expect(readLoopStateFile(loopStatePath(profile, cwd, "feature")).advisorRuns.intent?.outputTokens).toBe(30);
 		expect(userMessages.join("\n")).toContain("test-design-advisor");
 
-		await expect(
-			handlers.get("message_end")?.(
-				subagentResult("test-design-advisor", sessionFileWithHelperReport({ status: "done-ish" })),
-				ctx(cwd),
-			),
-		).rejects.toThrow(/invalid helper_report/);
+		await handlers.get("message_end")?.(subagentResult("test-design-advisor", sessionFile), ctx(cwd));
+		expect(readLoopStateFile(loopStatePath(profile, cwd, "feature")).advisorRuns.testDesign?.contextTokens).toBe(70);
 	});
 
 	test("ordinary teammate results are ignored when no state or advisor dispatch matches", async () => {
@@ -219,13 +251,34 @@ describe("Pi wiring", () => {
 		await expect(handlers.get("message_end")?.(result, ctx(cwd))).resolves.toBeUndefined();
 	});
 
+	test("intake failures block with one advisor question and can be answered", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers } = fakePi();
+		const { cwd } = gitWorktree();
+		await commands.get("loop")?.handler("start Add the runner", ctx(cwd));
+		await handlers.get("message_end")?.(
+			subagentResult("intent-advisor", join(profile, "missing-session.jsonl")),
+			ctx(cwd),
+		);
+		const blocked = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		expect(blocked.stage).toBe("blocked");
+		expect(blocked.questions).toHaveLength(1);
+		expect(blocked.questions[0]?.text).toContain("intent");
+		expect(blocked.questions[0]?.text).toContain("could not read");
+		await commands.get("loop")?.handler("answer retry intent", ctx(cwd));
+		const answered = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		expect(answered.stage).toBe("advise");
+		expect(answered.dispatchedAdvisors).toEqual(["intent"]);
+	});
+
 	test("stale blocking through wiring can be left by /loop answer", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
 		const { commands } = fakePi();
 		const { cwd, head } = gitWorktree();
 		await commands.get("loop")?.handler("start Add the runner", ctx(cwd));
-		const path = loopStatePath(profile, cwd, "main");
+		const path = loopStatePath(profile, cwd, "feature");
 		const state = readLoopStateFile(path);
 		writeLoopStateFile(path, { ...state, branch: "old-main" });
 		await expect(commands.get("loop")?.handler("plan should fail", ctx(cwd))).rejects.toThrow(/stale/);
@@ -234,8 +287,37 @@ describe("Pi wiring", () => {
 		await commands.get("loop")?.handler("answer continue on current branch", ctx(cwd));
 		const answered = readLoopStateFile(path);
 		expect(answered.stage).toBe("advise");
-		expect(answered.branch).toBe("main");
+		expect(answered.branch).toBe("feature");
 		expect(answered.baseHead).toBe(head);
-		expect(staleReason(answered, { branch: "main", baseHead: head })).toBeUndefined();
+		expect(staleReason(answered, { branch: "feature", baseHead: head })).toBeUndefined();
+	});
+
+	test("reports and ordinary answers run stale checks before changing state", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers } = fakePi();
+		const { cwd } = gitWorktree();
+		await commands.get("loop")?.handler("start Add the runner", ctx(cwd));
+		const path = loopStatePath(profile, cwd, "feature");
+		const state = readLoopStateFile(path);
+		writeLoopStateFile(path, { ...state, branch: "old-feature" });
+		await handlers.get("message_end")?.(
+			subagentResult(
+				"intent-advisor",
+				sessionFileWithHelperReport(helperReport("intent", { questions: [], doneCandidates: [], ambiguities: [] })),
+			),
+			ctx(cwd),
+		);
+		expect(readLoopStateFile(path).stage).toBe("blocked");
+
+		writeLoopStateFile(path, {
+			...state,
+			stage: "needs-person",
+			branch: "old-feature",
+			questions: [{ id: "q1", text: "Question?", recommended: "Answer.", dependsOn: [] }],
+			dispatchedAdvisors: [],
+		});
+		await expect(commands.get("loop")?.handler("answer ordinary answer", ctx(cwd))).rejects.toThrow(/stale/);
+		expect(readLoopStateFile(path).questions[0]?.answer).toBeUndefined();
 	});
 });

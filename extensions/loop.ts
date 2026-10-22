@@ -67,7 +67,8 @@ const AdvisorRun = Type.Object(
 		evidence: Type.Array(Type.String()),
 		openQuestions: Type.Array(Question),
 		assumptions: Type.Array(Type.String()),
-		tokenCount: Type.Number(),
+		outputTokens: Type.Optional(Type.Number()),
+		contextTokens: Type.Optional(Type.Number()),
 	},
 	{ additionalProperties: false },
 );
@@ -132,6 +133,7 @@ export const LOOP_STATE_SCHEMA = Type.Object(
 		baseHead: Type.String(),
 		stage: LoopStageSchema,
 		blockedFrom: Type.Optional(LoopStageSchema),
+		blockedAdvisor: Type.Optional(AdvisorRoleSchema),
 		goal: Type.String(),
 		limits: Type.Array(Type.String()),
 		done: Type.Array(Type.String()),
@@ -206,7 +208,7 @@ export function validateLoopState(input: unknown): { ok: true; state: LoopState 
 export function createLoopState(input: {
 	worktree: string;
 	branch: string;
-	baseRef?: string;
+	baseRef: string;
 	baseHead: string;
 	goal: string;
 	limits: string[];
@@ -216,7 +218,7 @@ export function createLoopState(input: {
 		version: 1,
 		worktree: input.worktree,
 		branch: input.branch,
-		baseRef: input.baseRef ?? "main",
+		baseRef: input.baseRef,
 		baseHead: input.baseHead,
 		stage: "advise",
 		goal: input.goal,
@@ -298,10 +300,16 @@ function dispatch(state: LoopState, roles: AdvisorRole[]): { state: LoopState; e
 	};
 }
 
-export function tokenCountFromSubagentResult(details: Record<string, unknown>): number | undefined {
+export function tokensFromSubagentResult(details: Record<string, unknown>): {
+	outputTokens?: number;
+	contextTokens?: number;
+} {
 	const output = details.outputTokens;
 	const context = details.contextTokens;
-	return typeof output === "number" && typeof context === "number" ? output + context : undefined;
+	return {
+		...(typeof output === "number" ? { outputTokens: output } : {}),
+		...(typeof context === "number" ? { contextTokens: context } : {}),
+	};
 }
 
 function groupedQuestion(id: string, reason: string, questions: LoopQuestion[]): LoopQuestion {
@@ -328,7 +336,7 @@ function grimoireQuestion(status: Extract<GrimoireStoreStatus, { state: "unreada
 export function startLoop(input: {
 	worktree: string;
 	branch: string;
-	baseRef?: string;
+	baseRef: string;
 	baseHead: string;
 	goal: string;
 	limits: string[];
@@ -349,11 +357,11 @@ export function startLoop(input: {
 function reportQuestions(role: HelperReportRole, report: HelperReport): LoopQuestion[] {
 	const out: LoopQuestion[] = [];
 	if (role === "intent") {
-		const details = report.details as { questions?: LoopQuestion[] };
-		for (const question of details.questions ?? []) out.push(question);
+		const details = report.details as { questions: LoopQuestion[] };
+		for (const question of details.questions) out.push(question);
+		return out;
 	}
 	for (const [index, text] of report.openQuestions.entries()) {
-		if (out.some((question) => question.text === text)) continue;
 		out.push({
 			id: `${role}-open-${index + 1}`,
 			text,
@@ -372,7 +380,11 @@ function reportQuestions(role: HelperReportRole, report: HelperReport): LoopQues
 	return out;
 }
 
-function toAdvisorRun(role: HelperReportRole, report: HelperReport, tokenCount: number): AdvisorRun {
+function toAdvisorRun(
+	role: HelperReportRole,
+	report: HelperReport,
+	tokens: { outputTokens?: number; contextTokens?: number },
+): AdvisorRun {
 	const schema = ROLE_HELPER_REPORT_SCHEMAS[role];
 	if (!Value.Check(schema, report)) {
 		const [first] = Value.Errors(schema, report);
@@ -385,7 +397,7 @@ function toAdvisorRun(role: HelperReportRole, report: HelperReport, tokenCount: 
 		evidence: report.evidence,
 		openQuestions: reportQuestions(role, report),
 		assumptions: report.assumptions,
-		tokenCount,
+		...tokens,
 	};
 	return run;
 }
@@ -398,7 +410,12 @@ function adviseEffects(state: LoopState): { state: LoopState; effects: LoopEffec
 		const earlyQuestions = [...intent.openQuestions, ...codebase.openQuestions];
 		if (earlyQuestions.length > 0) {
 			const question = groupedQuestion("advisor-questions", "Advisor questions need an answer.", earlyQuestions);
-			const next = { ...state, stage: "needs-person" as const, questions: [question], dispatchedAdvisors: [] };
+			const next = {
+				...state,
+				stage: "needs-person" as const,
+				questions: [...state.questions, question],
+				dispatchedAdvisors: [],
+			};
 			return { state: next, effects: [{ type: "ask-person", reason: "advisor-questions", question }] };
 		}
 		if (!testDesign) return dispatch(state, ["test-design"]);
@@ -406,12 +423,19 @@ function adviseEffects(state: LoopState): { state: LoopState; effects: LoopEffec
 		const allQuestions = [...testDesign.openQuestions];
 		if (allQuestions.length > 0) {
 			const question = groupedQuestion("advisor-questions", "Advisor questions need an answer.", allQuestions);
-			const next = { ...state, stage: "needs-person" as const, questions: [question], dispatchedAdvisors: [] };
+			const next = {
+				...state,
+				stage: "needs-person" as const,
+				questions: [...state.questions, question],
+				dispatchedAdvisors: [],
+			};
 			return { state: next, effects: [{ type: "ask-person", reason: "advisor-questions", question }] };
 		}
 		const next = { ...state, stage: "plan" as const, dispatchedAdvisors: [] };
 		return { state: next, effects: [{ type: "write-lead-plan", brief: buildBrief(next) }] };
 	}
+	if (intent && !codebase && state.dispatchedAdvisors.length === 0) return dispatch(state, ["codebase"]);
+	if (!intent && codebase && state.dispatchedAdvisors.length === 0) return dispatch(state, ["intent"]);
 	if (!intent && !codebase) return dispatch(state, ["intent", "codebase"]);
 	return { state, effects: [] };
 }
@@ -421,13 +445,18 @@ function architectureEffects(state: LoopState): { state: LoopState; effects: Loo
 	if (!run && !state.dispatchedAdvisors.includes("architecture")) return dispatch(state, ["architecture"]);
 	if (!run) return { state, effects: [] };
 	if (state.dispatchedAdvisors.includes("architecture")) return { state, effects: [] };
-	if (run.openQuestions.length > 0 || run.status === "blocked") {
+	if (run.openQuestions.length > 0) {
 		const question = groupedQuestion(
 			"architecture-questions",
 			"Architecture questions need an answer.",
 			run.openQuestions,
 		);
-		const next = { ...state, stage: "needs-person" as const, questions: [question], dispatchedAdvisors: [] };
+		const next = {
+			...state,
+			stage: "needs-person" as const,
+			questions: [...state.questions, question],
+			dispatchedAdvisors: [],
+		};
 		return { state: next, effects: [{ type: "ask-person", reason: "architecture-questions", question }] };
 	}
 	const question: LoopQuestion = {
@@ -450,7 +479,7 @@ export function nextLoopEffects(state: LoopState): LoopEffect[] {
 export function applyAdvisorReport(
 	state: LoopState,
 	report: HelperReport,
-	options: { tokenCount: number },
+	options: { outputTokens?: number; contextTokens?: number },
 ): { state: LoopState; effects: LoopEffect[] } {
 	if (state.stage !== "advise" && state.stage !== "architecture-review")
 		throw new Error(`cannot apply advisor report while stage is ${state.stage}`);
@@ -461,7 +490,7 @@ export function applyAdvisorReport(
 	const next: LoopState = {
 		...state,
 		dispatchedAdvisors: state.dispatchedAdvisors.filter((role) => role !== report.role),
-		advisorRuns: { ...state.advisorRuns, [key]: toAdvisorRun(report.role, report, options.tokenCount) },
+		advisorRuns: { ...state.advisorRuns, [key]: toAdvisorRun(report.role, report, options) },
 	};
 	if (state.stage === "architecture-review") return architectureEffects(next);
 	return adviseEffects(next);
@@ -485,7 +514,9 @@ export function answerLoopQuestion(
 ): { state: LoopState; effects: LoopEffect[] } {
 	if (state.stage !== "needs-person" && state.stage !== "blocked")
 		throw new Error(`cannot answer while stage is ${state.stage}`);
-	const answered = state.questions.map((question) => ({ ...question, answer: input.answer }));
+	const answered = state.questions.map((question) =>
+		question.answer ? question : { ...question, answer: input.answer },
+	);
 	const isStaleAnswer = state.questions.some((question) => question.id === STALE_STATE_QUESTION_ID);
 	if (isStaleAnswer) {
 		const nextStage = state.blockedFrom ?? "advise";
@@ -493,6 +524,7 @@ export function answerLoopQuestion(
 			...state,
 			stage: nextStage,
 			blockedFrom: undefined,
+			blockedAdvisor: undefined,
 			branch: input.current.branch,
 			baseHead: input.current.baseHead,
 			questions: answered,
@@ -500,6 +532,17 @@ export function answerLoopQuestion(
 		};
 		const next = state.frozenBriefHash ? { ...updated, frozenBriefHash: briefHash(buildBrief(updated)) } : updated;
 		return { state: next, effects: nextLoopEffects(next) };
+	}
+	if (state.blockedAdvisor) {
+		const next: LoopState = {
+			...state,
+			stage: state.blockedFrom ?? "advise",
+			blockedFrom: undefined,
+			blockedAdvisor: undefined,
+			questions: answered,
+			dispatchedAdvisors: [],
+		};
+		return dispatch(next, [state.blockedAdvisor]);
 	}
 	const roles = affectedAdvisors(state);
 	const advisorRuns = { ...state.advisorRuns };
@@ -559,8 +602,31 @@ export function blockForStaleState(
 		...state,
 		stage: "blocked",
 		blockedFrom: state.stage,
+		blockedAdvisor: undefined,
 		questions: [question],
 		dispatchedAdvisors: [],
 	};
 	return { state: blocked, effects: [{ type: "ask-person", reason: "stale-state", question }] };
+}
+
+export function blockForAdvisorIntakeFailure(
+	state: LoopState,
+	role: AdvisorRole,
+	reason: string,
+): { state: LoopState; effects: LoopEffect[] } {
+	const question: LoopQuestion = {
+		id: `advisor-intake-${role}`,
+		text: `${role} advisor result could not be read: ${reason}. Should the runner retry that advisor?`,
+		recommended: "Answer how to proceed; retrying the advisor is usually safest.",
+		dependsOn: [],
+	};
+	const blocked: LoopState = {
+		...state,
+		stage: "blocked",
+		blockedFrom: state.stage,
+		blockedAdvisor: role,
+		questions: [...state.questions, question],
+		dispatchedAdvisors: [],
+	};
+	return { state: blocked, effects: [{ type: "ask-person", reason: "advisor-intake-failure", question }] };
 }

@@ -16,7 +16,7 @@ import {
 	validateLoopState,
 } from "../extensions/loop.ts";
 
-const context = { worktree: "/repo", branch: "main", baseHead: "base-a" };
+const context = { worktree: "/repo", branch: "feature", baseRef: "origin/main", baseHead: "base-a" };
 
 const report = (role: HelperReport["role"], extra: Partial<HelperReport> = {}): HelperReport => ({
 	status: "done",
@@ -104,10 +104,10 @@ describe("advisor transition and ordering", () => {
 		});
 		expect(nextLoopEffects(state)).toMatchObject([{ type: "dispatch-advisors", roles: ["intent", "codebase"] }]);
 
-		state = applyAdvisorReport(state, report("intent"), { tokenCount: 111 }).state;
+		state = applyAdvisorReport(state, report("intent"), { outputTokens: 1, contextTokens: 11 }).state;
 		expect(nextLoopEffects(state)).toEqual([]);
 
-		state = applyAdvisorReport(state, report("codebase"), { tokenCount: 222 }).state;
+		state = applyAdvisorReport(state, report("codebase"), { outputTokens: 2, contextTokens: 22 }).state;
 		expect(nextLoopEffects(state)).toMatchObject([{ type: "dispatch-advisors", roles: ["test-design"] }]);
 
 		state = applyAdvisorReport(
@@ -116,7 +116,7 @@ describe("advisor transition and ordering", () => {
 				status: "needs-input",
 				openQuestions: ["Should the CLI command be /loop start?"],
 			}),
-			{ tokenCount: 333 },
+			{ outputTokens: 3, contextTokens: 33 },
 		).state;
 		expect(state.stage).toBe("needs-person");
 		expect(state.questions).toHaveLength(1);
@@ -135,12 +135,54 @@ describe("advisor transition and ordering", () => {
 		expect(answered.effects).toMatchObject([{ type: "dispatch-advisors", roles: ["test-design"] }]);
 	});
 
+	test("keeps answered question history across two question rounds and passes both answers to rerun tasks", () => {
+		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+		state = applyAdvisorReport(
+			state,
+			report("intent", {
+				details: {
+					questions: [
+						{
+							id: "q-command",
+							text: "Use /loop start?",
+							recommended: "Yes, use it.",
+							dependsOn: [],
+						},
+					],
+					doneCandidates: [],
+					ambiguities: [],
+				},
+			}),
+			{
+				outputTokens: 1,
+				contextTokens: 2,
+			},
+		).state;
+		state = applyAdvisorReport(state, report("codebase"), { outputTokens: 1, contextTokens: 2 }).state;
+		state = answerLoopQuestion(state, { answer: "Yes, use /loop start.", current: context }).state;
+		state = applyAdvisorReport(state, report("intent"), { outputTokens: 1, contextTokens: 2 }).state;
+		state = applyAdvisorReport(
+			state,
+			report("test-design", { status: "needs-input", openQuestions: ["Should the red test be first?"] }),
+			{ outputTokens: 1, contextTokens: 2 },
+		).state;
+
+		const answered = answerLoopQuestion(state, { answer: "Yes, write red first.", current: context });
+		expect(answered.state.questions.map((question) => question.answer)).toEqual([
+			"Yes, use /loop start.",
+			"Yes, write red first.",
+		]);
+		expect(answered.effects[0]).toMatchObject({ type: "dispatch-advisors", roles: ["test-design"] });
+		const task = answered.effects[0]?.type === "dispatch-advisors" ? answered.effects[0].advisors[0]?.task : "";
+		expect(task).toContain("Yes, use /loop start.");
+		expect(task).toContain("Yes, write red first.");
+	});
+
 	test("groups several ready questions into one person question", () => {
 		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
 		state = applyAdvisorReport(
 			state,
 			report("intent", {
-				openQuestions: ["Which command starts the graph?"],
 				details: {
 					questions: [
 						{
@@ -149,15 +191,22 @@ describe("advisor transition and ordering", () => {
 							recommended: "Yes, ask before build.",
 							dependsOn: [],
 						},
+						{
+							id: "q2",
+							text: "Which command starts the graph?",
+							recommended: "Use /loop start.",
+							dependsOn: [],
+						},
 					],
 					doneCandidates: [],
 					ambiguities: [],
 				},
 			}),
-			{ tokenCount: 1 },
+			{ outputTokens: 1, contextTokens: 0 },
 		).state;
 		state = applyAdvisorReport(state, report("codebase", { openQuestions: ["Should state live in the profile?"] }), {
-			tokenCount: 2,
+			outputTokens: 2,
+			contextTokens: 0,
 		}).state;
 		expect(state.stage).toBe("needs-person");
 		expect(state.questions).toHaveLength(1);
@@ -168,9 +217,9 @@ describe("advisor transition and ordering", () => {
 
 	test("moves from completed advisors to lead plan, architecture review, and explicit brief approval", () => {
 		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
-		state = applyAdvisorReport(state, report("intent"), { tokenCount: 1 }).state;
-		state = applyAdvisorReport(state, report("codebase"), { tokenCount: 2 }).state;
-		state = applyAdvisorReport(state, report("test-design"), { tokenCount: 3 }).state;
+		state = applyAdvisorReport(state, report("intent"), { outputTokens: 1, contextTokens: 1 }).state;
+		state = applyAdvisorReport(state, report("codebase"), { outputTokens: 1, contextTokens: 1 }).state;
+		state = applyAdvisorReport(state, report("test-design"), { outputTokens: 1, contextTokens: 1 }).state;
 		expect(state.stage).toBe("plan");
 		expect(nextLoopEffects(state)).toMatchObject([{ type: "write-lead-plan" }]);
 
@@ -179,7 +228,7 @@ describe("advisor transition and ordering", () => {
 		expect(state.stage).toBe("architecture-review");
 		expect(planned.effects).toMatchObject([{ type: "dispatch-advisors", roles: ["architecture"] }]);
 
-		state = applyAdvisorReport(state, report("architecture"), { tokenCount: 4 }).state;
+		state = applyAdvisorReport(state, report("architecture"), { outputTokens: 4, contextTokens: 0 }).state;
 		expect(state.stage).toBe("architecture-review");
 		state = approveBrief(state, {
 			approvedBy: "person",
@@ -192,14 +241,14 @@ describe("advisor transition and ordering", () => {
 
 	test("architecture questions return to needs-person before approval", () => {
 		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
-		state = applyAdvisorReport(state, report("intent"), { tokenCount: 1 }).state;
-		state = applyAdvisorReport(state, report("codebase"), { tokenCount: 2 }).state;
-		state = applyAdvisorReport(state, report("test-design"), { tokenCount: 3 }).state;
+		state = applyAdvisorReport(state, report("intent"), { outputTokens: 1, contextTokens: 0 }).state;
+		state = applyAdvisorReport(state, report("codebase"), { outputTokens: 2, contextTokens: 0 }).state;
+		state = applyAdvisorReport(state, report("test-design"), { outputTokens: 3, contextTokens: 0 }).state;
 		state = applyLeadPlan(state, "Plan").state;
 		state = applyAdvisorReport(
 			state,
 			report("architecture", { status: "blocked", openQuestions: ["Is the private checklist readable?"] }),
-			{ tokenCount: 4 },
+			{ outputTokens: 4, contextTokens: 0 },
 		).state;
 		expect(state.stage).toBe("needs-person");
 		expect(state.questions).toHaveLength(1);
@@ -207,12 +256,13 @@ describe("advisor transition and ordering", () => {
 
 	test("a blocked architecture report with no open question still asks the person", () => {
 		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
-		state = applyAdvisorReport(state, report("intent"), { tokenCount: 1 }).state;
-		state = applyAdvisorReport(state, report("codebase"), { tokenCount: 2 }).state;
-		state = applyAdvisorReport(state, report("test-design"), { tokenCount: 3 }).state;
+		state = applyAdvisorReport(state, report("intent"), { outputTokens: 1, contextTokens: 0 }).state;
+		state = applyAdvisorReport(state, report("codebase"), { outputTokens: 2, contextTokens: 0 }).state;
+		state = applyAdvisorReport(state, report("test-design"), { outputTokens: 3, contextTokens: 0 }).state;
 		state = applyLeadPlan(state, "Plan").state;
 		state = applyAdvisorReport(state, report("architecture", { status: "blocked", summary: "Checklist unreadable." }), {
-			tokenCount: 4,
+			outputTokens: 4,
+			contextTokens: 0,
 		}).state;
 		expect(state.stage).toBe("needs-person");
 		expect(state.questions[0]?.text).toContain("Checklist unreadable.");
@@ -220,12 +270,16 @@ describe("advisor transition and ordering", () => {
 
 	test("rejects reports outside the active stage or from undispatched advisors", () => {
 		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
-		expect(() => applyAdvisorReport({ ...state, stage: "blocked" }, report("intent"), { tokenCount: 1 })).toThrow(
-			/cannot apply advisor report/,
+		expect(() =>
+			applyAdvisorReport({ ...state, stage: "blocked" }, report("intent"), { outputTokens: 1, contextTokens: 0 }),
+		).toThrow(/cannot apply advisor report/);
+		expect(() => applyAdvisorReport(state, report("test-design"), { outputTokens: 1, contextTokens: 0 })).toThrow(
+			/not dispatched/,
 		);
-		expect(() => applyAdvisorReport(state, report("test-design"), { tokenCount: 1 })).toThrow(/not dispatched/);
-		state = applyAdvisorReport(state, report("intent"), { tokenCount: 1 }).state;
-		expect(() => applyAdvisorReport(state, report("architecture"), { tokenCount: 1 })).toThrow(/not dispatched/);
+		state = applyAdvisorReport(state, report("intent"), { outputTokens: 1, contextTokens: 0 }).state;
+		expect(() => applyAdvisorReport(state, report("architecture"), { outputTokens: 1, contextTokens: 0 })).toThrow(
+			/not dispatched/,
+		);
 	});
 });
 
@@ -233,7 +287,7 @@ describe("stale state and validation", () => {
 	test("blocks stale state when branch/base changes or the frozen brief hash is no longer current", () => {
 		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
 		expect(staleReason(state, context)).toBeUndefined();
-		expect(staleReason(state, { ...context, branch: "feature" })).toContain("branch changed");
+		expect(staleReason(state, { ...context, branch: "other" })).toContain("branch changed");
 		expect(staleReason(state, { ...context, baseHead: "base-b" })).toContain("base head changed");
 
 		state = {
@@ -241,14 +295,23 @@ describe("stale state and validation", () => {
 			stage: "brief-approved",
 			plan: { author: "lead", text: "Original plan" },
 			advisorRuns: {
-				intent: { status: "done", summary: "Intent", evidence: [], openQuestions: [], assumptions: [], tokenCount: 1 },
+				intent: {
+					status: "done",
+					summary: "Intent",
+					evidence: [],
+					openQuestions: [],
+					assumptions: [],
+					outputTokens: 1,
+					contextTokens: 0,
+				},
 				codebase: {
 					status: "done",
 					summary: "Codebase",
 					evidence: [],
 					openQuestions: [],
 					assumptions: [],
-					tokenCount: 1,
+					outputTokens: 1,
+					contextTokens: 0,
 				},
 				testDesign: {
 					status: "done",
@@ -256,7 +319,8 @@ describe("stale state and validation", () => {
 					evidence: [],
 					openQuestions: [],
 					assumptions: [],
-					tokenCount: 1,
+					outputTokens: 1,
+					contextTokens: 0,
 				},
 				architecture: {
 					status: "done",
@@ -264,7 +328,8 @@ describe("stale state and validation", () => {
 					evidence: [],
 					openQuestions: [],
 					assumptions: [],
-					tokenCount: 1,
+					outputTokens: 1,
+					contextTokens: 0,
 				},
 			},
 			frozenBriefHash: "not-current",
@@ -274,11 +339,11 @@ describe("stale state and validation", () => {
 
 	test("a freshly approved brief is not stale, and stale blocks can be left by answering", () => {
 		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
-		state = applyAdvisorReport(state, report("intent"), { tokenCount: 1 }).state;
-		state = applyAdvisorReport(state, report("codebase"), { tokenCount: 2 }).state;
-		state = applyAdvisorReport(state, report("test-design"), { tokenCount: 3 }).state;
+		state = applyAdvisorReport(state, report("intent"), { outputTokens: 1, contextTokens: 0 }).state;
+		state = applyAdvisorReport(state, report("codebase"), { outputTokens: 2, contextTokens: 0 }).state;
+		state = applyAdvisorReport(state, report("test-design"), { outputTokens: 3, contextTokens: 0 }).state;
 		state = applyLeadPlan(state, "Plan").state;
-		state = applyAdvisorReport(state, report("architecture"), { tokenCount: 4 }).state;
+		state = applyAdvisorReport(state, report("architecture"), { outputTokens: 4, contextTokens: 0 }).state;
 		state = approveBrief(state, {
 			approvedBy: "person",
 			approvedAt: "2026-10-22T00:00:00.000Z",
