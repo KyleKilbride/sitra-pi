@@ -47,6 +47,52 @@ const on = () => process.env.SITRA_SHARPEN !== "0";
 const isHelper = () => Boolean(process.env.PI_SUBAGENT_NAME);
 const BRIEF_MARK = "## Context from the lead's conversation";
 
+/**
+ * Handover summaries can spend output tokens on hidden provider reasoning before visible text. Keep the budget high,
+ * and force low provider-level effort or a small thinking budget so thinking leaves room for the summary. Any length
+ * stop is still a failed checkpoint.
+ */
+export const HANDOVER_MAX_TOKENS = 32_000;
+const HANDOVER_REASONING = "low";
+const HANDOVER_THINKING_BUDGET_TOKENS = 1_024;
+
+class HandoverSummaryError extends Error {
+	override name = "HandoverSummaryError";
+	readonly stopReason: string;
+	constructor(message: string, stopReason: string) {
+		super(message);
+		this.stopReason = stopReason;
+	}
+}
+
+function handoverFailureDetails(error: unknown): string {
+	if (error instanceof HandoverSummaryError) return `${error.message}; stop reason: ${error.stopReason}`;
+	return `${String(error).slice(0, 100)}; stop reason unavailable`;
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function lowerAnthropicHandoverEffort(payload: unknown, model: unknown): Record<string, unknown> | undefined {
+	if (!record(model) || model.api !== "anthropic-messages" || !record(payload)) return undefined;
+	const thinking = payload.thinking;
+	if (!record(thinking) || thinking.type !== "adaptive") return undefined;
+	const outputConfig = record(payload.output_config) ? payload.output_config : {};
+	const messages = Array.isArray(payload.messages)
+		? payload.messages.map((message) =>
+				record(message) && record(message.output_config)
+					? { ...message, output_config: { ...message.output_config, effort: HANDOVER_REASONING } }
+					: message,
+			)
+		: payload.messages;
+	return {
+		...payload,
+		messages,
+		output_config: { ...outputConfig, effort: HANDOVER_REASONING },
+	};
+}
+
 export function configuredHandoverTokens(): number | undefined {
 	const raw = process.env.SITRA_HANDOVER_TOKENS;
 	if (raw === undefined) return undefined;
@@ -108,8 +154,17 @@ async function writeHandover(ctx: Ctx, messages: Msg[], signal?: AbortSignal): P
 		{
 			messages: [{ role: "user", content: [{ type: "text", text: handoverPrompt(messages) }], timestamp: Date.now() }],
 		},
-		{ maxTokens: 8_000, signal },
+		{
+			maxTokens: HANDOVER_MAX_TOKENS,
+			reasoning: HANDOVER_REASONING,
+			effort: HANDOVER_REASONING,
+			thinkingEnabled: true,
+			thinkingBudgetTokens: HANDOVER_THINKING_BUDGET_TOKENS,
+			onPayload: lowerAnthropicHandoverEffort,
+			signal,
+		},
 	);
+	const stopReason = typeof reply?.stopReason === "string" ? reply.stopReason : "unknown";
 	const text = Array.isArray(reply?.content)
 		? (reply.content as { type?: string; text?: string }[])
 				.filter((p) => p?.type === "text")
@@ -117,7 +172,10 @@ async function writeHandover(ctx: Ctx, messages: Msg[], signal?: AbortSignal): P
 				.join("\n")
 				.trim()
 		: "";
-	if (!text || reply.stopReason === "error" || reply.stopReason === "aborted") throw new Error("no summary came back");
+	if (!text) throw new HandoverSummaryError("no summary came back", stopReason);
+	if (reply.stopReason === "error" || reply.stopReason === "aborted" || reply.stopReason === "length") {
+		throw new HandoverSummaryError("summary stopped before completion", stopReason);
+	}
 	return handoverSummary(text, messages);
 }
 
@@ -178,8 +236,10 @@ export default function sitraSharpen(pi: Pi): void {
 	 * handover that can't get under it (a small window, little to summarise) never repeats every turn.
 	 */
 	let armed = true;
+	let piCompactionFailureNoticeArmed = true;
 	pi.on("session_start", (_event: unknown, ctx) => {
 		armed = true;
+		piCompactionFailureNoticeArmed = true;
 		try {
 			validateConfiguredThreshold(ctx);
 		} catch (error) {
@@ -205,7 +265,10 @@ export default function sitraSharpen(pi: Pi): void {
 			// A single huge turn has nothing earlier to summarise; Pi would only report "nothing to compact".
 			const turns = branchMessages(ctx).filter((m) => m.role === "user").length;
 			const over = usage.tokens >= currentHandoverThreshold(usage.contextWindow);
-			if (!over) armed = true;
+			if (!over) {
+				armed = true;
+				piCompactionFailureNoticeArmed = true;
+			}
 			if (over && armed && turns >= 2) {
 				armed = false;
 				handOver(ctx, `The conversation reached ${Math.round(usage.tokens / 1000)}k tokens.`);
@@ -216,9 +279,9 @@ export default function sitraSharpen(pi: Pi): void {
 		}
 	});
 
-	pi.on("session_compact", (event: { compactionEntry?: { summary?: string } }, ctx) => {
+	pi.on("session_compact", (event: { compactionEntry?: { summary?: string }; fromExtension?: boolean }, ctx) => {
 		const summary = event?.compactionEntry?.summary;
-		if (on() && summary) saveHandover(summary, ctx);
+		if (on() && event?.fromExtension === true && summary) saveHandover(summary, ctx);
 	});
 
 	/**
@@ -236,7 +299,10 @@ export default function sitraSharpen(pi: Pi): void {
 			const usage = ctx.getContextUsage?.();
 			if (!usage?.tokens || !usage.contextWindow) return undefined;
 			const over = usage.tokens >= currentHandoverThreshold(usage.contextWindow);
-			if (!over) armed = true;
+			if (!over) {
+				armed = true;
+				piCompactionFailureNoticeArmed = true;
+			}
 			if (!over || !armed || !ctx.model || !ctx.modelRegistry) return undefined;
 			const messages = event.context?.contextMessages ?? [];
 			const cut = messages.lastIndexOf(event.message);
@@ -251,7 +317,7 @@ export default function sitraSharpen(pi: Pi): void {
 			try {
 				summary = await writeHandover(ctx, earlier, ctx.signal);
 			} catch (error) {
-				ctx.ui?.notify(`sitra couldn't hand over (${String(error).slice(0, 120)}); carrying on as is.`, "warning");
+				ctx.ui?.notify(`sitra couldn't hand over (${handoverFailureDetails(error)}); carrying on as is.`, "warning");
 				return undefined;
 			}
 			saveHandover(summary, ctx);
@@ -263,9 +329,9 @@ export default function sitraSharpen(pi: Pi): void {
 	});
 
 	/**
-	 * Pi's own compaction (near the limit, or after an overflow) is the backstop when a handover didn't happen: it gets
-	 * the handover format and the person's requests verbatim too, as do sitra's own run-end handover and `/handover`.
-	 * A plain `/compact` and any failure stay with Pi.
+	 * Pi's compaction path is a backstop only for overflow. Threshold handovers and `/handover` use sitra's format or
+	 * cancel compaction visibly; after one threshold failure, cancel without another model call until the context drops
+	 * below the line. Overflow may fall back to Pi's default summary, but that default is never saved as a handover file.
 	 */
 	pi.on(
 		"session_before_compact",
@@ -291,6 +357,7 @@ export default function sitraSharpen(pi: Pi): void {
 					event?.reason === "overflow" ||
 					event?.customInstructions === HANDOVER_INSTRUCTIONS;
 				if (!on() || !ours || !prep?.firstKeptEntryId) return undefined;
+				if (event?.reason === "threshold" && !piCompactionFailureNoticeArmed) return { cancel: true };
 				const messages: Msg[] = [
 					...(prep.previousSummary ? [{ role: "compactionSummary", summary: prep.previousSummary }] : []),
 					...(prep.messagesToSummarize ?? []),
@@ -300,8 +367,21 @@ export default function sitraSharpen(pi: Pi): void {
 				return {
 					compaction: { summary, firstKeptEntryId: prep.firstKeptEntryId, tokensBefore: prep.tokensBefore ?? 0 },
 				};
-			} catch {
-				return undefined;
+			} catch (error) {
+				const reason = event?.reason;
+				const detail = handoverFailureDetails(error);
+				if (reason === "overflow") {
+					ctx.ui?.notify(
+						`sitra couldn't hand over (${detail}); Pi's default summary was used and no handover was saved.`,
+						"warning",
+					);
+					return undefined;
+				}
+				if (reason !== "threshold" || piCompactionFailureNoticeArmed) {
+					ctx.ui?.notify(`sitra couldn't hand over (${detail}); compaction was cancelled.`, "warning");
+					if (reason === "threshold") piCompactionFailureNoticeArmed = false;
+				}
+				return { cancel: true };
 			}
 		},
 	);

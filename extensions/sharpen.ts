@@ -195,10 +195,10 @@ export function handoverThreshold(contextWindow: number, handoverTokens?: unknow
 export const HANDOVER_INSTRUCTIONS = [
 	"This summary is a handover: the conversation continues in a fresh context that starts from it. Write it so a capable engineer who never saw the conversation can carry on without asking anything. Use these sections:",
 	"1. Goal: what the person wants, quoting their own words verbatim where they matter.",
-	"2. Standing instructions: every rule, preference or correction the person gave in this session, verbatim.",
-	"3. Decisions and their reasons: what was decided, why, and what was ruled out.",
-	"4. State: branch, files changed, commands that matter, pull request links, test results.",
-	"5. Next steps: the concrete next actions, and anything waiting on the person.",
+	"2. State: branch, files changed, commands that matter, pull request links, test results, and your last report to the person.",
+	"3. Next steps: the concrete next actions, and anything waiting on the person.",
+	"4. Standing instructions: every rule, preference or correction the person gave in this session, verbatim.",
+	"5. Decisions and their reasons: for each decision, say what it applies to, what was decided, why, and what was ruled out.",
 	"Be specific: names, paths, numbers. Leave out exploration that led nowhere unless it rules something out.",
 ].join("\n");
 

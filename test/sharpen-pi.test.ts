@@ -1,9 +1,9 @@
-import { mkdtempSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { HANDOVER_INSTRUCTIONS, type Msg } from "../extensions/sharpen.ts";
-import sitraSharpen, { configuredHandoverTokens } from "../extensions/sharpen-pi.ts";
+import sitraSharpen, { configuredHandoverTokens, HANDOVER_MAX_TOKENS } from "../extensions/sharpen-pi.ts";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
@@ -126,6 +126,21 @@ describe("hand-offs to helpers", () => {
 });
 
 describe("handing over", () => {
+	test("handover instructions put state and next steps first, with last report and scoped decisions", () => {
+		const goal = HANDOVER_INSTRUCTIONS.indexOf("1. Goal:");
+		const state = HANDOVER_INSTRUCTIONS.indexOf("2. State:");
+		const next = HANDOVER_INSTRUCTIONS.indexOf("3. Next steps:");
+		const standing = HANDOVER_INSTRUCTIONS.indexOf("4. Standing instructions:");
+		const decisions = HANDOVER_INSTRUCTIONS.indexOf("5. Decisions and their reasons:");
+		expect(goal).toBeGreaterThanOrEqual(0);
+		expect(state).toBeGreaterThan(goal);
+		expect(next).toBeGreaterThan(state);
+		expect(standing).toBeGreaterThan(next);
+		expect(decisions).toBeGreaterThan(standing);
+		expect(HANDOVER_INSTRUCTIONS).toContain("your last report to the person");
+		expect(HANDOVER_INSTRUCTIONS).toContain("what it applies to");
+	});
+
 	test("configuredHandoverTokens reads the runtime env and rejects invalid values with source, value and type", () => {
 		expect(configuredHandoverTokens()).toBeUndefined();
 		vi.stubEnv("SITRA_HANDOVER_TOKENS", "250000");
@@ -246,7 +261,7 @@ describe("handing over", () => {
 		});
 		expect(compacts).toHaveLength(1);
 		handlers.get("session_compact")?.(
-			{ type: "session_compact", compactionEntry: { summary: "1. Goal: fix the parser" } },
+			{ type: "session_compact", compactionEntry: { summary: "1. Goal: fix the parser" }, fromExtension: true },
 			{ sessionManager: { getSessionId: () => "s1" } },
 		);
 		const files = readdirSync(join(dir, "handovers"));
@@ -292,7 +307,8 @@ describe("handing over mid-run", () => {
 			...extra,
 		};
 	}
-	function ctx(tokens: number, reply: string | Error = "1. Goal: fix the parsers") {
+	type FakeReply = string | Error | { text: string; stopReason?: string };
+	function ctx(tokens: number, reply: FakeReply = "1. Goal: fix the parsers") {
 		const calls: { prompt: string; options: Record<string, unknown> }[] = [];
 		const notes: string[] = [];
 		return {
@@ -309,7 +325,9 @@ describe("handing over mid-run", () => {
 					complete: async (_m: unknown, c: { messages: Msg[] }, options: Record<string, unknown>) => {
 						calls.push({ prompt: JSON.stringify(c.messages), options });
 						if (reply instanceof Error) throw reply;
-						return { role: "assistant", content: [{ type: "text", text: reply }] };
+						const text = typeof reply === "string" ? reply : reply.text;
+						const stopReason = typeof reply === "string" ? undefined : reply.stopReason;
+						return { role: "assistant", content: [{ type: "text", text }], stopReason };
 					},
 				},
 			},
@@ -336,6 +354,77 @@ describe("handing over mid-run", () => {
 		expect(c.calls[0]?.prompt).not.toContain("f5.ts");
 		expect(c.notes.join(" ")).toMatch(/handing over/i);
 		expect(readdirSync(join(dir, "handovers"))).toHaveLength(1);
+	});
+
+	test("a length-stopped mid-run reply is not saved as a handover checkpoint", async () => {
+		const dir = realpathSync(mkdtempSync(join(tmpdir(), "sitra-midrun-length-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", dir);
+		const { handlers } = fakePi();
+		const stopped = ctx(410_000, { text: "1. Goal: keep going until you build the appro", stopReason: "length" });
+		const r = await handlers.get("turn_end")?.(turnEnd(run(6)), stopped.ctx);
+		expect(r).toBeUndefined();
+		const handovers = join(dir, "handovers");
+		expect(existsSync(handovers) ? readdirSync(handovers) : []).toHaveLength(0);
+		expect(stopped.notes.join(" ")).toContain("couldn't hand over");
+		expect(stopped.notes.join(" ")).toContain("length");
+	});
+
+	test("summary calls use the handover token budget constant", async () => {
+		const { handlers } = fakePi();
+		const c = ctx(410_000);
+		await handlers.get("turn_end")?.(turnEnd(run(6)), c.ctx);
+		expect(c.calls[0]?.options.maxTokens).toBe(HANDOVER_MAX_TOKENS);
+		expect(HANDOVER_MAX_TOKENS).toBe(32_000);
+	});
+
+	test("summary calls lower the actual Anthropic adaptive-thinking request", async () => {
+		const { handlers } = fakePi();
+		const c = ctx(410_000);
+		const requests: Record<string, unknown>[] = [];
+		const anthropicModel = {
+			api: "anthropic-messages",
+			provider: "anthropic",
+			id: "claude-opus-5-5",
+			reasoning: true,
+			contextWindow: 1_000_000,
+			compat: { supportsMidConvoEffort: true },
+		};
+		const testCtx = c.ctx as typeof c.ctx & { model: unknown };
+		testCtx.model = anthropicModel;
+		testCtx.modelRegistry.complete = async (_m: unknown, _c: { messages: Msg[] }, options: Record<string, unknown>) => {
+			c.calls.push({ prompt: "anthropic", options });
+			const built = {
+				model: "claude-opus-5-5",
+				messages: [
+					{ role: "user", content: [{ type: "text", text: "handover" }] },
+					{ role: "system", content: [], output_config: { effort: "high" } },
+				],
+				max_tokens: HANDOVER_MAX_TOKENS,
+				stream: true,
+				thinking: { type: "adaptive", display: "summarized" },
+				output_config: { effort: "high" },
+			};
+			const onPayload = options.onPayload as
+				| ((payload: Record<string, unknown>, model: unknown) => Record<string, unknown> | undefined)
+				| undefined;
+			requests.push(onPayload?.(built, anthropicModel) ?? built);
+			return {
+				role: "assistant",
+				content: [{ type: "text", text: "1. Goal: fix the parsers" }],
+				stopReason: undefined,
+			};
+		};
+		await handlers.get("turn_end")?.(turnEnd(run(6)), testCtx);
+		const request = requests[0] as {
+			output_config?: { effort?: string };
+			messages?: { output_config?: { effort?: string } }[];
+			max_tokens?: number;
+			thinking?: { type?: string };
+		};
+		expect(request.max_tokens).toBe(HANDOVER_MAX_TOKENS);
+		expect(request.thinking?.type).toBe("adaptive");
+		expect(request.output_config?.effort).toBe("low");
+		expect(request.messages?.at(-1)?.output_config?.effort).toBe("low");
 	});
 
 	test("helpers hand over mid-run too, since loop steps are helpers", async () => {
@@ -398,17 +487,26 @@ describe("handing over mid-run", () => {
 });
 
 describe("Pi's own compaction near the limit", () => {
-	const ctxWith = (reply: string | Error) => {
+	type FakeReply = string | Error | { text: string; stopReason?: string };
+	const ctxWith = (reply: FakeReply) => {
 		const prompts: string[] = [];
+		const calls: { prompt: string; options: Record<string, unknown> }[] = [];
+		const notes: string[] = [];
 		return {
 			prompts,
+			calls,
+			notes,
 			ctx: {
+				ui: { notify: (m: string) => notes.push(m) },
 				model: { provider: "p", id: "m" },
 				modelRegistry: {
-					complete: async (_m: unknown, c: { messages: Msg[] }) => {
+					complete: async (_m: unknown, c: { messages: Msg[] }, options: Record<string, unknown>) => {
 						prompts.push(JSON.stringify(c.messages));
+						calls.push({ prompt: JSON.stringify(c.messages), options });
 						if (reply instanceof Error) throw reply;
-						return { role: "assistant", content: [{ type: "text", text: reply }] };
+						const text = typeof reply === "string" ? reply : reply.text;
+						const stopReason = typeof reply === "string" ? undefined : reply.stopReason;
+						return { role: "assistant", content: [{ type: "text", text }], stopReason };
 					},
 				},
 			},
@@ -427,7 +525,7 @@ describe("Pi's own compaction near the limit", () => {
 		},
 	});
 
-	test("uses the handover format with the requests carried verbatim, as does sitra's own handover; plain /compact and failures are left to Pi", async () => {
+	test("uses the handover format with carried requests; plain /compact stays with Pi and threshold failures cancel", async () => {
 		const { handlers } = fakePi();
 		const ok = ctxWith("1. Goal: parsers");
 		const r = (await handlers.get("session_before_compact")?.(event("threshold"), ok.ctx)) as {
@@ -442,14 +540,59 @@ describe("Pi's own compaction near the limit", () => {
 		const manual = ctxWith("x");
 		expect(await handlers.get("session_before_compact")?.(event("manual"), manual.ctx)).toBeUndefined();
 		expect(manual.prompts).toHaveLength(0);
-		expect(
-			await handlers.get("session_before_compact")?.(event("threshold"), ctxWith(new Error("429")).ctx),
-		).toBeUndefined();
+		expect(await handlers.get("session_before_compact")?.(event("threshold"), ctxWith(new Error("429")).ctx)).toEqual({
+			cancel: true,
+		});
 		const ours = ctxWith("1. Goal: run-end");
 		const r2 = (await handlers.get("session_before_compact")?.(
 			{ ...event("manual"), customInstructions: HANDOVER_INSTRUCTIONS },
 			ours.ctx,
 		)) as { compaction: { summary: string } };
 		expect(r2.compaction.summary).toContain("Don't run the full suite.");
+	});
+
+	test("a Pi-path failure at the threshold cancels and saves nothing", async () => {
+		const dir = realpathSync(mkdtempSync(join(tmpdir(), "sitra-pi-threshold-length-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", dir);
+		const { handlers } = fakePi();
+		const stopped = ctxWith({ text: "1. Goal: keep going until you build the appro", stopReason: "length" });
+		const r = await handlers.get("session_before_compact")?.(event("threshold"), stopped.ctx);
+		expect(r).toEqual({ cancel: true });
+		const handovers = join(dir, "handovers");
+		expect(existsSync(handovers) ? readdirSync(handovers) : []).toHaveLength(0);
+		expect(stopped.notes.join(" ")).toContain("couldn't hand over");
+		expect(stopped.notes.join(" ")).toContain("length");
+		expect(stopped.notes.join(" ")).toContain("compaction was cancelled");
+	});
+
+	test("after a threshold failure, the next threshold compaction makes no model call", async () => {
+		const { handlers } = fakePi();
+		const stopped = ctxWith({ text: "1. Goal: keep going until you build the appro", stopReason: "length" });
+		expect(await handlers.get("session_before_compact")?.(event("threshold"), stopped.ctx)).toEqual({ cancel: true });
+		expect(stopped.calls).toHaveLength(1);
+
+		const skipped = ctxWith("1. Goal: this would only appear if the model was called");
+		expect(await handlers.get("session_before_compact")?.(event("threshold"), skipped.ctx)).toEqual({ cancel: true });
+		expect(skipped.calls).toHaveLength(0);
+		expect(skipped.notes).toHaveLength(0);
+	});
+
+	test("an overflow fallback summary is not saved to handovers", async () => {
+		const dir = realpathSync(mkdtempSync(join(tmpdir(), "sitra-pi-overflow-length-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", dir);
+		const { handlers } = fakePi();
+		const stopped = ctxWith({ text: "1. Goal: keep going until you build the appro", stopReason: "length" });
+		const r = await handlers.get("session_before_compact")?.(event("overflow"), stopped.ctx);
+		expect(r).toBeUndefined();
+		expect(stopped.notes.join(" ")).toContain("couldn't hand over");
+		expect(stopped.notes.join(" ")).toContain("length");
+		expect(stopped.notes.join(" ")).toContain("Pi's default summary was used");
+		expect(stopped.notes.join(" ")).toContain("no handover was saved");
+		handlers.get("session_compact")?.(
+			{ type: "session_compact", reason: "overflow", fromExtension: false, compactionEntry: { summary: "pi default" } },
+			{ sessionManager: { getSessionId: () => "s1" } },
+		);
+		const handovers = join(dir, "handovers");
+		expect(existsSync(handovers) ? readdirSync(handovers) : []).toHaveLength(0);
 	});
 });
