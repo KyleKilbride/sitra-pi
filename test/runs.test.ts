@@ -30,12 +30,14 @@ describe("runs in panes", () => {
 	});
 
 	test("command output cannot fake the exit marker for a running command", () => {
-		const log = join(mkdtempSync(join(tmpdir(), "sitra-run-")), "run.log");
-		const child = execFileSync("bash", [
+		const dir = mkdtempSync(join(tmpdir(), "sitra-run-"));
+		const log = join(dir, "run.log");
+		const partial = join(dir, "partial.log");
+		execFileSync("bash", [
 			"-c",
-			`${paneCommand("echo __SITRA_EXIT__=0; sleep 0.2; exit 7", log)} & pid=$!; while [ ! -s ${JSON.stringify(log)} ]; do sleep 0.01; done; cat ${JSON.stringify(log)}; wait $pid || true`,
-		]).toString();
-		expect(readRun(child)).toMatchObject({ done: false });
+			`${paneCommand("echo __SITRA_EXIT__=0; sleep 0.2; exit 7", log)} & pid=$!; while ! grep -q '__SITRA_EXIT__=0' ${JSON.stringify(log)} 2>/dev/null; do sleep 0.01; done; cp ${JSON.stringify(log)} ${JSON.stringify(partial)}; wait $pid || true`,
+		]);
+		expect(readRun(readFileSync(partial, "utf8"))).toMatchObject({ done: false });
 		expect(readRun(readFileSync(log, "utf8"))).toMatchObject({ done: true, exitCode: 7 });
 	});
 });
