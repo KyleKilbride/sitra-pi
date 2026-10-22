@@ -564,6 +564,44 @@ describe("Pi wiring", () => {
 		expect(readLoopStateFile(loopStatePath(profile, cwd, "feature")).advisorRuns.testDesign?.contextTokens).toBe(70);
 	});
 
+	test("/loop resume re-emits a pending advisor request and the matching report advances", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers, userMessages } = fakePi();
+		const { cwd } = gitWorktree();
+		await commands.get("loop")?.handler("start Add the runner", ctx(cwd));
+		await handlers.get("message_end")?.(
+			subagentResult(
+				"intent-advisor",
+				sessionFileWithHelperReport(helperReport("intent", { questions: [], doneCandidates: [], ambiguities: [] })),
+			),
+			ctx(cwd),
+		);
+		userMessages.length = 0;
+
+		await commands.get("loop")?.handler("resume", ctx(cwd));
+
+		expect(userMessages.join("\n")).toContain("codebase-advisor");
+		await handlers.get("message_end")?.(
+			subagentResult(
+				"codebase-advisor",
+				sessionFileWithHelperReport(
+					helperReport("codebase", {
+						files: ["extensions/loop.ts"],
+						existingTests: [],
+						facts: [],
+						boundaries: [],
+						owners: [],
+					}),
+				),
+			),
+			ctx(cwd),
+		);
+		expect(readLoopStateFile(loopStatePath(profile, cwd, "feature")).advisorRuns.codebase?.summary).toBe(
+			"codebase summary",
+		);
+	});
+
 	test("ordinary teammate results are ignored when no state or advisor dispatch matches", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
@@ -1251,6 +1289,59 @@ describe("Pi wiring", () => {
 			subagentResult(
 				"verifier",
 				sessionFileWithVerifierReport(verifierReport, verifyState.verifierRequest?.task ?? ""),
+			),
+			ctx(cwd),
+		);
+		expect(readLoopStateFile(path).stage).toBe("done");
+	});
+
+	test("/loop resume re-emits a pending verifier request with the same dispatchId and the matching report advances", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers, tools, userMessages } = fakePi();
+		const { cwd } = gitWorktree();
+		approvedLoop(profile, cwd);
+		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
+		const redCommit = commitAll(cwd, "add tests");
+		writeFileSync(join(cwd, "impl.ts"), "green\n");
+		const greenCommit = commitAll(cwd, "implement");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		const hash = sha256sum(cwd, "loop.test.ts");
+		const redLog = join(profile, "red.log");
+		const greenLog = join(profile, "green.log");
+		writeHeaderLoopLog(redLog, {
+			commit: redCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 1,
+		});
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 0,
+		});
+		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
+		const path = loopStatePath(profile, cwd, "feature");
+		const dispatchId = readLoopStateFile(path).verifierRequest?.dispatchId;
+		userMessages.length = 0;
+
+		await commands.get("loop")?.handler("resume", ctx(cwd));
+
+		const resumed = userMessages.join("\n");
+		expect(resumed).toContain("Start verifier");
+		expect(resumed).toContain(`Verifier dispatchId: ${dispatchId}`);
+		await handlers.get("message_end")?.(
+			subagentResult(
+				"verifier",
+				sessionFileWithVerifierReport(
+					helperReport("verifier", {
+						checksRun: [],
+						rerunChecks: [],
+						acceptedLogs: [{ log: greenLog, reason: "exact commit and test hashes" }],
+						testHashesChecked: ["loop.test.ts"],
+						goalMatched: true,
+					}),
+					readLoopStateFile(path).verifierRequest?.task ?? "",
+				),
 			),
 			ctx(cwd),
 		);
