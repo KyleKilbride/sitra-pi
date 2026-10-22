@@ -1,4 +1,6 @@
 // @ts-nocheck — deterministic scripted model for loop-foundation tests.
+
+import { readFileSync, writeFileSync } from "node:fs";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 
 function script() {
@@ -27,6 +29,39 @@ function textFrom(message) {
 		.filter((part) => part?.type === "text" && typeof part.text === "string")
 		.map((part) => part.text)
 		.join("\n");
+}
+
+function addVerifierTask(details, task) {
+	if (details?.agent !== "verifier" || typeof details.sessionFile !== "string") return details;
+	const raw = readFileSync(details.sessionFile, "utf8");
+	if (raw.includes('"role":"user"')) return details;
+	const taskStart = task.indexOf("You are the independent LOOPS verifier.");
+	const exactTask = taskStart >= 0 ? task.slice(taskStart) : task;
+	const marker = "Verifier dispatchId: ";
+	const dispatchStart = exactTask.indexOf(marker);
+	const dispatchId =
+		dispatchStart >= 0
+			? exactTask
+					.slice(dispatchStart + marker.length)
+					.split("\n")[0]
+					?.trim()
+			: undefined;
+	const lines = raw
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => {
+			const parsed = JSON.parse(line);
+			if (dispatchId && parsed?.message?.toolName === "helper_report" && parsed.message.details) {
+				parsed.message.details = { ...parsed.message.details, dispatchId };
+			}
+			return JSON.stringify(parsed);
+		})
+		.join("\n");
+	writeFileSync(
+		details.sessionFile,
+		`${JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: exactTask }] } })}\n${lines}\n`,
+	);
+	return details;
 }
 
 export default function (pi) {
@@ -68,6 +103,7 @@ export default function (pi) {
 		const batch = helpers[index]?.messages;
 		if (!Array.isArray(batch)) return;
 		for (const details of batch) {
+			addVerifierTask(details, text);
 			await pi.sendMessage(
 				{ customType: "subagent_result", content: "helper finished", display: false, details },
 				{ deliverAs: "followUp", streamingBehavior: "followUp" },

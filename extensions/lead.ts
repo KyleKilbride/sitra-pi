@@ -7,7 +7,8 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Type } from "typebox";
 import { HELPER_REPORT_TOOL_SCHEMA, renderHelperReport, validateHelperReport } from "./helper-report.ts";
-import { paneCommand, readRun, shellQuote } from "./runs.ts";
+import { loopStatePath, readLoopStateFile } from "./loop-state.ts";
+import { hashFiles, paneCommand, type RunMeta, readRun, shellQuote } from "./runs.ts";
 import { gitBranch, mainCheckout } from "./sessions.ts";
 
 /** The lead's working rules, written for the person it works with (their name, or "the user"). */
@@ -125,6 +126,20 @@ export default function sitraLead(pi: Pi): void {
 
 	const runsDir = join(process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent"), "runs");
 
+	const loopRunMeta = (cwd: string, branch?: string): Pick<RunMeta, "loop"> => {
+		if (!branch) return {};
+		const worktree = repoRoot(cwd);
+		const profile = process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
+		const statePath = loopStatePath(profile, worktree, branch);
+		if (!existsSync(statePath)) return {};
+		const state = readLoopStateFile(statePath);
+		if (state.stage !== "build") return {};
+		const testFiles = state.frozenBrief?.advisorRuns.testDesign?.acceptanceTestFiles ?? [];
+		if (testFiles.length === 0) throw new Error("active loop build has no frozen acceptance test files");
+		const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
+		return { loop: { commit, testHashes: hashFiles(worktree, testFiles) } };
+	};
+
 	if (isTeammate) {
 		pi.registerTool({
 			name: "helper_report",
@@ -163,7 +178,8 @@ export default function sitraLead(pi: Pi): void {
 				.toLowerCase()
 				.replace(/[^a-z0-9]+/g, "-")
 				.slice(0, 40);
-			const log = join(runsDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${slug}.log`);
+			const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${slug}`;
+			const log = join(runsDir, `${runId}.log`);
 			const branch = gitBranch(ctx.cwd);
 			const line = paneCommand(p.command, log, {
 				label: p.label,
@@ -173,6 +189,8 @@ export default function sitraLead(pi: Pi): void {
 					process.env.PI_SUBAGENT_NAME?.trim() ||
 					(isTower ? (process.env.SITRA_TOWER_NAME?.trim() ?? "tower") : "lead"),
 				...(ctx.sessionManager?.getSessionId?.() ? { sessionId: ctx.sessionManager.getSessionId() } : {}),
+				command: p.command,
+				...loopRunMeta(ctx.cwd, branch),
 			});
 			let where: string;
 			if (process.env.HERDR_ENV === "1" && process.env.HERDR_PANE_ID) {
@@ -202,7 +220,21 @@ export default function sitraLead(pi: Pi): void {
 			// The extension watches the run, not the model: when it ends, the result arrives as a message on its own.
 			const watcher = setInterval(() => {
 				if (!existsSync(log)) return;
-				const status = readRun(readFileSync(log, "utf8"), 15);
+				let status: ReturnType<typeof readRun>;
+				try {
+					status = readRun(readFileSync(log, "utf8"), 15);
+				} catch (error) {
+					clearInterval(watcher);
+					pi.sendMessage(
+						{
+							customType: "sitra-run",
+							content: `The run "${p.label}" could not be read: ${String(error)}\n(Full log: ${log})`,
+							display: true,
+						},
+						ctx.isIdle?.() === false ? { triggerTurn: true, deliverAs: "followUp" } : { triggerTurn: true },
+					);
+					return;
+				}
 				if (!status.done) return;
 				clearInterval(watcher);
 				pi.sendMessage(
@@ -223,7 +255,7 @@ export default function sitraLead(pi: Pi): void {
 						text: `Started in ${where}. You'll get a message with the result when it finishes; don't wait or poll. Log: ${log}`,
 					},
 				],
-				details: { log },
+				details: { log, runId },
 			};
 		},
 	});

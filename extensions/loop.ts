@@ -67,21 +67,28 @@ const AdvisorRun = Type.Object(
 		evidence: Type.Array(Type.String()),
 		openQuestions: Type.Array(Question),
 		assumptions: Type.Array(Type.String()),
+		acceptanceTestFiles: Type.Optional(Type.Array(Type.String())),
 		outputTokens: Type.Optional(Type.Number()),
 		contextTokens: Type.Optional(Type.Number()),
 	},
 	{ additionalProperties: false },
 );
 
+const TestHash = Type.Object(
+	{ file: Type.String(), sha256: Type.Optional(Type.String()), missing: Type.Optional(Type.Boolean()) },
+	{ additionalProperties: false },
+);
+
 const BuildState = Type.Object(
 	{
 		commit: Type.Optional(Type.String()),
+		redCommit: Type.Optional(Type.String()),
 		testFiles: Type.Array(Type.String()),
-		testHashes: Type.Array(
-			Type.Object({ file: Type.String(), sha256: Type.String() }, { additionalProperties: false }),
-		),
+		testHashes: Type.Array(TestHash),
 		redRunLog: Type.Optional(Type.String()),
 		greenRunLog: Type.Optional(Type.String()),
+		redRunCommand: Type.Optional(Type.String()),
+		greenRunCommand: Type.Optional(Type.String()),
 	},
 	{ additionalProperties: false },
 );
@@ -124,6 +131,19 @@ const Block = Type.Object(
 	{ additionalProperties: false },
 );
 
+const VerifierRequest = Type.Object(
+	{
+		commit: Type.String({ minLength: 1 }),
+		diffHash: Type.String({ minLength: 1 }),
+		testHashes: Type.Array(TestHash),
+		task: Type.String({ minLength: 1 }),
+		dispatchId: Type.String({ minLength: 1 }),
+		runLogs: Type.Array(Type.String()),
+		maxVerifierRerunMs: Type.Number(),
+	},
+	{ additionalProperties: false },
+);
+
 export const LOOP_BRIEF_SCHEMA = Type.Object(
 	{
 		version: Type.Literal(1),
@@ -159,8 +179,10 @@ export const LOOP_STATE_SCHEMA = Type.Object(
 			Type.Object({ author: Type.Literal("lead"), text: Type.String() }, { additionalProperties: false }),
 		),
 		approval: Type.Optional(Approval),
+		frozenBrief: Type.Optional(LOOP_BRIEF_SCHEMA),
 		frozenBriefHash: Type.Optional(Type.String()),
 		build: BuildState,
+		verifierRequest: Type.Optional(VerifierRequest),
 		verification: Type.Optional(
 			Type.Object(
 				{
@@ -183,6 +205,12 @@ export type Approval = Static<typeof Approval>;
 export type AdvisorRun = Static<typeof AdvisorRun>;
 export type LoopState = Static<typeof LOOP_STATE_SCHEMA>;
 export type LoopBrief = Static<typeof LOOP_BRIEF_SCHEMA>;
+export type LoopTestHash = Static<typeof TestHash>;
+export type StaleReasonKind = "branch-changed" | "base-moved" | "brief" | "test-hashes" | "diff" | "dirty-worktree";
+export interface StaleReason {
+	kind: StaleReasonKind;
+	detail: string;
+}
 
 export interface AdvisorDispatch {
 	role: AdvisorRole;
@@ -193,7 +221,8 @@ export type LoopEffect =
 	| { type: "dispatch-advisors"; roles: AdvisorRole[]; advisors: AdvisorDispatch[] }
 	| { type: "ask-person"; reason: string; question: LoopQuestion }
 	| { type: "write-lead-plan"; brief: LoopBrief }
-	| { type: "brief-approved"; brief: LoopBrief };
+	| { type: "brief-approved"; brief: LoopBrief }
+	| { type: "dispatch-verifier"; agent: "verifier"; task: string };
 
 export function advisorKey(role: AdvisorRole | HelperReportRole): AdvisorKey {
 	if (role === "test-design") return "testDesign";
@@ -248,6 +277,7 @@ export function createLoopState(input: {
 }
 
 export function buildBrief(state: LoopState): LoopBrief {
+	if (state.frozenBrief) return state.frozenBrief;
 	const brief: LoopBrief = {
 		version: 1,
 		goal: state.goal,
@@ -261,8 +291,16 @@ export function buildBrief(state: LoopState): LoopBrief {
 	return brief;
 }
 
+function sha256Text(text: string): string {
+	return createHash("sha256").update(text).digest("hex");
+}
+
 export function briefHash(brief: LoopBrief): string {
-	return createHash("sha256").update(JSON.stringify(brief)).digest("hex");
+	return sha256Text(JSON.stringify(brief));
+}
+
+export function diffHash(diff: string): string {
+	return sha256Text(diff);
 }
 
 function list(items: string[]): string {
@@ -361,6 +399,13 @@ function withBlock(
 	},
 ): { state: LoopState; effects: LoopEffect[] } {
 	if (state.block) {
+		if (state.block.questionId === input.question.id) {
+			const current = state.questions.find((question) => question.id === state.block?.questionId) ?? input.question;
+			return {
+				state,
+				effects: [{ type: "ask-person", reason: state.block.kind, question: current }],
+			};
+		}
 		const questions = state.questions.map((question) =>
 			question.id === state.block?.questionId
 				? { ...question, text: `${question.text}\n\nAdditional problem: ${input.question.text}` }
@@ -376,9 +421,10 @@ function withBlock(
 	if (resumeStage === "blocked" || resumeStage === "needs-person") {
 		throw new Error(`invalid block resumeStage ${resumeStage}`);
 	}
+	const postApprovalBlock = resumeStage === "build" || resumeStage === "verify" || resumeStage === "classify";
 	const blocked: LoopState = {
 		...state,
-		stage: input.kind === "questions" ? "needs-person" : "blocked",
+		stage: input.kind === "questions" && !postApprovalBlock ? "needs-person" : "blocked",
 		block: {
 			kind: input.kind,
 			questionId: input.question.id,
@@ -460,6 +506,13 @@ function toAdvisorRun(
 		evidence: report.evidence,
 		openQuestions: reportQuestions(role, report),
 		assumptions: report.assumptions,
+		...(role === "test-design"
+			? {
+					acceptanceTestFiles: (report.details as { acceptanceTests: { targetFile: string }[] }).acceptanceTests.map(
+						(test) => test.targetFile,
+					),
+				}
+			: {}),
 		...tokens,
 	};
 	return run;
@@ -518,6 +571,8 @@ export function nextLoopEffects(state: LoopState): LoopEffect[] {
 	if (state.stage === "plan") return [{ type: "write-lead-plan", brief: buildBrief(state) }];
 	if (state.stage === "architecture-review") return architectureEffects(state).effects;
 	if (state.stage === "brief-approved") return [{ type: "brief-approved", brief: buildBrief(state) }];
+	if (state.stage === "verify" && state.verifierRequest)
+		return [{ type: "dispatch-verifier", agent: "verifier", task: state.verifierRequest.task }];
 	return [];
 }
 
@@ -573,11 +628,16 @@ export function answerLoopQuestion(
 			baseHead: input.current.baseHead,
 			questions: answered,
 			dispatchedAdvisors: state.block.pendingAdvisors,
+			...(nextStage === "build"
+				? {
+						build: { testFiles: [], testHashes: [] },
+						verifierRequest: undefined,
+					}
+				: {}),
 		};
-		const next = state.frozenBriefHash ? { ...updated, frozenBriefHash: briefHash(buildBrief(updated)) } : updated;
-		return next.dispatchedAdvisors.length
-			? dispatch(next, next.dispatchedAdvisors)
-			: { state: next, effects: nextLoopEffects(next) };
+		return updated.dispatchedAdvisors.length
+			? dispatch(updated, updated.dispatchedAdvisors)
+			: { state: updated, effects: nextLoopEffects(updated) };
 	}
 	if (
 		state.block.kind === "intake-failed" ||
@@ -596,6 +656,9 @@ export function answerLoopQuestion(
 			: { state: next, effects: nextLoopEffects(next) };
 	}
 	const roles = state.block.kind === "questions" ? state.block.pendingAdvisors : affectedAdvisors(state);
+	if (state.block.kind === "questions" && state.block.resumeStage === "classify") {
+		return { state: { ...state, questions: answered }, effects: [] };
+	}
 	const advisorRuns = { ...state.advisorRuns };
 	for (const role of roles) delete advisorRuns[advisorKey(role)];
 	const architectureAffected = roles.includes("architecture");
@@ -629,7 +692,7 @@ export function replaceBlockWithStale(
 	if (!reason) return { state, effects: [] };
 	const question: LoopQuestion = {
 		id: STALE_STATE_QUESTION_ID,
-		text: `The loop state is stale: ${reason}. Should this graph continue from the current branch and base head?`,
+		text: `The loop state is stale: ${staleReasonText(reason)}. Should this graph continue from the current branch and base head?`,
 		recommended: "Answer how to proceed before the runner dispatches more work.",
 		dependsOn: [],
 	};
@@ -662,33 +725,358 @@ export function applyLeadPlan(state: LoopState, text: string): { state: LoopStat
 export function approveBrief(state: LoopState, approval: Approval): { state: LoopState; effects: LoopEffect[] } {
 	if (state.stage !== "architecture-review") throw new Error(`cannot approve a brief while stage is ${state.stage}`);
 	const approved: LoopState = { ...state, stage: "brief-approved", approval };
-	const frozenBriefHash = briefHash(buildBrief(approved));
-	const next = { ...approved, frozenBriefHash };
+	const frozenBrief = buildBrief(approved);
+	const frozenBriefHash = briefHash(frozenBrief);
+	const next = { ...approved, frozenBrief, frozenBriefHash };
 	return { state: next, effects: [{ type: "brief-approved", brief: buildBrief(next) }] };
 }
 
-export function staleReason(state: LoopState, current: { branch: string; baseHead: string }): string | undefined {
-	if (state.branch !== current.branch) return `branch changed from ${state.branch} to ${current.branch}`;
-	if (state.baseHead !== current.baseHead) return `base head changed from ${state.baseHead} to ${current.baseHead}`;
-	if (state.frozenBriefHash && state.frozenBriefHash !== briefHash(buildBrief(state))) {
-		return "frozen brief hash is not current";
+export function startBuild(state: LoopState): { state: LoopState; effects: LoopEffect[] } {
+	if (state.stage !== "brief-approved") throw new Error(`cannot start build while stage is ${state.stage}`);
+	return { state: { ...state, stage: "build", block: undefined, dispatchedAdvisors: [] }, effects: [] };
+}
+
+export interface LoopRunEvidence {
+	log: string;
+	done: boolean;
+	exitCode?: number;
+	command?: string;
+	loop?: { commit: string; testHashes: LoopTestHash[] };
+}
+
+function sameHashes(a: LoopTestHash[], b: LoopTestHash[]): boolean {
+	if (a.some((item) => item.missing) || b.some((item) => item.missing)) return false;
+	return (
+		JSON.stringify([...a].sort((x, y) => x.file.localeCompare(y.file))) ===
+		JSON.stringify([...b].sort((x, y) => x.file.localeCompare(y.file)))
+	);
+}
+
+function runTieProblem(run: LoopRunEvidence, testHashes: LoopTestHash[]): string | undefined {
+	if (!run.loop) return "it is missing run header loop metadata";
+	const missing = run.loop.testHashes.find((item) => item.missing);
+	if (missing) return `${missing.file} was missing when the run started`;
+	if (!sameHashes(run.loop.testHashes, testHashes)) return "it is tied to different test hashes";
+	return undefined;
+}
+
+function redRunProblem(
+	redRun: LoopRunEvidence | undefined,
+	commit: string,
+	testHashes: LoopTestHash[],
+): string | undefined {
+	if (!redRun) return "red run is missing";
+	if (!redRun.done) return "red run has not finished";
+	if (redRun.exitCode === undefined || Number.isNaN(redRun.exitCode)) return "red run has no exit code";
+	if (redRun.exitCode === 0) return "red run passed; it must fail before implementation";
+	const tie = runTieProblem(redRun, testHashes);
+	if (tie) return `red run is invalid because ${tie}`;
+	if (redRun.loop?.commit === commit) return "red run must be tied to a tests-only ancestor commit, not HEAD";
+	return undefined;
+}
+
+function greenRunProblem(
+	greenRun: LoopRunEvidence | undefined,
+	commit: string,
+	testHashes: LoopTestHash[],
+): string | undefined {
+	if (!greenRun) return "green run is missing";
+	if (!greenRun.done) return "green run has not finished";
+	if (greenRun.exitCode !== 0) return `green run did not pass (exit ${greenRun.exitCode ?? "unknown"})`;
+	const tie = runTieProblem(greenRun, testHashes);
+	if (tie) return `green run is invalid because ${tie}`;
+	if (greenRun.loop?.commit !== commit) return `green run is tied to commit ${greenRun.loop?.commit}, not ${commit}`;
+	return undefined;
+}
+
+function buildBlock(state: LoopState, problem: string): { state: LoopState; effects: LoopEffect[] } {
+	return withBlock(state, {
+		kind: "questions",
+		resumeStage: "build",
+		question: {
+			id: "build-evidence",
+			text: `Build evidence is not ready for verification: ${problem}. Record a valid red run and green run tied to the current commit and test hashes.`,
+			recommended:
+				"Run the agreed test so it fails before implementation, then passes after implementation, and record both run logs.",
+			dependsOn: [],
+		},
+	});
+}
+
+export function blockForBuildEvidenceFailure(
+	state: LoopState,
+	problem: string,
+): { state: LoopState; effects: LoopEffect[] } {
+	return buildBlock(state, problem);
+}
+
+function agreedTestProblem(state: LoopState, testFiles: string[]): string | undefined {
+	if (testFiles.length === 0) return "at least one test file is required";
+	const agreed = state.advisorRuns.testDesign?.acceptanceTestFiles ?? [];
+	if (agreed.length === 0) return "frozen brief has no acceptance test target files";
+	const got = [...testFiles].sort();
+	const want = [...agreed].sort();
+	if (JSON.stringify(got) !== JSON.stringify(want)) {
+		return `test files ${got.join(", ")} are not in the frozen brief (${want.join(", ")})`;
 	}
 	return undefined;
 }
 
+export function verifierTask(input: {
+	brief: LoopBrief;
+	diff: string;
+	commit: string;
+	testHashes: LoopTestHash[];
+	redRunLog: string;
+	greenRunLog: string;
+	redRunCommand?: string;
+	greenRunCommand?: string;
+	dispatchId: string;
+	maxVerifierRerunMs: number;
+}): string {
+	return [
+		"You are the independent LOOPS verifier. Start from this runner-written evidence only.",
+		`maxVerifierRerunMs: ${input.maxVerifierRerunMs}`,
+		`Commit: ${input.commit}`,
+		`Verifier dispatchId: ${input.dispatchId ?? ""}`,
+		"Set this exact dispatchId in helper_report.",
+		"Frozen brief:",
+		JSON.stringify(input.brief, null, "\t"),
+		"Diff against baseRef:",
+		input.diff,
+		"Test hashes:",
+		JSON.stringify(input.testHashes, null, "\t"),
+		"Run logs:",
+		`- redRunLog: ${input.redRunLog}`,
+		...(input.redRunCommand ? [`  command: ${input.redRunCommand}`] : []),
+		`- greenRunLog: ${input.greenRunLog}`,
+		...(input.greenRunCommand ? [`  command: ${input.greenRunCommand}`] : []),
+		"",
+		"Report only with helper_report role verifier details. Record every check rerun and every log accepted with a reason. Accept a saved log only when it is tied to this exact commit and test hashes; otherwise rerun the check if it is cheap under maxVerifierRerunMs and not a full suite, or report blocked.",
+	].join("\n");
+}
+
+export function recordBuildEvidence(
+	state: LoopState,
+	input: {
+		commit: string;
+		diff: string;
+		testFiles: string[];
+		testHashes: LoopTestHash[];
+		redRun?: LoopRunEvidence;
+		greenRun?: LoopRunEvidence;
+		dispatchId: string;
+		maxVerifierRerunMs: number;
+	},
+): { state: LoopState; effects: LoopEffect[] } {
+	if (state.stage !== "build") throw new Error(`cannot record build evidence while stage is ${state.stage}`);
+	const agreedProblem = agreedTestProblem(state, input.testFiles);
+	const buildState: LoopState = {
+		...state,
+		build: {
+			commit: input.commit,
+			...(input.redRun?.loop?.commit ? { redCommit: input.redRun.loop.commit } : {}),
+			testFiles: input.testFiles,
+			testHashes: input.testHashes,
+			...(input.redRun ? { redRunLog: input.redRun.log } : {}),
+			...(input.greenRun ? { greenRunLog: input.greenRun.log } : {}),
+			...(input.redRun?.command ? { redRunCommand: input.redRun.command } : {}),
+			...(input.greenRun?.command ? { greenRunCommand: input.greenRun.command } : {}),
+		},
+	};
+	if (agreedProblem) return buildBlock(buildState, agreedProblem);
+	const redProblem = redRunProblem(input.redRun, input.commit, input.testHashes);
+	if (redProblem) return buildBlock(buildState, redProblem);
+	const greenProblem = greenRunProblem(input.greenRun, input.commit, input.testHashes);
+	if (greenProblem) return buildBlock(buildState, greenProblem);
+	const redRunLog = input.redRun?.log;
+	const greenRunLog = input.greenRun?.log;
+	if (!redRunLog || !greenRunLog) return buildBlock(buildState, "run logs are missing");
+	const task = verifierTask({
+		brief: buildBrief(buildState),
+		diff: input.diff,
+		commit: input.commit,
+		testHashes: input.testHashes,
+		redRunLog,
+		greenRunLog,
+		redRunCommand: input.redRun?.command,
+		greenRunCommand: input.greenRun?.command,
+		dispatchId: input.dispatchId,
+		maxVerifierRerunMs: input.maxVerifierRerunMs,
+	});
+	const next: LoopState = {
+		...buildState,
+		stage: "verify",
+		block: undefined,
+		verifierRequest: {
+			commit: input.commit,
+			diffHash: diffHash(input.diff),
+			testHashes: input.testHashes,
+			task,
+			dispatchId: input.dispatchId,
+			runLogs: [redRunLog, greenRunLog],
+			maxVerifierRerunMs: input.maxVerifierRerunMs,
+		},
+	};
+	return { state: next, effects: [{ type: "dispatch-verifier", agent: "verifier", task }] };
+}
+
+function verifierBlock(state: LoopState, reason: string): { state: LoopState; effects: LoopEffect[] } {
+	return withBlock(state, {
+		kind: "intake-failed",
+		resumeStage: "verify",
+		question: {
+			id: "verifier-intake",
+			text: `Verifier report could not be accepted: ${reason}. Should the runner ask for a fresh verifier report?`,
+			recommended: "Ask for a fresh verifier report with logs tied to the exact commit and test hashes.",
+			dependsOn: [],
+		},
+	});
+}
+
+function classifyBlock(
+	state: LoopState,
+	status: "missed" | "blocked",
+	report: HelperReport,
+): { state: LoopState; effects: LoopEffect[] } {
+	const detail = report.openQuestions.length ? `\n\nVerifier questions:\n${list(report.openQuestions)}` : "";
+	return withBlock(
+		{
+			...state,
+			stage: "classify",
+			verification: {
+				status,
+				runLogs: state.verifierRequest?.runLogs ?? [],
+				rerunChecks: (report.details as { rerunChecks: Static<typeof RerunCheck>[] }).rerunChecks,
+				acceptedLogs: (report.details as { acceptedLogs: Static<typeof LogDecision>[] }).acceptedLogs,
+				summary: report.summary,
+			},
+		},
+		{
+			kind: "questions",
+			resumeStage: "classify",
+			question: {
+				id: "verifier-classify",
+				text: `Verifier ${status === "missed" ? "found a miss" : "blocked"}: ${report.summary}.${detail}`,
+				recommended: "Review the verifier report and decide the next step; slice 2a stops here.",
+				dependsOn: [],
+			},
+		},
+	);
+}
+
+export function applyVerifierReport(
+	state: LoopState,
+	report: HelperReport,
+	options: { acceptedLogs: LoopRunEvidence[] },
+): { state: LoopState; effects: LoopEffect[] } {
+	if (state.block) {
+		const question = state.questions.find((item) => item.id === state.block?.questionId);
+		return {
+			state,
+			effects: question ? [{ type: "ask-person", reason: state.block.kind, question }] : [],
+		};
+	}
+	if (state.stage !== "verify") throw new Error(`cannot apply verifier report while stage is ${state.stage}`);
+	if (!state.verifierRequest) throw new Error("verify stage is missing verifier request");
+	if (report.role !== "verifier") throw new Error("verifier report is missing role");
+	if (!Value.Check(ROLE_HELPER_REPORT_SCHEMAS.verifier, report)) {
+		const [first] = Value.Errors(ROLE_HELPER_REPORT_SCHEMAS.verifier, report);
+		const where = first?.instancePath ? `${first.instancePath}: ` : "";
+		throw new Error(`invalid verifier helper_report: ${where}${first?.message ?? "report does not match schema"}`);
+	}
+	const details = report.details as {
+		rerunChecks: Static<typeof RerunCheck>[];
+		acceptedLogs: Static<typeof LogDecision>[];
+		goalMatched: boolean;
+	};
+	for (const accepted of details.acceptedLogs) {
+		const evidence = options.acceptedLogs.find((run) => run.log === accepted.log);
+		if (!evidence) return verifierBlock(state, `${accepted.log} was accepted but could not be read`);
+		const tie = runTieProblem(evidence, state.verifierRequest.testHashes);
+		if (tie) return verifierBlock(state, `${accepted.log} was accepted but ${tie}`);
+		if (evidence.loop?.commit !== state.verifierRequest.commit) {
+			return verifierBlock(
+				state,
+				`${accepted.log} was accepted but it is tied to commit ${evidence.loop?.commit}, not ${state.verifierRequest.commit}`,
+			);
+		}
+	}
+	const verification = {
+		status: "passed" as const,
+		runLogs: state.verifierRequest.runLogs,
+		rerunChecks: details.rerunChecks,
+		acceptedLogs: details.acceptedLogs,
+		summary: report.summary,
+	};
+	if (report.status === "done" && details.goalMatched) {
+		return { state: { ...state, stage: "done", block: undefined, verification }, effects: [] };
+	}
+	return classifyBlock(state, report.status === "done" ? "missed" : "blocked", report);
+}
+
+export function staleReason(
+	state: LoopState,
+	current: {
+		branch: string;
+		baseHead: string;
+		testHashes?: LoopTestHash[];
+		diffHash?: string;
+		dirtyWorktree?: boolean;
+	},
+): StaleReason | undefined {
+	if (state.branch !== current.branch)
+		return { kind: "branch-changed", detail: `branch changed from ${state.branch} to ${current.branch}` };
+	if (state.baseHead !== current.baseHead)
+		return { kind: "base-moved", detail: `base head changed from ${state.baseHead} to ${current.baseHead}` };
+	if (state.frozenBriefHash && state.frozenBriefHash !== briefHash(buildBrief(state))) {
+		return { kind: "brief", detail: "frozen brief hash is not current" };
+	}
+	if (current.dirtyWorktree) return { kind: "dirty-worktree", detail: "worktree has uncommitted changes" };
+	if (
+		current.testHashes &&
+		state.build.testHashes.length > 0 &&
+		!sameHashes(state.build.testHashes, current.testHashes)
+	) {
+		return { kind: "test-hashes", detail: "test hashes do not match test files" };
+	}
+	if (current.diffHash && state.verifierRequest && state.verifierRequest.diffHash !== current.diffHash) {
+		return { kind: "diff", detail: "diff no longer matches verifier request" };
+	}
+	return undefined;
+}
+
+export function staleReasonText(reason: StaleReason): string {
+	return reason.detail;
+}
+
 export function blockForStaleState(
 	state: LoopState,
-	current: { branch: string; baseHead: string },
+	current: {
+		branch: string;
+		baseHead: string;
+		testHashes?: LoopTestHash[];
+		diffHash?: string;
+		dirtyWorktree?: boolean;
+	},
 ): { state: LoopState; effects: LoopEffect[] } {
 	const reason = staleReason(state, current);
 	if (!reason) return { state, effects: [] };
 	const question: LoopQuestion = {
 		id: STALE_STATE_QUESTION_ID,
-		text: `The loop state is stale: ${reason}. Should this graph continue from the current branch and base head?`,
+		text: `The loop state is stale: ${staleReasonText(reason)}. Should this graph continue from the current branch and base head?`,
 		recommended: "Answer how to proceed before the runner dispatches more work.",
 		dependsOn: [],
 	};
-	return withBlock(state, { kind: "stale", question, pendingAdvisors: pendingAdvisorsForResume(state) });
+	const verifyEvidenceStale =
+		state.stage === "verify" &&
+		(reason.kind === "test-hashes" || reason.kind === "diff" || reason.kind === "dirty-worktree");
+	return withBlock(state, {
+		kind: "stale",
+		question,
+		resumeStage: verifyEvidenceStale ? "build" : undefined,
+		pendingAdvisors: verifyEvidenceStale ? [] : pendingAdvisorsForResume(state),
+	});
 }
 
 export function blockForAdvisorIntakeFailure(
@@ -703,6 +1091,13 @@ export function blockForAdvisorIntakeFailure(
 		dependsOn: [],
 	};
 	return withBlock(state, { kind: "intake-failed", question, pendingAdvisors: [role] });
+}
+
+export function blockForVerifierIntakeFailure(
+	state: LoopState,
+	reason: string,
+): { state: LoopState; effects: LoopEffect[] } {
+	return verifierBlock(state, reason);
 }
 
 export function blockForGitFailure(state: LoopState, reason: string): { state: LoopState; effects: LoopEffect[] } {

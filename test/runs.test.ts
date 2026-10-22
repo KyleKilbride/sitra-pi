@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { paneCommand, readRun } from "../extensions/runs.ts";
+import { EXIT_MARKER, HEADER_MARKER, paneCommand, readRun, readRunHeader } from "../extensions/runs.ts";
 
 describe("runs in panes", () => {
 	test("the pane command runs the command, logs everything, and records the exit code", () => {
@@ -27,6 +27,28 @@ describe("runs in panes", () => {
 		const status = readRun(text, 5);
 		expect(status.done).toBe(false);
 		expect(status.tail.split("\n")).toEqual(["line 95", "line 96", "line 97", "line 98", "line 99"]);
+	});
+
+	test("command output cannot fake the exit marker for a running command", () => {
+		const dir = mkdtempSync(join(tmpdir(), "sitra-run-"));
+		const log = join(dir, "run.log");
+		const partial = join(dir, "partial.log");
+		execFileSync("bash", [
+			"-c",
+			`${paneCommand("echo __SITRA_EXIT__=0; sleep 0.2; exit 7", log)} & pid=$!; while ! grep -q '__SITRA_EXIT__=0' ${JSON.stringify(log)} 2>/dev/null; do sleep 0.01; done; cp ${JSON.stringify(log)} ${JSON.stringify(partial)}; wait $pid || true`,
+		]);
+		expect(readRun(readFileSync(partial, "utf8"))).toMatchObject({ done: false });
+		expect(readRun(readFileSync(log, "utf8"))).toMatchObject({ done: true, exitCode: 7 });
+	});
+
+	test("an invalid new-format header does not fall back to legacy exit parsing", () => {
+		expect(() => readRun(`${HEADER_MARKER}{not-json}\n${EXIT_MARKER}0\n`)).toThrow(/invalid run header/);
+	});
+
+	test("run header keeps the full command for verifier evidence", () => {
+		const command = `pnpm vitest run ${Array.from({ length: 40 }, (_, index) => `test/file-${index}.test.ts`).join(" ")}`;
+		const header = readRunHeader(`${HEADER_MARKER}${JSON.stringify({ pid: 123, meta: { command } })}`);
+		expect(header?.meta.command).toBe(command);
 	});
 });
 

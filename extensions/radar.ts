@@ -293,9 +293,21 @@ const LEGACY_RUN_STALE_MS = 15 * 60_000;
 function readFirstLine(file: string): string {
 	const fd = openSync(file, "r");
 	try {
+		const chunks: Buffer[] = [];
 		const buffer = Buffer.alloc(2048);
-		const read = readSync(fd, buffer, 0, buffer.length, 0);
-		return buffer.toString("utf8", 0, read).split("\n")[0] ?? "";
+		let position = 0;
+		while (true) {
+			const read = readSync(fd, buffer, 0, buffer.length, position);
+			if (read <= 0) break;
+			const newline = buffer.subarray(0, read).indexOf(10);
+			if (newline >= 0) {
+				chunks.push(Buffer.from(buffer.subarray(0, newline)));
+				break;
+			}
+			chunks.push(Buffer.from(buffer.subarray(0, read)));
+			position += read;
+		}
+		return Buffer.concat(chunks).toString("utf8");
 	} finally {
 		closeSync(fd);
 	}
@@ -387,17 +399,17 @@ function collectRuns(
 ): RunSummary[] {
 	const dir = join(profileDir, "runs");
 	if (!existsSync(dir)) return [];
-	try {
-		const files = readdirSync(dir)
-			.filter((f) => f.endsWith(".log"))
-			.sort()
-			.reverse()
-			.slice(0, 30);
-		const runs = files.map((file): RunSummary => {
+	const files = readdirSync(dir)
+		.filter((f) => f.endsWith(".log"))
+		.sort()
+		.reverse()
+		.slice(0, 30);
+	const runs = files.flatMap((file): RunSummary[] => {
+		try {
 			const full = join(dir, file);
-			// The exit marker is the log's last line, so the end of the log is all that's needed.
-			const status = readRun(readLastLines(full, 100), 80);
-			const header = readRunHeader(readFirstLine(full));
+			const firstLine = readFirstLine(full);
+			const status = readRun(`${firstLine}\n${readLastLines(full, 100)}`, 80);
+			const header = readRunHeader(firstLine);
 			const mtimeMs = statSync(full).mtimeMs;
 			const label =
 				header?.meta.label ?? file.replace(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-/, "").replace(/\.log$/, "");
@@ -406,27 +418,40 @@ function collectRuns(
 					? "passed"
 					: "failed"
 				: unfinishedRunState(header, mtimeMs, nowMs, pidAlive);
-			return {
-				id: full,
-				label,
-				state,
-				...(header?.meta.project ? { project: header.meta.project } : {}),
-				...(header?.meta.branch ? { branch: header.meta.branch } : {}),
-				...(header?.meta.agent ? { agent: header.meta.agent } : {}),
-				...(header?.meta.sessionId ? { sessionId: header.meta.sessionId } : {}),
-				tail: status.tail,
-				done: status.done,
-				...(status.exitCode !== undefined ? { exitCode: status.exitCode } : {}),
-				updatedAt: new Date(mtimeMs).toISOString(),
-			};
-		});
-		// Live runs first so "who is running what" is the top of the list; unknowns stay visible just below them.
-		return runs.toSorted(
-			(a, b) => sortRunGroup(a.state) - sortRunGroup(b.state) || b.updatedAt.localeCompare(a.updatedAt),
-		);
-	} catch {
-		return [];
-	}
+			return [
+				{
+					id: full,
+					label,
+					state,
+					...(header?.meta.project ? { project: header.meta.project } : {}),
+					...(header?.meta.branch ? { branch: header.meta.branch } : {}),
+					...(header?.meta.agent ? { agent: header.meta.agent } : {}),
+					...(header?.meta.sessionId ? { sessionId: header.meta.sessionId } : {}),
+					tail: status.tail,
+					done: status.done,
+					...(status.exitCode !== undefined ? { exitCode: status.exitCode } : {}),
+					updatedAt: new Date(mtimeMs).toISOString(),
+				},
+			];
+		} catch (error) {
+			if ((error as { code?: unknown }).code === "ENOENT") return [];
+			const full = join(dir, file);
+			return [
+				{
+					id: full,
+					label: file.replace(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-/, "").replace(/\.log$/, ""),
+					state: "unknown",
+					tail: `Run log error: ${String(error)}`,
+					done: false,
+					updatedAt: new Date(nowMs).toISOString(),
+				},
+			];
+		}
+	});
+	// Live runs first so "who is running what" is the top of the list; unknowns stay visible just below them.
+	return runs.toSorted(
+		(a, b) => sortRunGroup(a.state) - sortRunGroup(b.state) || b.updatedAt.localeCompare(a.updatedAt),
+	);
 }
 
 function collectOpenPullRequests(repos: readonly string[]): { items: PullRequestSummary[]; notices: string[] } {

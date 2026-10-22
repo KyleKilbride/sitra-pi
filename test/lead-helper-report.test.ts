@@ -1,6 +1,13 @@
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { type HelperReport, renderHelperReport } from "../extensions/helper-report.ts";
 import sitraLead from "../extensions/lead.ts";
+import { createLoopState, type LoopState } from "../extensions/loop.ts";
+import { loopStatePath, writeLoopStateFile } from "../extensions/loop-pi.ts";
+import { readRunHeader } from "../extensions/runs.ts";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
@@ -36,6 +43,33 @@ function fakePi() {
 const content = (text: string) => [{ type: "text", text }];
 
 afterEach(() => vi.unstubAllEnvs());
+
+function gitWorktree(): { cwd: string; head: string } {
+	const cwd = realpathSync(mkdtempSync(join(tmpdir(), "sitra-lead-loop-")));
+	execFileSync("git", ["init", "-b", "main"], { cwd, stdio: "ignore" });
+	writeFileSync(join(cwd, "README.md"), "test\n");
+	writeFileSync(join(cwd, "loop.test.ts"), "expect(true).toBe(true)\n");
+	execFileSync("git", ["add", "."], { cwd, stdio: "ignore" });
+	execFileSync("git", ["-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", "initial"], {
+		cwd,
+		stdio: "ignore",
+	});
+	const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
+	execFileSync("git", ["remote", "add", "origin", cwd], { cwd, stdio: "ignore" });
+	execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd, stdio: "ignore" });
+	execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], {
+		cwd,
+		stdio: "ignore",
+	});
+	execFileSync("git", ["checkout", "-b", "feature"], { cwd, stdio: "ignore" });
+	return { cwd, head };
+}
+
+function addLinkedWorktree(repo: string): string {
+	const linked = join(repo, ".worktrees", "linked");
+	execFileSync("git", ["worktree", "add", "-q", "-b", "linked", linked], { cwd: repo, stdio: "ignore" });
+	return linked;
+}
 
 describe("helper_report", () => {
 	test("only helper sessions get a schema-validated report tool", async () => {
@@ -109,5 +143,197 @@ describe("helper_report", () => {
 		expect(rewritten).toBeUndefined();
 		expect(messages[0]?.content[0]?.text).toBe(renderHelperReport(report));
 		expect(messages[1]?.content[0]?.text).toBe("All good, no details.");
+	});
+});
+
+describe("run_in_pane loop metadata", () => {
+	test("writes active build loop commit and frozen test hashes into the run header", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-lead-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { tools } = fakePi();
+		const { cwd, head } = gitWorktree();
+		const state: LoopState = {
+			...createLoopState({
+				worktree: cwd,
+				branch: "feature",
+				baseRef: "origin/main",
+				baseHead: head,
+				goal: "Add the runner",
+				limits: [],
+				done: [],
+			}),
+			stage: "build",
+			advisorRuns: {
+				testDesign: {
+					status: "done",
+					summary: "tests",
+					evidence: [],
+					openQuestions: [],
+					assumptions: [],
+					acceptanceTestFiles: ["loop.test.ts"],
+				},
+			},
+			frozenBrief: {
+				version: 1,
+				goal: "Add the runner",
+				limits: [],
+				done: [],
+				questions: [],
+				advisorRuns: {
+					testDesign: {
+						status: "done",
+						summary: "tests",
+						evidence: [],
+						openQuestions: [],
+						assumptions: [],
+						acceptanceTestFiles: ["loop.test.ts"],
+					},
+				},
+			},
+		};
+		writeLoopStateFile(loopStatePath(profile, cwd, "feature"), state);
+
+		const result = await tools
+			.get("run_in_pane")
+			?.execute("1", { command: "true", label: "loop red" }, undefined, undefined, { cwd });
+		const details = result?.details as { log: string; runId: string };
+		const log = details.log;
+		execFileSync("bash", [
+			"-c",
+			`for i in {1..50}; do [ -s ${JSON.stringify(log)} ] && exit 0; sleep 0.05; done; exit 1`,
+		]);
+		const header = readRunHeader(readFileSync(log, "utf8").split("\n")[0] ?? "");
+		expect(header?.meta.loop?.commit).toBe(head);
+		expect(header?.meta.loop?.testHashes).toEqual([
+			{
+				file: "loop.test.ts",
+				sha256: execFileSync("sha256sum", ["loop.test.ts"], { cwd, encoding: "utf8" }).split(/\s+/)[0],
+			},
+		]);
+		expect(details.runId).toBeTypeOf("string");
+	});
+
+	test("uses linked worktree state and hashes files in that worktree", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-lead-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { tools } = fakePi();
+		const { cwd, head } = gitWorktree();
+		const linked = addLinkedWorktree(cwd);
+		writeFileSync(join(linked, "loop.test.ts"), "expect('linked').toBe('linked')\n");
+		execFileSync("git", ["add", "loop.test.ts"], { cwd: linked, stdio: "ignore" });
+		execFileSync(
+			"git",
+			["-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", "linked test"],
+			{
+				cwd: linked,
+				stdio: "ignore",
+			},
+		);
+		const linkedHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: linked, encoding: "utf8" }).trim();
+		const state: LoopState = {
+			...createLoopState({
+				worktree: linked,
+				branch: "linked",
+				baseRef: "origin/main",
+				baseHead: head,
+				goal: "Add the runner",
+				limits: [],
+				done: [],
+			}),
+			stage: "build",
+			frozenBrief: {
+				version: 1,
+				goal: "Add the runner",
+				limits: [],
+				done: [],
+				questions: [],
+				advisorRuns: {
+					testDesign: {
+						status: "done",
+						summary: "tests",
+						evidence: [],
+						openQuestions: [],
+						assumptions: [],
+						acceptanceTestFiles: ["loop.test.ts"],
+					},
+				},
+			},
+		};
+		writeLoopStateFile(loopStatePath(profile, linked, "linked"), state);
+
+		const result = await tools
+			.get("run_in_pane")
+			?.execute("1", { command: "true", label: "linked red" }, undefined, undefined, { cwd: linked });
+		const details = result?.details as { log: string };
+		execFileSync("bash", [
+			"-c",
+			`for i in {1..50}; do [ -s ${JSON.stringify(details.log)} ] && exit 0; sleep 0.05; done; exit 1`,
+		]);
+		const header = readRunHeader(readFileSync(details.log, "utf8").split("\n")[0] ?? "");
+		expect(header?.meta.loop?.commit).toBe(linkedHead);
+		expect(header?.meta.loop?.testHashes?.[0]?.sha256).toBe(
+			execFileSync("sha256sum", ["loop.test.ts"], { cwd: linked, encoding: "utf8" }).split(/\s+/)[0],
+		);
+	});
+
+	test("surfaces active loop state read failures instead of dropping loop metadata", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-lead-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { tools } = fakePi();
+		const { cwd } = gitWorktree();
+		mkdirSync(join(profile, "loops"), { recursive: true });
+		writeFileSync(loopStatePath(profile, cwd, "feature"), "{");
+
+		await expect(
+			tools.get("run_in_pane")?.execute("1", { command: "true", label: "loop red" }, undefined, undefined, { cwd }),
+		).rejects.toThrow(/invalid loop state JSON/);
+	});
+
+	test("ordinary runs during build record missing frozen test files instead of failing", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-lead-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { tools } = fakePi();
+		const { cwd, head } = gitWorktree();
+		const state: LoopState = {
+			...createLoopState({
+				worktree: cwd,
+				branch: "feature",
+				baseRef: "origin/main",
+				baseHead: head,
+				goal: "Add the runner",
+				limits: [],
+				done: [],
+			}),
+			stage: "build",
+			frozenBrief: {
+				version: 1,
+				goal: "Add the runner",
+				limits: [],
+				done: [],
+				questions: [],
+				advisorRuns: {
+					testDesign: {
+						status: "done",
+						summary: "tests",
+						evidence: [],
+						openQuestions: [],
+						assumptions: [],
+						acceptanceTestFiles: ["missing.test.ts"],
+					},
+				},
+			},
+		};
+		writeLoopStateFile(loopStatePath(profile, cwd, "feature"), state);
+
+		const result = await tools
+			.get("run_in_pane")
+			?.execute("1", { command: "ls", label: "ordinary" }, undefined, undefined, { cwd });
+		const details = result?.details as { log: string };
+		execFileSync("bash", [
+			"-c",
+			`for i in {1..50}; do [ -s ${JSON.stringify(details.log)} ] && exit 0; sleep 0.05; done; exit 1`,
+		]);
+		const header = readRunHeader(readFileSync(details.log, "utf8").split("\n")[0] ?? "");
+		expect(header?.meta.loop?.testHashes).toEqual([{ file: "missing.test.ts", missing: true }]);
 	});
 });
