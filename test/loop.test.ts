@@ -15,8 +15,8 @@ import {
 	LOOP_RUN_MARKER,
 	nextLoopEffects,
 	recordBuildEvidence,
-	startBuild,
 	staleReason,
+	startBuild,
 	startLoop,
 	validateLoopState,
 	verifierTask,
@@ -39,7 +39,15 @@ function approvedState() {
 	}).state;
 }
 
-const run = (overrides: Partial<{ log: string; done: boolean; exitCode: number; commit: string; testHashes: typeof testHashes }> = {}) => ({
+const run = (
+	overrides: Partial<{
+		log: string;
+		done: boolean;
+		exitCode: number;
+		commit: string;
+		testHashes: typeof testHashes;
+	}> = {},
+) => ({
 	log: overrides.log ?? "/tmp/run.log",
 	done: overrides.done ?? true,
 	exitCode: overrides.exitCode ?? 0,
@@ -574,9 +582,9 @@ describe("build and verify slice", () => {
 			maxVerifierRerunMs: 120_000,
 		}).state;
 		expect(staleReason(state, { ...context, testHashes })).toBeUndefined();
-		expect(staleReason(state, { ...context, testHashes: [{ file: "test/loop.test.ts", sha256: "changed" }] })).toContain(
-			"test hashes",
-		);
+		expect(
+			staleReason(state, { ...context, testHashes: [{ file: "test/loop.test.ts", sha256: "changed" }] }),
+		).toContain("test hashes");
 		expect(staleReason(state, { ...context, testHashes, diffHash: "different" })).toContain("diff");
 	});
 

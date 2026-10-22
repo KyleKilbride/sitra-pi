@@ -20,12 +20,12 @@ import {
 	blockForStaleState,
 	blockForVerifierIntakeFailure,
 	diffHash,
-	type LoopEffect,
 	LOOP_RUN_MARKER,
+	type LoopEffect,
 	type LoopState,
 	type LoopTestHash,
-	recordBuildEvidence,
 	recordBlockAnswer,
+	recordBuildEvidence,
 	replaceBlockWithStale,
 	roleForAgent,
 	staleReason,
@@ -712,7 +712,10 @@ export default function sitraLoop(pi: Pi): void {
 			const stale = blockIfBuildOrVerifyStale(ctx.cwd, path, state, gitState);
 			if (stale) {
 				emitEffects(pi, stale.state, stale.effects);
-				return { content: [{ type: "text", text: `stage: ${stale.state.stage}\nstale block recorded` }], details: stale.state };
+				return {
+					content: [{ type: "text", text: `stage: ${stale.state.stage}\nstale block recorded` }],
+					details: stale.state,
+				};
 			}
 			const p = params as {
 				testFiles: string[];

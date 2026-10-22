@@ -64,7 +64,10 @@ function sha256(cwd: string, file: string): string {
 }
 
 function writeRunLog(path: string, commit: string, testHashes: { file: string; sha256: string }[], exitCode: number) {
-	writeFileSync(path, `${LOOP_RUN_MARKER}${JSON.stringify({ commit, testHashes })}\noutput\n${EXIT_MARKER}${exitCode}\n`);
+	writeFileSync(
+		path,
+		`${LOOP_RUN_MARKER}${JSON.stringify({ commit, testHashes })}\noutput\n${EXIT_MARKER}${exitCode}\n`,
+	);
 }
 
 test("loop runner e2e: explicit start to advisor reports, person answer, plan, architecture, and brief-approved", async () => {

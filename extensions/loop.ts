@@ -743,8 +743,10 @@ export interface LoopRunEvidence {
 }
 
 function sameHashes(a: LoopTestHash[], b: LoopTestHash[]): boolean {
-	return JSON.stringify([...a].sort((x, y) => x.file.localeCompare(y.file))) ===
-		JSON.stringify([...b].sort((x, y) => x.file.localeCompare(y.file)));
+	return (
+		JSON.stringify([...a].sort((x, y) => x.file.localeCompare(y.file))) ===
+		JSON.stringify([...b].sort((x, y) => x.file.localeCompare(y.file)))
+	);
 }
 
 function runTieProblem(run: LoopRunEvidence, commit: string, testHashes: LoopTestHash[]): string | undefined {
@@ -788,7 +790,8 @@ function buildBlock(state: LoopState, problem: string): { state: LoopState; effe
 		question: {
 			id: "build-evidence",
 			text: `Build evidence is not ready for verification: ${problem}. Record a valid red run and green run tied to the current commit and test hashes.`,
-			recommended: "Run the agreed test so it fails before implementation, then passes after implementation, and record both run logs.",
+			recommended:
+				"Run the agreed test so it fails before implementation, then passes after implementation, and record both run logs.",
 			dependsOn: [],
 		},
 	});
@@ -966,7 +969,11 @@ export function staleReason(
 	if (state.frozenBriefHash && state.frozenBriefHash !== briefHash(buildBrief(state))) {
 		return "frozen brief hash is not current";
 	}
-	if (current.testHashes && state.build.testHashes.length > 0 && !sameHashes(state.build.testHashes, current.testHashes)) {
+	if (
+		current.testHashes &&
+		state.build.testHashes.length > 0 &&
+		!sameHashes(state.build.testHashes, current.testHashes)
+	) {
 		return "test hashes do not match test files";
 	}
 	if (current.diffHash && state.verifierRequest && state.verifierRequest.diffHash !== current.diffHash) {
