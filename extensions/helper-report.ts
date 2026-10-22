@@ -42,6 +42,12 @@ const AcceptanceTest = Type.Object(
 	{ additionalProperties: false },
 );
 
+const roleDetail = (role: string, properties: Record<string, TSchema>) =>
+	Type.Object(properties, {
+		additionalProperties: false,
+		description: `details when role is "${role}": only ${Object.keys(properties).join(", ")}`,
+	});
+
 export const LogDecision = Type.Object(
 	{
 		log: Type.String({ minLength: 1 }),
@@ -60,58 +66,43 @@ export const RerunCheck = Type.Object(
 );
 
 const RoleDetails = {
-	intent: Type.Object(
-		{
-			questions: Type.Array(Question),
-			doneCandidates: Type.Array(Type.String()),
-			ambiguities: Type.Array(Type.String()),
-		},
-		{ additionalProperties: false },
-	),
-	codebase: Type.Object(
-		{
-			files: Type.Array(Type.String()),
-			existingTests: Type.Array(Type.String()),
-			facts: Type.Array(Type.String()),
-			boundaries: Type.Array(Type.String()),
-			owners: Type.Array(Type.String()),
-		},
-		{ additionalProperties: false },
-	),
-	"test-design": Type.Object(
-		{
-			acceptanceTests: Type.Array(AcceptanceTest),
-		},
-		{ additionalProperties: false },
-	),
-	architecture: Type.Object(
-		{
-			fitsExistingArchitecture: Type.Boolean(),
-			boundaryConcerns: Type.Array(Type.String()),
-			needlessLayersOrCode: Type.Array(Type.String()),
-			simplerShape: Type.Array(Type.String()),
-			checklistEntriesUsed: Type.Array(Type.String()),
-			checklist: Type.Object(
-				{
-					state: Type.Union([Type.Literal("ok"), Type.Literal("absent"), Type.Literal("unreadable")]),
-					path: Type.String({ minLength: 1 }),
-				},
-				{ additionalProperties: false },
-			),
-		},
-		{ additionalProperties: false },
-	),
-	verifier: Type.Object(
-		{
-			checksRun: Type.Array(Type.String()),
-			rerunChecks: Type.Array(RerunCheck),
-			acceptedLogs: Type.Array(LogDecision),
-			testHashesChecked: Type.Array(Type.String()),
-			goalMatched: Type.Boolean(),
-			missClass: Type.Optional(ReworkClass),
-		},
-		{ additionalProperties: false },
-	),
+	intent: roleDetail("intent", {
+		questions: Type.Array(Question),
+		doneCandidates: Type.Array(Type.String()),
+		ambiguities: Type.Array(Type.String()),
+	}),
+	codebase: roleDetail("codebase", {
+		files: Type.Array(Type.String()),
+		existingTests: Type.Array(Type.String()),
+		facts: Type.Array(Type.String()),
+		boundaries: Type.Array(Type.String()),
+		owners: Type.Array(Type.String()),
+	}),
+	"test-design": roleDetail("test-design", {
+		acceptanceTests: Type.Array(AcceptanceTest),
+	}),
+	architecture: roleDetail("architecture", {
+		fitsExistingArchitecture: Type.Boolean(),
+		boundaryConcerns: Type.Array(Type.String()),
+		needlessLayersOrCode: Type.Array(Type.String()),
+		simplerShape: Type.Array(Type.String()),
+		checklistEntriesUsed: Type.Array(Type.String()),
+		checklist: Type.Object(
+			{
+				state: Type.Union([Type.Literal("ok"), Type.Literal("absent"), Type.Literal("unreadable")]),
+				path: Type.String({ minLength: 1 }),
+			},
+			{ additionalProperties: false },
+		),
+	}),
+	verifier: roleDetail("verifier", {
+		checksRun: Type.Array(Type.String()),
+		rerunChecks: Type.Array(RerunCheck),
+		acceptedLogs: Type.Array(LogDecision),
+		testHashesChecked: Type.Array(Type.String()),
+		goalMatched: Type.Boolean(),
+		missClass: Type.Optional(ReworkClass),
+	}),
 } as const;
 
 export const BASE_HELPER_REPORT_SCHEMA = Type.Object(BaseFields, { additionalProperties: false });
@@ -143,14 +134,6 @@ export const HELPER_REPORT_SCHEMA = Type.Union([
 	ROLE_HELPER_REPORT_SCHEMAS.verifier,
 ]);
 
-const roleDetailToolFields = (): Record<string, TSchema> => {
-	const fields: Record<string, TSchema> = {};
-	for (const detail of Object.values(RoleDetails)) {
-		for (const [name, schema] of Object.entries(detail.properties)) fields[name] = Type.Optional(schema);
-	}
-	return fields;
-};
-
 export const HELPER_REPORT_TOOL_SCHEMA = Type.Object(
 	{
 		...BaseFields,
@@ -161,8 +144,7 @@ export const HELPER_REPORT_TOOL_SCHEMA = Type.Object(
 			),
 		),
 		details: Type.Optional(
-			Type.Object(roleDetailToolFields(), {
-				additionalProperties: false,
+			Type.Union(Object.values(RoleDetails), {
 				description: "Role-specific report details. Set role and fill the matching detail fields.",
 			}),
 		),
@@ -192,14 +174,77 @@ function schemaFor(input: unknown): TSchema {
 		: HELPER_REPORT_SCHEMA;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function schemaKeys(schema: TSchema): string[] {
+	return Object.keys((schema as { properties?: Record<string, TSchema> }).properties ?? {});
+}
+
+function requiredSchemaKeys(schema: TSchema): string[] {
+	const required = (schema as { required?: readonly string[] }).required;
+	return required ? [...required] : schemaKeys(schema);
+}
+
+function pointerSegments(instancePath: string): string[] {
+	if (!instancePath.startsWith("/")) return [];
+	return instancePath
+		.slice(1)
+		.split("/")
+		.map((segment) => segment.split("~1").join("/").split("~0").join("~"));
+}
+
+function listFields(fields: string[]): string {
+	return fields.length ? fields.join(", ") : "(none)";
+}
+
+function roleDetailsReason(input: unknown, role: HelperReportRole): string | undefined {
+	const detailSchema = RoleDetails[role];
+	const allowed = schemaKeys(detailSchema);
+	const parts = [`details for role ${role} allow only: ${listFields(allowed)}`];
+	if (!isRecord(input) || !Object.hasOwn(input, "details")) {
+		parts.push("missing: details");
+		return parts.join("; ");
+	}
+	const details = input.details;
+	if (!isRecord(details)) {
+		parts.push("details must be an object");
+		return parts.join("; ");
+	}
+	const present = Object.keys(details);
+	const required = requiredSchemaKeys(detailSchema);
+	const missing = required.filter((field) => !Object.hasOwn(details, field));
+	const detailErrorFields = new Set(
+		[...Value.Errors(detailSchema, details)].map((error) => pointerSegments(error.instancePath)[0]).filter(Boolean),
+	);
+	const unexpected = present.filter((field) => !allowed.includes(field));
+	const unexpectedFromErrorPaths = unexpected.filter((field) => detailErrorFields.has(field));
+	if (missing.length) parts.push(`missing: ${listFields(missing)}`);
+	if (unexpected.length)
+		parts.push(`remove: ${listFields(unexpectedFromErrorPaths.length ? unexpectedFromErrorPaths : unexpected)}`);
+	return parts.length > 1 ? parts.join("; ") : undefined;
+}
+
+function schemaErrorReason(errors: { instancePath: string; message: string }[]): string {
+	const [first] = errors;
+	const where = first?.instancePath ? `${first.instancePath}: ` : "";
+	return `${where}${first?.message ?? "report does not match schema"}`;
+}
+
 export function validateHelperReport(
 	input: unknown,
 ): { ok: true; report: HelperReport } | { ok: false; reason: string } {
 	const schema = schemaFor(input);
 	if (!Value.Check(schema, input)) {
-		const [first] = Value.Errors(schema, input);
-		const where = first?.instancePath ? `${first.instancePath}: ` : "";
-		return { ok: false, reason: `${where}${first?.message ?? "report does not match schema"}` };
+		const errors = [...Value.Errors(schema, input)];
+		if (isRecord(input) && typeof input.role === "string" && input.role in ROLE_HELPER_REPORT_SCHEMAS) {
+			return {
+				ok: false,
+				reason: roleDetailsReason(input, input.role as HelperReportRole) ?? schemaErrorReason(errors),
+			};
+		}
+		return { ok: false, reason: schemaErrorReason(errors) };
 	}
 	const value = input as HelperReport;
 	const report: HelperReport = {

@@ -83,6 +83,45 @@ test("declared tool schema accepts every valid strict role report fixture", () =
 	}
 });
 
+test("declared tool schema keeps role detail choices nested under details", () => {
+	expect(HELPER_REPORT_TOOL_SCHEMA.type).toBe("object");
+	expect(HELPER_REPORT_TOOL_SCHEMA).not.toHaveProperty("anyOf");
+	expect(HELPER_REPORT_TOOL_SCHEMA.properties.evidence.type).toBe("array");
+	expect(HELPER_REPORT_TOOL_SCHEMA.properties.openQuestions.type).toBe("array");
+	expect(HELPER_REPORT_TOOL_SCHEMA.properties.assumptions.type).toBe("array");
+	expect(HELPER_REPORT_TOOL_SCHEMA.properties.details.anyOf).toHaveLength(Object.keys(roleDetailsFixtures).length);
+	expect(
+		HELPER_REPORT_TOOL_SCHEMA.properties.details.anyOf.map((schema: { description?: string }) => schema.description),
+	).toContain('details when role is "test-design": only acceptanceTests');
+});
+
+test("test-design reports with another role's detail fields get actionable field guidance", () => {
+	const result = validateHelperReport({
+		...report,
+		role: "test-design",
+		details: {
+			acceptanceTests: [],
+			existingTests: ["test/init.test.ts"],
+		},
+	});
+	expect(result).toMatchObject({ ok: false });
+	expect(result.reason).toContain("details for role test-design allow only: acceptanceTests");
+	expect(result.reason).toContain("remove: existingTests");
+});
+
+test("nested role keys inside details are named in actionable field guidance", () => {
+	const result = validateHelperReport({
+		...report,
+		role: "test-design",
+		details: {
+			"test-design": { acceptanceTests: [] },
+		},
+	});
+	expect(result).toMatchObject({ ok: false });
+	expect(result.reason).toContain("missing: acceptanceTests");
+	expect(result.reason).toContain("remove: test-design");
+});
+
 test("mismatched role details are rejected with the field path", () => {
 	expect(
 		validateHelperReport({
