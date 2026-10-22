@@ -855,6 +855,15 @@ describe("build and verify slice", () => {
 		expect(denied.state.stage).toBe("blocked");
 		expect(denied.state.block).toMatchObject({ kind: "new-information-denied" });
 		expect(denied.effects).toMatchObject([{ type: "ask-person", reason: "new-information-denied" }]);
+		const afterDenyAnswer = answerLoopQuestion(denied.state, { answer: "restart intake", current: context });
+		expect(afterDenyAnswer.state.stage).toBe("advise");
+		expect(afterDenyAnswer.state.plan).toBeUndefined();
+		expect(afterDenyAnswer.state.approval).toBeUndefined();
+		expect(afterDenyAnswer.state.frozenBrief).toBeUndefined();
+		expect(afterDenyAnswer.state.frozenBriefHash).toBeUndefined();
+		expect(afterDenyAnswer.state.build.testHashes).toEqual([]);
+		expect(afterDenyAnswer.state.verifierRequest).toBeUndefined();
+		expect(afterDenyAnswer.effects).toMatchObject([{ type: "dispatch-advisors", roles: ["intent", "codebase"] }]);
 
 		const answered = confirmNewInformation(classified.state);
 		expect(answered.state.stage).toBe("classify");
@@ -899,9 +908,8 @@ describe("build and verify slice", () => {
 		expect(answered.state.frozenBriefHash).toBeUndefined();
 		expect(answered.state.build.testHashes).toEqual([]);
 		expect(answered.state.verifierRequest).toBeUndefined();
-		expect(answered.effects).toMatchObject([
-			{ type: "dispatch-advisors", roles: ["intent", "codebase", "test-design"] },
-		]);
+		expect(answered.state.advisorRuns.testDesign).toBeUndefined();
+		expect(answered.effects).toMatchObject([{ type: "dispatch-advisors", roles: ["intent", "codebase"] }]);
 	});
 
 	test("rejects verifier reports that accept logs not tied to the exact commit and test hashes", () => {

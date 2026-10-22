@@ -533,6 +533,32 @@ describe("Pi wiring", () => {
 		expect(readFileSync(path, "utf8")).toBe(before);
 	});
 
+	test("loop_status reports invalid active and abandoned metric files without throwing", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { tools } = fakePi();
+		const { cwd } = gitWorktree();
+		const state = createLoopState({
+			worktree: cwd,
+			branch: "feature",
+			baseRef: "origin/main",
+			baseHead: execFileSync("git", ["rev-parse", "origin/main"], { cwd, encoding: "utf8" }).trim(),
+			goal: "Metrics tolerate bad files",
+			limits: [],
+			done: [],
+		});
+		writeLoopStateFile(loopStatePath(profile, cwd, "feature"), state);
+		mkdirSync(join(profile, "loops", "abandoned"), { recursive: true });
+		writeFileSync(join(profile, "loops", "bad-active.json"), "{}");
+		writeFileSync(join(profile, "loops", "abandoned", "bad-abandoned.json"), "{");
+
+		const result = await tools.get("loop_status")?.execute("1", {}, undefined, undefined, ctx(cwd));
+
+		expect(result?.content[0]?.text).toContain(
+			"loop metrics unreadable: bad-active.json, abandoned/bad-abandoned.json",
+		);
+	});
+
 	test("subagent_result reads helper_report details from the child session file", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
