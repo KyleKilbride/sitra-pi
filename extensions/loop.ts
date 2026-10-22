@@ -15,6 +15,8 @@ import {
 	ROLE_HELPER_REPORT_SCHEMAS,
 } from "./helper-report.ts";
 
+export type LoopReworkClass = Static<typeof ReworkClass>;
+
 export const ADVISOR_ROLES = ["intent", "codebase", "test-design", "architecture"] as const;
 export type AdvisorRole = (typeof ADVISOR_ROLES)[number];
 export type AdvisorKey = "intent" | "codebase" | "testDesign" | "architecture";
@@ -123,6 +125,11 @@ const Block = Type.Object(
 			Type.Literal("intake-failed"),
 			Type.Literal("questions"),
 			Type.Literal("git"),
+			Type.Literal("new-information"),
+			Type.Literal("new-information-denied"),
+			Type.Literal("rework-learning"),
+			Type.Literal("same-rework-class"),
+			Type.Literal("second-rework"),
 		]),
 		questionId: Type.String({ minLength: 1 }),
 		resumeStage: LoopStageSchema,
@@ -212,6 +219,22 @@ export interface StaleReason {
 	detail: string;
 }
 
+export interface LoopProposal {
+	kind: "lesson";
+	title: string;
+	summary: string;
+	body: string;
+	evidence?: string;
+	tags: string[];
+	proposedBy: "sitra-loops";
+	date: string;
+}
+
+export type AbandonedLoopState = LoopState & {
+	abandonedAt: string;
+	abandonReason?: string;
+};
+
 export interface AdvisorDispatch {
 	role: AdvisorRole;
 	task: string;
@@ -222,7 +245,8 @@ export type LoopEffect =
 	| { type: "ask-person"; reason: string; question: LoopQuestion }
 	| { type: "write-lead-plan"; brief: LoopBrief }
 	| { type: "brief-approved"; brief: LoopBrief }
-	| { type: "dispatch-verifier"; agent: "verifier"; task: string };
+	| { type: "dispatch-verifier"; agent: "verifier"; task: string }
+	| { type: "write-grimoire-proposal"; reworkIndex: number };
 
 export function advisorKey(role: AdvisorRole | HelperReportRole): AdvisorKey {
 	if (role === "test-design") return "testDesign";
@@ -362,6 +386,45 @@ export function tokensFromSubagentResult(details: Record<string, unknown>): {
 	return {
 		...(typeof output === "number" ? { outputTokens: output } : {}),
 		...(typeof context === "number" ? { contextTokens: context } : {}),
+	};
+}
+
+function recordedTokens(state: LoopState): number {
+	return Object.values(state.advisorRuns).reduce(
+		(sum, run) => sum + (run?.outputTokens ?? 0) + (run?.contextTokens ?? 0),
+		0,
+	);
+}
+
+function tokenText(tokens: number): string {
+	return tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : String(tokens);
+}
+
+export function loopMetricsLine(
+	input: LoopState | AbandonedLoopState | readonly (LoopState | AbandonedLoopState)[],
+): string {
+	const states = Array.isArray(input) ? input : [input];
+	const firstPass = states.filter(
+		(state) => !("abandonedAt" in state) && state.stage === "done" && state.rework.length === 0,
+	).length;
+	const context = states
+		.flatMap((state) => state.rework)
+		.filter((entry) => entry.class === "context-missed" || entry.class === "context-missing").length;
+	const intent = states.flatMap((state) => state.rework).filter((entry) => entry.class === "wrong-intent").length;
+	const check = states.flatMap((state) => state.rework).filter((entry) => entry.class === "check-gap").length;
+	const rounds = states.reduce((sum, state) => sum + state.rework.length + 1, 0);
+	const tokens = states.reduce((sum, state) => sum + recordedTokens(state), 0);
+	return `loops: first-pass ${firstPass}/${states.length} · rounds ${rounds} · avoidable rework context ${context} intent ${intent} check ${check} · tokens ${tokenText(tokens)}`;
+}
+
+export function abandonLoop(
+	state: LoopState,
+	input: { abandonedAt: string; abandonReason: string },
+): AbandonedLoopState {
+	return {
+		...state,
+		abandonedAt: input.abandonedAt,
+		...(input.abandonReason ? { abandonReason: input.abandonReason } : {}),
 	};
 }
 
@@ -566,6 +629,43 @@ function architectureEffects(state: LoopState): { state: LoopState; effects: Loo
 	return { state, effects: [{ type: "ask-person", reason: "brief-approval", question }] };
 }
 
+function pendingProposalIndex(state: LoopState): number | undefined {
+	if (state.block) return undefined;
+	const index = state.rework.findIndex((entry) => !entry.proposalPath);
+	return index >= 0 ? index : undefined;
+}
+
+export function reworkProposal(state: LoopState, reworkIndex: number, date: string): LoopProposal {
+	const entry = state.rework[reworkIndex];
+	if (!entry) throw new Error(`rework entry ${reworkIndex} does not exist`);
+	const evidence = entry.evidence.length ? entry.evidence.join("\n") : undefined;
+	if (!state.verification) throw new Error("cannot draft a rework proposal without recorded verification");
+	const summary = state.verification.summary;
+	return {
+		kind: "lesson",
+		title: `LOOPS rework: ${entry.class}`,
+		summary: `When a LOOPS verifier reports ${entry.class}, use the recorded evidence before retrying.`,
+		body: [
+			`Rework class: ${entry.class}`,
+			"",
+			`Verifier summary: ${summary}`,
+			"",
+			"Evidence:",
+			list(entry.evidence),
+			"",
+			"Use this proposal as a reviewable learning. It is not approved knowledge until the person accepts it with /grimoire.",
+		].join("\n"),
+		...(evidence ? { evidence } : {}),
+		tags: ["loops", "rework", entry.class],
+		proposedBy: "sitra-loops",
+		date,
+	};
+}
+
+function proposalEffect(reworkIndex: number): LoopEffect {
+	return { type: "write-grimoire-proposal", reworkIndex };
+}
+
 export function nextLoopEffects(state: LoopState): LoopEffect[] {
 	if (state.stage === "advise") return adviseEffects(state).effects;
 	if (state.stage === "plan") return [{ type: "write-lead-plan", brief: buildBrief(state) }];
@@ -573,7 +673,57 @@ export function nextLoopEffects(state: LoopState): LoopEffect[] {
 	if (state.stage === "brief-approved") return [{ type: "brief-approved", brief: buildBrief(state) }];
 	if (state.stage === "verify" && state.verifierRequest)
 		return [{ type: "dispatch-verifier", agent: "verifier", task: state.verifierRequest.task }];
+	if (state.stage === "classify") {
+		const index = pendingProposalIndex(state);
+		return index === undefined ? [] : [proposalEffect(index)];
+	}
 	return [];
+}
+
+export function resumeLoop(state: LoopState): { state: LoopState; effects: LoopEffect[] } {
+	if (state.stage === "blocked" && state.block) {
+		const question = state.questions.find((item) => item.id === state.block?.questionId);
+		return {
+			state,
+			effects: question ? [{ type: "ask-person", reason: state.block.kind, question }] : [],
+		};
+	}
+	if (state.stage === "advise" && state.dispatchedAdvisors.length > 0) {
+		return dispatch(state, state.dispatchedAdvisors);
+	}
+	if (state.stage === "architecture-review" && state.dispatchedAdvisors.includes("architecture")) {
+		return dispatch(state, ["architecture"]);
+	}
+	return { state, effects: nextLoopEffects(state) };
+}
+
+export function confirmNewInformation(state: LoopState): { state: LoopState; effects: LoopEffect[] } {
+	if (state.stage !== "blocked" || state.block?.kind !== "new-information") {
+		throw new Error(`cannot confirm new information while stage is ${state.stage}`);
+	}
+	const next: LoopState = { ...state, stage: "classify", block: undefined, dispatchedAdvisors: [] };
+	return { state: next, effects: nextLoopEffects(next) };
+}
+
+export function denyNewInformation(state: LoopState, reason: string): { state: LoopState; effects: LoopEffect[] } {
+	if (state.stage !== "blocked" || state.block?.kind !== "new-information") {
+		throw new Error(`cannot deny new information while stage is ${state.stage}`);
+	}
+	const question = state.questions.find((item) => item.id === state.block?.questionId);
+	const questions = state.questions.map((item) =>
+		item.id === state.block?.questionId ? { ...item, answer: reason } : item,
+	);
+	const denied: LoopState = {
+		...state,
+		stage: "blocked",
+		block: { ...state.block, kind: "new-information-denied" },
+		questions,
+		dispatchedAdvisors: [],
+	};
+	return {
+		state: denied,
+		effects: question ? [{ type: "ask-person", reason: "new-information-denied", question }] : [],
+	};
 }
 
 export function applyAdvisorReport(
@@ -655,9 +805,63 @@ export function answerLoopQuestion(
 			? dispatch(next, state.block.pendingAdvisors)
 			: { state: next, effects: nextLoopEffects(next) };
 	}
+	if (state.block.kind === "new-information") {
+		return { state: { ...state, questions: answered }, effects: nextLoopEffects(state) };
+	}
+	if (state.block.kind === "new-information-denied") {
+		const next: LoopState = {
+			...state,
+			stage: "advise",
+			block: undefined,
+			questions: answered,
+			advisorRuns: {},
+			plan: undefined,
+			approval: undefined,
+			frozenBrief: undefined,
+			frozenBriefHash: undefined,
+			build: { testFiles: [], testHashes: [] },
+			verifierRequest: undefined,
+			dispatchedAdvisors: [],
+		};
+		return dispatch(next, ["intent", "codebase"]);
+	}
+	if (state.block.kind === "rework-learning") {
+		const next: LoopState = {
+			...state,
+			stage: state.block.resumeStage,
+			block: undefined,
+			questions: answered,
+			build: { testFiles: [], testHashes: [] },
+			verifierRequest: undefined,
+			dispatchedAdvisors: [],
+		};
+		return { state: next, effects: nextLoopEffects(next) };
+	}
+	if (state.block.kind === "same-rework-class" || state.block.kind === "second-rework") {
+		const roles = state.block.pendingAdvisors;
+		const advisorRuns = { ...state.advisorRuns };
+		for (const role of roles) delete advisorRuns[advisorKey(role)];
+		delete advisorRuns.testDesign;
+		const next: LoopState = {
+			...state,
+			stage: state.block.resumeStage,
+			block: undefined,
+			questions: answered,
+			advisorRuns,
+			plan: undefined,
+			approval: undefined,
+			frozenBrief: undefined,
+			frozenBriefHash: undefined,
+			build: { testFiles: [], testHashes: [] },
+			verifierRequest: undefined,
+			dispatchedAdvisors: [],
+		};
+		return roles.length ? dispatch(next, roles) : { state: next, effects: nextLoopEffects(next) };
+	}
 	const roles = state.block.kind === "questions" ? state.block.pendingAdvisors : affectedAdvisors(state);
 	if (state.block.kind === "questions" && state.block.resumeStage === "classify") {
-		return { state: { ...state, questions: answered }, effects: [] };
+		const next: LoopState = { ...state, stage: state.block.resumeStage, block: undefined, questions: answered };
+		return { state: next, effects: nextLoopEffects(next) };
 	}
 	const advisorRuns = { ...state.advisorRuns };
 	for (const role of roles) delete advisorRuns[advisorKey(role)];
@@ -734,6 +938,43 @@ export function approveBrief(state: LoopState, approval: Approval): { state: Loo
 export function startBuild(state: LoopState): { state: LoopState; effects: LoopEffect[] } {
 	if (state.stage !== "brief-approved") throw new Error(`cannot start build while stage is ${state.stage}`);
 	return { state: { ...state, stage: "build", block: undefined, dispatchedAdvisors: [] }, effects: [] };
+}
+
+export function recordReworkProposal(
+	state: LoopState,
+	input: { reworkIndex: number; proposalPath: string },
+): { state: LoopState; effects: LoopEffect[] } {
+	const entry = state.rework[input.reworkIndex];
+	if (!entry) throw new Error(`rework entry ${input.reworkIndex} does not exist`);
+	if (entry.proposalPath) return { state, effects: nextLoopEffects(state) };
+	const rework = state.rework.map((item, index) =>
+		index === input.reworkIndex ? { ...item, proposalPath: input.proposalPath } : item,
+	);
+	const recorded: LoopState = { ...state, rework };
+	if (recorded.block?.kind === "same-rework-class" || recorded.block?.kind === "second-rework") {
+		return { state: recorded, effects: [] };
+	}
+	if (!recorded.block) {
+		return withBlock(recorded, {
+			kind: "rework-learning",
+			resumeStage: "brief-approved",
+			question: {
+				id: "rework-learning",
+				text: "The verifier found a miss and a Grimoire proposal was drafted. What specific learning or new information justifies one more build?",
+				recommended: "Answer with the concrete learning before starting the one allowed rework build.",
+				dependsOn: [],
+			},
+		});
+	}
+	const next: LoopState = {
+		...recorded,
+		stage: "brief-approved",
+		block: undefined,
+		build: { testFiles: [], testHashes: [] },
+		verifierRequest: undefined,
+		dispatchedAdvisors: [],
+	};
+	return { state: next, effects: [{ type: "brief-approved", brief: buildBrief(next) }] };
 }
 
 export interface LoopRunEvidence {
@@ -934,31 +1175,92 @@ function verifierBlock(state: LoopState, reason: string): { state: LoopState; ef
 	});
 }
 
-function classifyBlock(
+function verificationFromReport(
 	state: LoopState,
 	status: "missed" | "blocked",
 	report: HelperReport,
+): NonNullable<LoopState["verification"]> {
+	return {
+		status,
+		runLogs: state.verifierRequest?.runLogs ?? [],
+		rerunChecks: (report.details as { rerunChecks: Static<typeof RerunCheck>[] }).rerunChecks,
+		acceptedLogs: (report.details as { acceptedLogs: Static<typeof LogDecision>[] }).acceptedLogs,
+		summary: report.summary,
+	};
+}
+
+function classifiedMiss(
+	state: LoopState,
+	report: HelperReport,
+	missClass: LoopReworkClass,
 ): { state: LoopState; effects: LoopEffect[] } {
+	const reworkIndex = state.rework.length;
+	const rework = [...state.rework, { class: missClass, evidence: report.evidence }];
+	const classified: LoopState = {
+		...state,
+		stage: "classify",
+		verification: verificationFromReport(state, "missed", report),
+		rework,
+	};
+	if (state.rework.some((entry) => entry.class === missClass)) {
+		const blocked = withBlock(classified, {
+			kind: "same-rework-class",
+			resumeStage: "advise",
+			pendingAdvisors: ["intent", "codebase"],
+			question: {
+				id: "same-rework-class",
+				text: `The verifier reported ${missClass} again in this task. What should change before the loop continues?`,
+				recommended: "Give the new constraint or evidence to rerun advisor intake before any more build work.",
+				dependsOn: [],
+			},
+		});
+		return { state: blocked.state, effects: [proposalEffect(reworkIndex), ...blocked.effects] };
+	}
+	if (state.rework.length > 0) {
+		const blocked = withBlock(classified, {
+			kind: "second-rework",
+			resumeStage: "advise",
+			pendingAdvisors: ["intent", "codebase"],
+			question: {
+				id: "second-rework",
+				text: `The verifier found another miss after one rework build (${missClass}). What new constraint or learning should restart intake?`,
+				recommended:
+					"Answer with the concrete new information; the runner will rerun advisors instead of starting a blind retry.",
+				dependsOn: [],
+			},
+		});
+		return { state: blocked.state, effects: [proposalEffect(reworkIndex), ...blocked.effects] };
+	}
+	if (missClass === "new-information") {
+		return withBlock(classified, {
+			kind: "new-information",
+			resumeStage: "classify",
+			question: {
+				id: "new-information",
+				text: `The verifier classified this miss as new information: ${report.summary}. Confirm whether this is real new information before a proposal and one rework build are allowed.`,
+				recommended: "Answer only if this is real new information; the answer is recorded with the loop.",
+				dependsOn: [],
+			},
+		});
+	}
+	return { state: classified, effects: [proposalEffect(reworkIndex)] };
+}
+
+function verifierBlocked(state: LoopState, report: HelperReport): { state: LoopState; effects: LoopEffect[] } {
 	const detail = report.openQuestions.length ? `\n\nVerifier questions:\n${list(report.openQuestions)}` : "";
 	return withBlock(
 		{
 			...state,
-			stage: "classify",
-			verification: {
-				status,
-				runLogs: state.verifierRequest?.runLogs ?? [],
-				rerunChecks: (report.details as { rerunChecks: Static<typeof RerunCheck>[] }).rerunChecks,
-				acceptedLogs: (report.details as { acceptedLogs: Static<typeof LogDecision>[] }).acceptedLogs,
-				summary: report.summary,
-			},
+			stage: "verify",
+			verification: verificationFromReport(state, "blocked", report),
 		},
 		{
-			kind: "questions",
-			resumeStage: "classify",
+			kind: "intake-failed",
+			resumeStage: "verify",
 			question: {
-				id: "verifier-classify",
-				text: `Verifier ${status === "missed" ? "found a miss" : "blocked"}: ${report.summary}.${detail}`,
-				recommended: "Review the verifier report and decide the next step; slice 2a stops here.",
+				id: "verifier-blocked",
+				text: `Verifier blocked: ${report.summary}.${detail}`,
+				recommended: "Answer with the evidence needed for a fresh verifier report.",
 				dependsOn: [],
 			},
 		},
@@ -980,6 +1282,11 @@ export function applyVerifierReport(
 	if (state.stage !== "verify") throw new Error(`cannot apply verifier report while stage is ${state.stage}`);
 	if (!state.verifierRequest) throw new Error("verify stage is missing verifier request");
 	if (report.role !== "verifier") throw new Error("verifier report is missing role");
+	if (!report.dispatchId)
+		return verifierBlock(state, "verifier report is missing dispatchId for the pending verifier request");
+	if (report.dispatchId !== state.verifierRequest.dispatchId) {
+		return verifierBlock(state, `verifier dispatchId ${report.dispatchId} did not match the pending verifier request`);
+	}
 	if (!Value.Check(ROLE_HELPER_REPORT_SCHEMAS.verifier, report)) {
 		const [first] = Value.Errors(ROLE_HELPER_REPORT_SCHEMAS.verifier, report);
 		const where = first?.instancePath ? `${first.instancePath}: ` : "";
@@ -1012,7 +1319,10 @@ export function applyVerifierReport(
 	if (report.status === "done" && details.goalMatched) {
 		return { state: { ...state, stage: "done", block: undefined, verification }, effects: [] };
 	}
-	return classifyBlock(state, report.status === "done" ? "missed" : "blocked", report);
+	if (report.status === "blocked") return verifierBlocked(state, report);
+	const missClass = (report.details as { missClass?: LoopReworkClass }).missClass;
+	if (!missClass) return verifierBlock(state, "verifier miss is missing missClass");
+	return classifiedMiss(state, report, missClass);
 }
 
 export function staleReason(

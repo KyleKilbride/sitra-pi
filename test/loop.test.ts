@@ -11,9 +11,12 @@ import {
 	blockForStaleState,
 	briefHash,
 	buildBrief,
+	confirmNewInformation,
 	createLoopState,
+	denyNewInformation,
 	nextLoopEffects,
 	recordBuildEvidence,
+	reworkProposal,
 	staleReason,
 	startBuild,
 	startLoop,
@@ -55,6 +58,44 @@ const run = (
 		testHashes: overrides.testHashes ?? testHashes,
 	},
 });
+
+function verifiedState(dispatchId = "dispatch") {
+	return recordBuildEvidence(startBuild(approvedState()).state, {
+		commit: "commit-a",
+		diff: "diff",
+		testFiles: ["test/loop.test.ts"],
+		testHashes,
+		redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
+		greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+		dispatchId,
+		maxVerifierRerunMs: 120_000,
+	}).state;
+}
+
+function verifierMiss(
+	missClass: NonNullable<NonNullable<HelperReport["details"]> extends never ? never : string>,
+	dispatchId = "dispatch",
+	extra: Partial<HelperReport> = {},
+): HelperReport {
+	return {
+		status: "done",
+		role: "verifier",
+		summary: "Verifier found a miss.",
+		evidence: ["test/loop.test.ts:12"],
+		openQuestions: [],
+		assumptions: [],
+		dispatchId,
+		details: {
+			checksRun: [],
+			rerunChecks: [],
+			acceptedLogs: [],
+			testHashesChecked: ["test/loop.test.ts"],
+			goalMatched: false,
+			missClass,
+		},
+		...extra,
+	};
+}
 
 const report = (role: HelperReport["role"], extra: Partial<HelperReport> = {}): HelperReport => ({
 	status: "done",
@@ -702,6 +743,7 @@ describe("build and verify slice", () => {
 			{
 				status: "done",
 				role: "verifier",
+				dispatchId: "dispatch",
 				summary: "Verified.",
 				evidence: ["diff"],
 				openQuestions: [],
@@ -725,6 +767,7 @@ describe("build and verify slice", () => {
 			{
 				status: "done",
 				role: "verifier",
+				dispatchId: "dispatch",
 				summary: "Goal missed.",
 				evidence: ["diff"],
 				openQuestions: [],
@@ -740,15 +783,17 @@ describe("build and verify slice", () => {
 			},
 			{ acceptedLogs: [] },
 		).state;
-		expect(missed.stage).toBe("blocked");
-		expect(missed.block).toMatchObject({ kind: "questions", resumeStage: "classify" });
+		expect(missed.stage).toBe("classify");
+		expect(missed.block).toBeUndefined();
 		expect(missed.verification).toMatchObject({ status: "missed", summary: "Goal missed." });
+		expect(missed.rework).toMatchObject([{ class: "execution-slip" }]);
 
 		const blocked = applyVerifierReport(
 			{ ...state, verification: undefined },
 			{
 				status: "blocked",
 				role: "verifier",
+				dispatchId: "dispatch",
 				summary: "Could not inspect evidence.",
 				evidence: [],
 				openQuestions: ["Which log should I trust?"],
@@ -764,7 +809,107 @@ describe("build and verify slice", () => {
 			{ acceptedLogs: [] },
 		).state;
 		expect(blocked.stage).toBe("blocked");
+		expect(blocked.block).toMatchObject({ kind: "intake-failed", resumeStage: "verify" });
 		expect(blocked.verification).toMatchObject({ status: "blocked" });
+	});
+
+	test("classifies a verifier miss, drafts one Grimoire proposal effect, and allows one rework build", () => {
+		const state = verifiedState();
+		const result = applyVerifierReport(state, verifierMiss("execution-slip"), { acceptedLogs: [] });
+
+		expect(result.state.stage).toBe("classify");
+		expect(result.state.rework).toEqual([{ class: "execution-slip", evidence: ["test/loop.test.ts:12"] }]);
+		expect(result.effects).toMatchObject([
+			{
+				type: "write-grimoire-proposal",
+				reworkIndex: 0,
+			},
+		]);
+	});
+
+	test("verifier miss reports must match the recorded dispatch before classification is accepted", () => {
+		const missingReport = verifierMiss("check-gap");
+		delete missingReport.dispatchId;
+		const missing = applyVerifierReport(verifiedState("dispatch-a"), missingReport, { acceptedLogs: [] });
+		expect(missing.state.stage).toBe("blocked");
+		expect(missing.state.block).toMatchObject({ kind: "intake-failed", resumeStage: "verify" });
+		expect(missing.state.questions.at(-1)?.text).toContain("missing dispatchId");
+
+		const mismatched = applyVerifierReport(verifiedState("dispatch-a"), verifierMiss("check-gap", "dispatch-b"), {
+			acceptedLogs: [],
+		});
+		expect(mismatched.state.stage).toBe("blocked");
+		expect(mismatched.state.block).toMatchObject({ kind: "intake-failed", resumeStage: "verify" });
+		expect(mismatched.state.questions.at(-1)?.text).toContain("did not match");
+	});
+
+	test("new information waits for a person answer before drafting the proposal and rework build", () => {
+		const classified = applyVerifierReport(verifiedState(), verifierMiss("new-information"), { acceptedLogs: [] });
+
+		expect(classified.state.stage).toBe("blocked");
+		expect(classified.state.block).toMatchObject({ kind: "new-information", resumeStage: "classify" });
+		expect(classified.state.rework).toEqual([{ class: "new-information", evidence: ["test/loop.test.ts:12"] }]);
+		expect(classified.effects).toMatchObject([{ type: "ask-person", reason: "new-information" }]);
+
+		const denied = denyNewInformation(classified.state, "not actually new");
+		expect(denied.state.stage).toBe("blocked");
+		expect(denied.state.block).toMatchObject({ kind: "new-information-denied" });
+		expect(denied.effects).toMatchObject([{ type: "ask-person", reason: "new-information-denied" }]);
+		const afterDenyAnswer = answerLoopQuestion(denied.state, { answer: "restart intake", current: context });
+		expect(afterDenyAnswer.state.stage).toBe("advise");
+		expect(afterDenyAnswer.state.plan).toBeUndefined();
+		expect(afterDenyAnswer.state.approval).toBeUndefined();
+		expect(afterDenyAnswer.state.frozenBrief).toBeUndefined();
+		expect(afterDenyAnswer.state.frozenBriefHash).toBeUndefined();
+		expect(afterDenyAnswer.state.build.testHashes).toEqual([]);
+		expect(afterDenyAnswer.state.verifierRequest).toBeUndefined();
+		expect(afterDenyAnswer.effects).toMatchObject([{ type: "dispatch-advisors", roles: ["intent", "codebase"] }]);
+
+		const answered = confirmNewInformation(classified.state);
+		expect(answered.state.stage).toBe("classify");
+		expect(answered.state.block).toBeUndefined();
+		expect(answered.effects).toMatchObject([
+			{
+				type: "write-grimoire-proposal",
+				reworkIndex: 0,
+			},
+		]);
+	});
+
+	test("rework proposals require recorded verification summary", () => {
+		const state = {
+			...verifiedState(),
+			verification: undefined,
+			rework: [{ class: "check-gap" as const, evidence: [] }],
+		};
+		expect(() => reworkProposal(state, 0, "2026-10-22T00:00:00.000Z")).toThrow(/verification/);
+	});
+
+	test("a second miss after rework blocks instead of starting a blind retry, and answering reruns advisors", () => {
+		const state = {
+			...verifiedState(),
+			rework: [{ class: "execution-slip" as const, evidence: ["first miss"], proposalPath: "proposals/first.md" }],
+		};
+		const blocked = applyVerifierReport(state, verifierMiss("check-gap"), { acceptedLogs: [] });
+
+		expect(blocked.state.stage).toBe("blocked");
+		expect(blocked.state.block).toMatchObject({ kind: "second-rework", resumeStage: "advise" });
+		expect(blocked.state.rework).toEqual([
+			{ class: "execution-slip", evidence: ["first miss"], proposalPath: "proposals/first.md" },
+			{ class: "check-gap", evidence: ["test/loop.test.ts:12"] },
+		]);
+
+		const answered = answerLoopQuestion(blocked.state, {
+			answer: "Rerun intake with this new constraint.",
+			current: context,
+		});
+		expect(answered.state.stage).toBe("advise");
+		expect(answered.state.frozenBrief).toBeUndefined();
+		expect(answered.state.frozenBriefHash).toBeUndefined();
+		expect(answered.state.build.testHashes).toEqual([]);
+		expect(answered.state.verifierRequest).toBeUndefined();
+		expect(answered.state.advisorRuns.testDesign).toBeUndefined();
+		expect(answered.effects).toMatchObject([{ type: "dispatch-advisors", roles: ["intent", "codebase"] }]);
 	});
 
 	test("rejects verifier reports that accept logs not tied to the exact commit and test hashes", () => {
@@ -783,6 +928,7 @@ describe("build and verify slice", () => {
 			{
 				status: "done",
 				role: "verifier",
+				dispatchId: "dispatch",
 				summary: "Accepted stale log.",
 				evidence: [],
 				openQuestions: [],
@@ -806,6 +952,7 @@ describe("build and verify slice", () => {
 			{
 				status: "done",
 				role: "verifier",
+				dispatchId: "dispatch",
 				summary: "Verified.",
 				evidence: [],
 				openQuestions: [],
