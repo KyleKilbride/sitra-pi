@@ -19,7 +19,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { shellQuote } from "./runs.ts";
 
 export type SessionRole = "lead" | "teammate" | "tower";
@@ -271,6 +271,44 @@ export function gitBranch(cwd: string): string | undefined {
 	}
 }
 
+function gitDirFor(cwd: string): string | undefined {
+	let dir = resolve(cwd);
+	while (true) {
+		const dotGit = join(dir, ".git");
+		try {
+			const stat = statSync(dotGit);
+			if (stat.isDirectory()) return dotGit;
+			if (stat.isFile()) {
+				const text = readFileSync(dotGit, "utf8").trim();
+				if (!text.startsWith("gitdir:")) return undefined;
+				const raw = text.slice("gitdir:".length).trim();
+				if (!raw) return undefined;
+				return isAbsolute(raw) ? raw : resolve(dir, raw);
+			}
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+		const parent = dirname(dir);
+		if (parent === dir) return undefined;
+		dir = parent;
+	}
+}
+
+export function readGitHeadBranch(cwd: string): string | undefined {
+	const gitDir = gitDirFor(cwd);
+	if (!gitDir) return undefined;
+	try {
+		const head = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
+		if (!head.startsWith("ref: ")) return head ? "HEAD" : undefined;
+		const ref = head.slice("ref: ".length).trim();
+		const prefix = "refs/heads/";
+		return ref.startsWith(prefix) ? ref.slice(prefix.length) || undefined : ref || undefined;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
 export function writeSession(profileDir: string, record: SessionRecord): void {
 	const dir = sessionsDir(profileDir);
 	mkdirSync(dir, { recursive: true });
@@ -412,7 +450,7 @@ export function formatSessionsReport(records: readonly SessionRecord[]): string 
 	return lines.join("\n");
 }
 
-function extractText(content: unknown): string {
+export function extractText(content: unknown): string {
 	if (typeof content === "string") return content.trim();
 	if (!Array.isArray(content)) return "";
 	const texts: string[] = [];
@@ -439,7 +477,7 @@ export function readLastLines(
 	options?: { chunkBytes?: number; maxBytes?: number },
 ): string {
 	const chunkBytes = options?.chunkBytes ?? 64 * 1024;
-	const maxBytes = options?.maxBytes ?? 8 * 1024 * 1024;
+	const maxBytes = options?.maxBytes ?? 1024 * 1024;
 	let fd: number;
 	try {
 		fd = openSync(file, "r");
@@ -484,23 +522,70 @@ export function readLastLines(
 export function createTailReader(
 	maxLines: number,
 	options?: { chunkBytes?: number; maxBytes?: number },
-): (file: string) => string {
+): { read(file: string): string; retain(files: ReadonlySet<string>): void; readonly size: number } {
 	const cache = new Map<string, { size: number; mtimeMs: number; text: string }>();
-	return (file) => {
-		let size: number;
-		let mtimeMs: number;
-		try {
-			({ size, mtimeMs } = statSync(file));
-		} catch {
-			cache.delete(file);
-			return "";
-		}
-		const hit = cache.get(file);
-		if (hit && hit.size === size && hit.mtimeMs === mtimeMs) return hit.text;
-		const text = readLastLines(file, maxLines, options);
-		cache.set(file, { size, mtimeMs, text });
-		return text;
+	return {
+		read(file) {
+			let size: number;
+			let mtimeMs: number;
+			try {
+				({ size, mtimeMs } = statSync(file));
+			} catch {
+				cache.delete(file);
+				return "";
+			}
+			const hit = cache.get(file);
+			if (hit && hit.size === size && hit.mtimeMs === mtimeMs) return hit.text;
+			const text = readLastLines(file, maxLines, options);
+			cache.set(file, { size, mtimeMs, text });
+			return text;
+		},
+		retain(files) {
+			for (const file of cache.keys()) {
+				if (!files.has(file)) cache.delete(file);
+			}
+		},
+		get size() {
+			return cache.size;
+		},
 	};
+}
+
+export function transcriptItemFromEntry(entry: unknown): TranscriptItem | undefined {
+	if (!entry || typeof entry !== "object") return undefined;
+	const value = entry as {
+		type?: string;
+		content?: unknown;
+		message?: {
+			role?: string;
+			toolName?: string;
+			isError?: boolean;
+			content?: unknown;
+		};
+	};
+	if (value.type === "custom_message" && value.content) {
+		const text = extractText(value.content);
+		return text ? { role: "custom", text } : undefined;
+	}
+	if (value.type !== "message" || !value.message) return undefined;
+	const msg = value.message;
+	if (msg.role === "user") {
+		const text = extractText(msg.content);
+		return text ? { role: "user", text } : undefined;
+	}
+	if (msg.role === "assistant") {
+		const text = extractText(msg.content);
+		return text ? { role: "assistant", text } : undefined;
+	}
+	if (msg.role === "toolResult") {
+		const tool = msg.toolName ?? "tool";
+		if (msg.isError) {
+			const text = extractText(msg.content).split("\n")[0] || "failed";
+			return { role: "tool", text: `${tool} error: ${text}`, error: true };
+		}
+		return { role: "tool", text: `${tool} ok`, error: false };
+	}
+	return undefined;
 }
 
 export function readTranscriptTail(jsonl: string, maxItems = 8): TranscriptItem[] {
@@ -508,39 +593,8 @@ export function readTranscriptTail(jsonl: string, maxItems = 8): TranscriptItem[
 	for (const line of jsonl.split("\n")) {
 		if (!line.trim()) continue;
 		try {
-			const entry = JSON.parse(line) as {
-				type?: string;
-				customType?: string;
-				content?: unknown;
-				message?: {
-					role?: string;
-					toolName?: string;
-					isError?: boolean;
-					content?: unknown;
-				};
-			};
-			if (entry.type === "custom_message" && entry.content) {
-				const text = extractText(entry.content);
-				if (text) items.push({ role: "custom", text });
-				continue;
-			}
-			if (entry.type !== "message" || !entry.message) continue;
-			const msg = entry.message;
-			if (msg.role === "user") {
-				const text = extractText(msg.content);
-				if (text) items.push({ role: "user", text });
-			} else if (msg.role === "assistant") {
-				const text = extractText(msg.content);
-				if (text) items.push({ role: "assistant", text });
-			} else if (msg.role === "toolResult") {
-				const tool = msg.toolName ?? "tool";
-				if (msg.isError) {
-					const text = extractText(msg.content).split("\n")[0] || "failed";
-					items.push({ role: "tool", text: `${tool} error: ${text}`, error: true });
-				} else {
-					items.push({ role: "tool", text: `${tool} ok`, error: false });
-				}
-			}
+			const item = transcriptItemFromEntry(JSON.parse(line));
+			if (item) items.push(item);
 		} catch {
 			// Skip malformed lines.
 		}

@@ -1,4 +1,4 @@
-import { drawBox, fitAnsi, type RadarSnapshot, statusBadge, visibleWidth } from "./radar.ts";
+import { drawBox, fitAnsi, type RadarSnapshot, statusBadge, visibleWidth, type WrapCache } from "./radar.ts";
 import { formatAge, initialRadarState, liveStatus, type RadarState, terminalText } from "./radar-model.ts";
 
 const accent = (text: string) => `\x1b[38;2;95;225;255m${text}\x1b[0m`;
@@ -24,12 +24,16 @@ function wrap(text: string, width: number): string[] {
 	const out: string[] = [];
 	for (const line of terminalText(text).split("\n")) {
 		let current = "";
+		let currentWidth = 0;
 		for (const ch of line) {
-			if (visibleWidth(current + ch) > width) {
+			const charWidth = visibleWidth(ch);
+			if (currentWidth + charWidth > width) {
 				out.push(current);
 				current = "";
+				currentWidth = 0;
 			}
 			current += ch;
+			currentWidth += charWidth;
 		}
 		out.push(current);
 	}
@@ -47,7 +51,7 @@ export interface RadarLayout {
 /** Allocate the viewport before rendering; status and controls cannot be pushed off-screen by more workers. */
 export function buildRadarLayout(
 	snapshot: RadarSnapshot,
-	options: { cols: number; rows: number; state?: RadarState; nowMs?: number },
+	options: { cols: number; rows: number; state?: RadarState; nowMs?: number; wrapCache?: WrapCache },
 ): RadarLayout {
 	const cols = Math.max(1, options.cols);
 	const rows = Math.max(1, options.rows);
@@ -138,12 +142,12 @@ export function buildRadarLayout(
 		if (state.view === "message") {
 			const mail = snapshot.mail.find((m) => m.id === state.itemId);
 			title = "MESSAGE · READ ONLY";
-			content = wrap(
-				mail
-					? `${mail.direction === "in" ? "From" : "To"}: ${mail.peer}\nSubject: ${mail.subject ?? mail.summary}\n${mail.updatedAt} · ${mail.state}\n\n${mail.body ?? mail.preview ?? mail.subject ?? mail.summary}`
-					: "This message is no longer in the local mailbox.",
-				width,
-			);
+			const text = mail
+				? `${mail.direction === "in" ? "From" : "To"}: ${mail.peer}\nSubject: ${mail.subject ?? mail.summary}\n${mail.updatedAt} · ${mail.state}\n\n${mail.body ?? mail.preview ?? mail.subject ?? mail.summary}`
+				: "This message is no longer in the local mailbox.";
+			content =
+				options.wrapCache?.get(`message:${mail?.id ?? "missing"}`, width, text, () => wrap(text, width)) ??
+				wrap(text, width);
 		} else if (state.view === "run") {
 			const run = snapshot.runs.find((r) => r.id === state.itemId);
 			const owner = run
@@ -157,31 +161,29 @@ export function buildRadarLayout(
 						.join(" ")
 				: "";
 			title = "RUN OUTPUT · LAST 80 LINES";
-			content = wrap(
-				run
-					? `${run.label}${owner ? ` — ${owner}` : ""}\n${run.done ? `Finished · exit ${run.exitCode ?? "unknown"}` : "Running · output refreshes automatically"}\n\n${run.tail || "No output yet"}`
-					: "This run is no longer available.",
-				width,
-			);
+			const text = run
+				? `${run.label}${owner ? ` — ${owner}` : ""}\n${run.done ? `Finished · exit ${run.exitCode ?? "unknown"}` : "Running · output refreshes automatically"}\n\n${run.tail || "No output yet"}`
+				: "This run is no longer available.";
+			content =
+				options.wrapCache?.get(`run:${run?.id ?? "missing"}`, width, text, () => wrap(text, width)) ??
+				wrap(text, width);
 		} else {
 			title = "TOWER STATUS";
 			const section = (label: string, items: string[]) =>
 				`${label}\n${items.length ? items.map((i) => `• ${i}`).join("\n") : "Nothing right now"}`;
-			content = wrap(
-				[
-					`Live view, refreshed ${clock(live.updatedAt)}. Workers, runs and proposals update by themselves.`,
-					live.notesUpdatedAt
-						? `Tower notes last written ${formatAge(nowMs - Date.parse(live.notesUpdatedAt))} ago.`
-						: "The tower has not written any notes.",
-					"",
-					section("● Being done", live.doing),
-					"",
-					section("✓ Done", live.done),
-					"",
-					section("→ Next", live.next),
-				].join("\n"),
-				width,
-			);
+			const text = [
+				`Live view, refreshed ${clock(live.updatedAt)}. Workers, runs and proposals update by themselves.`,
+				live.notesUpdatedAt
+					? `Tower notes last written ${formatAge(nowMs - Date.parse(live.notesUpdatedAt))} ago.`
+					: "The tower has not written any notes.",
+				"",
+				section("● Being done", live.doing),
+				"",
+				section("✓ Done", live.done),
+				"",
+				section("→ Next", live.next),
+			].join("\n");
+			content = options.wrapCache?.get("summary", width, text, () => wrap(text, width)) ?? wrap(text, width);
 		}
 		cursor = state.scroll;
 	}

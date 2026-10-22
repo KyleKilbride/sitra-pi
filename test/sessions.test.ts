@@ -23,12 +23,14 @@ import {
 	groupWorkerSessions,
 	listSessions,
 	prepareWorktree,
+	readGitHeadBranch,
 	readLastLines,
 	readTranscriptTail,
 	removeSession,
 	type SessionRecord,
 	sendInboxMessage,
 	spawnPaneCommand,
+	transcriptItemFromEntry,
 	updateSession,
 	writeSession,
 } from "../extensions/sessions.ts";
@@ -769,13 +771,63 @@ describe("reading the end of big transcripts", () => {
 		const fixed = new Date("2026-10-16T10:00:00.000Z");
 		writeFileSync(file, "a\nb\n");
 		utimesSync(file, fixed, fixed);
-		const read = createTailReader(10);
-		expect(read(file)).toBe("a\nb");
+		const tail = createTailReader(10);
+		expect(tail.read(file)).toBe("a\nb");
 		writeFileSync(file, "c\nd\n");
 		utimesSync(file, fixed, fixed);
-		expect(read(file)).toBe("a\nb");
+		expect(tail.read(file)).toBe("a\nb");
 		writeFileSync(file, "c\nd\ne\n");
-		expect(read(file)).toBe("c\nd\ne");
+		expect(tail.read(file)).toBe("c\nd\ne");
+	});
+
+	test("a tail reader drops cached files not retained by the current refresh", () => {
+		const dir = tmp();
+		const a = join(dir, "a.jsonl");
+		const b = join(dir, "b.jsonl");
+		writeFileSync(a, "a\n");
+		writeFileSync(b, "b\n");
+		const tail = createTailReader(10);
+		expect(tail.read(a)).toBe("a");
+		expect(tail.read(b)).toBe("b");
+		tail.retain(new Set([a]));
+		expect(tail.size).toBe(1);
+	});
+
+	test("the default tail byte cap is one megabyte", () => {
+		const dir = tmp();
+		const file = join(dir, "oversized.jsonl");
+		writeFileSync(file, `${"x".repeat(1024 * 1024 + 1)}\n`);
+		expect(readLastLines(file, 1)).toBe("");
+	});
+
+	test("transcript item parsing ignores non-object entries", () => {
+		expect(transcriptItemFromEntry(null)).toBeUndefined();
+		expect(readTranscriptTail("null\n")).toEqual([]);
+	});
+});
+
+describe("cheap git branch reads", () => {
+	test("surfaces unreadable .git files instead of walking up to a parent repo", () => {
+		const parent = tmp();
+		mkdirSync(join(parent, ".git"), { recursive: true });
+		writeFileSync(join(parent, ".git", "HEAD"), "ref: refs/heads/parent\n");
+		const child = join(parent, "child");
+		mkdirSync(child);
+		const dotGit = join(child, ".git");
+		writeFileSync(dotGit, "gitdir: ../missing\n");
+		chmodSync(dotGit, 0);
+		try {
+			expect(() => readGitHeadBranch(child)).toThrow();
+		} finally {
+			chmodSync(dotGit, 0o644);
+		}
+	});
+
+	test("shows HEAD for detached checkouts", () => {
+		const repo = tmp();
+		mkdirSync(join(repo, ".git"), { recursive: true });
+		writeFileSync(join(repo, ".git", "HEAD"), "0123456789abcdef0123456789abcdef01234567\n");
+		expect(readGitHeadBranch(repo)).toBe("HEAD");
 	});
 });
 

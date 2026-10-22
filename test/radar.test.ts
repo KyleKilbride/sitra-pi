@@ -1,15 +1,28 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { writeProposal } from "../extensions/grimoire.ts";
 import {
 	collectRadarSnapshot,
+	collectWorkerRepos,
+	createFolderLookupCache,
 	createRefreshScheduler,
+	createTranscriptCache,
 	frameUpdate,
 	renderRadarFrame,
 	visibleWidth,
 } from "../extensions/radar.ts";
+import { createPullRequestScheduler } from "../extensions/radar-runtime.ts";
 import { readTowerSummary } from "../extensions/radar-store.ts";
 import { EXIT_MARKER } from "../extensions/runs.ts";
 import { type SessionRecord, writeSession } from "../extensions/sessions.ts";
@@ -216,6 +229,38 @@ fi
 		}
 	});
 
+	test("removes its session record when the pane sends SIGHUP", () => {
+		const profile = tmp();
+		const saved = {
+			PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
+			SITRA_ROLE: process.env.SITRA_ROLE,
+			SITRA_NO_RADAR: process.env.SITRA_NO_RADAR,
+		};
+		process.env.PI_CODING_AGENT_DIR = profile;
+		process.env.SITRA_ROLE = "tower";
+		process.env.SITRA_NO_RADAR = "1";
+		try {
+			const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
+			sitraTower({
+				on: (event, fn) => handlers.set(event, fn as never),
+				registerTool: () => {},
+				registerCommand: () => {},
+				events: { on: () => {} },
+			});
+			const ctx = { cwd: profile, sessionManager: { getSessionId: () => "tower-sighup" } };
+			handlers.get("session_start")?.({}, ctx);
+			const record = join(profile, "sitra-sessions", "tower-sighup.json");
+			expect(existsSync(record)).toBe(true);
+			process.emit("SIGHUP", "SIGHUP");
+			expect(existsSync(record)).toBe(false);
+		} finally {
+			for (const [key, value] of Object.entries(saved)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
+
 	test("herdr workspace view keeps the lead when a teammate tab is focused, preserves stopped leads, and clears answered questions", () => {
 		const profile = tmp();
 		const bin = tmp();
@@ -401,6 +446,312 @@ describe("radar refresh cost", () => {
 		expect(asked.length).toBeGreaterThan(0);
 		expect(asked.every((f) => f === transcript)).toBe(true);
 		expect(snap.workers[0]?.lastLine).toBe("Only the tail was read.");
+	});
+
+	test("pull request scheduler loads outside refreshes, serializes, surfaces failures and aborts cleanup", async () => {
+		let now = 1_000;
+		let calls = 0;
+		let firstResolve:
+			| ((value: {
+					items: { id: string; project: string; repo: string; number: number; title: string }[];
+					notices: { repo: string; text: string }[];
+			  }) => void)
+			| undefined;
+		let aborts = 0;
+		const scheduler = createPullRequestScheduler(
+			(_repos, signal) => {
+				calls++;
+				signal.addEventListener("abort", () => aborts++, { once: true });
+				if (calls === 1) {
+					return new Promise((resolve) => {
+						firstResolve = resolve;
+					});
+				}
+				if (calls === 2)
+					return Promise.resolve({
+						items: [],
+						notices: [{ repo: "/repos/kept", text: "Open PRs unavailable for kept; gh pr list failed." }],
+					});
+				return new Promise(() => {});
+			},
+			{ intervalMs: 60_000, now: () => now },
+		);
+
+		scheduler.retain(["/repos/old"]);
+		expect(calls).toBe(0);
+		expect(scheduler.request(["/repos/old"])).toBe(true);
+		expect(scheduler.request(["/repos/old"])).toBe(false);
+		expect(calls).toBe(1);
+
+		scheduler.retain(["/repos/kept"]);
+		firstResolve?.({
+			items: [{ id: "old#1", project: "old", repo: "/repos/old", number: 1, title: "stale" }],
+			notices: [],
+		});
+		await scheduler.whenIdle();
+		expect(scheduler.snapshot().items).toEqual([]);
+
+		now += 60_001;
+		expect(scheduler.request(["/repos/kept"])).toBe(true);
+		await scheduler.whenIdle();
+		expect(scheduler.snapshot().notices).toEqual([
+			{ repo: "/repos/kept", text: "Open PRs unavailable for kept; gh pr list failed." },
+		]);
+
+		now += 60_001;
+		expect(scheduler.request(["/repos/kept"])).toBe(true);
+		scheduler.cleanup();
+		expect(aborts).toBeGreaterThan(0);
+	});
+
+	test("pull request scheduler filters loaded PR data by repo path only", async () => {
+		const scheduler = createPullRequestScheduler(
+			() =>
+				Promise.resolve({
+					items: [
+						{ id: "app#1", project: "app", repo: "/a/app", number: 1, title: "wrong repo" },
+						{ id: "app#2", project: "app", repo: "/b/app", number: 2, title: "kept repo" },
+					],
+					notices: [{ repo: "/b/app-old", text: "Open PRs unavailable for app-old; gh pr list failed." }],
+				}),
+			{ intervalMs: 0 },
+		);
+		expect(scheduler.request(["/a/app", "/b/app-old", "/b/app"])).toBe(true);
+		await scheduler.whenIdle();
+		scheduler.retain(["/b/app"]);
+		expect(scheduler.snapshot().items.map((item) => item.title)).toEqual(["kept repo"]);
+		expect(scheduler.snapshot().notices).toEqual([]);
+	});
+
+	test("pull request scheduler keeps its own failure notice until the next successful load", async () => {
+		let fail = true;
+		const scheduler = createPullRequestScheduler(
+			() => {
+				if (fail) return Promise.reject(new Error("boom"));
+				return Promise.resolve({ items: [], notices: [] });
+			},
+			{ intervalMs: 0 },
+		);
+		expect(scheduler.request(["/repos/app"])).toBe(true);
+		await scheduler.whenIdle();
+		scheduler.retain(["/repos/app"]);
+		expect(scheduler.snapshot().notices).toEqual([{ text: "Open PRs unavailable; boom." }]);
+
+		fail = false;
+		expect(scheduler.request(["/repos/app"])).toBe(true);
+		await scheduler.whenIdle();
+		expect(scheduler.snapshot().notices).toEqual([]);
+	});
+
+	test("herdr-only workspace rereads the branch after checkout changes", () => {
+		const profile = tmp();
+		const repo = join(profile, "repo");
+		const bin = join(profile, "bin");
+		mkdirSync(join(repo, ".git"), { recursive: true });
+		writeFileSync(join(repo, ".git", "HEAD"), "ref: refs/heads/one\n");
+		mkdirSync(bin, { recursive: true });
+		writeFileSync(
+			join(bin, "herdr"),
+			`#!/bin/sh
+if [ "$1" = "workspace" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"workspaces":[{"workspace_id":"wB","number":1,"label":"[1] Branch watcher","active_tab_id":"wB:t1","agent_status":"idle"}]}}'
+elif [ "$1" = "tab" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"tabs":[{"tab_id":"wB:t1","label":"[1] repo › pi"}]}}'
+elif [ "$1" = "agent" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"agents":[{"workspace_id":"wB","tab_id":"wB:t1","pane_id":"wB:p1","agent":"pi","agent_status":"idle","cwd":"${repo}"}]}}'
+fi
+`,
+		);
+		chmodSync(join(bin, "herdr"), 0o755);
+		const folders = createFolderLookupCache({ mainCheckout: (cwd) => cwd });
+		const savedEnv = { HERDR_ENV: process.env.HERDR_ENV, PATH: process.env.PATH };
+		process.env.HERDR_ENV = "1";
+		process.env.PATH = `${bin}:${process.env.PATH}`;
+		try {
+			let snap = collectRadarSnapshot(profile, { includeHerdr: true, folders });
+			expect(snap.workers[0]?.lead.branch).toBe("one");
+			writeFileSync(join(repo, ".git", "HEAD"), "ref: refs/heads/two\n");
+			snap = collectRadarSnapshot(profile, { includeHerdr: true, folders });
+			expect(snap.workers[0]?.lead.branch).toBe("two");
+		} finally {
+			for (const [key, value] of Object.entries(savedEnv)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
+
+	test("herdr-only workspace reports unreadable .git and keeps the snapshot", () => {
+		const profile = tmp();
+		const repo = join(profile, "repo");
+		const bin = join(profile, "bin");
+		mkdirSync(repo, { recursive: true });
+		symlinkSync(".git", join(repo, ".git"));
+		mkdirSync(bin, { recursive: true });
+		writeFileSync(
+			join(bin, "herdr"),
+			`#!/bin/sh
+if [ "$1" = "workspace" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"workspaces":[{"workspace_id":"wE","number":1,"label":"[1] Error branch","active_tab_id":"wE:t1","agent_status":"idle"}]}}'
+elif [ "$1" = "tab" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"tabs":[{"tab_id":"wE:t1","label":"[1] repo › pi"}]}}'
+elif [ "$1" = "agent" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"agents":[{"workspace_id":"wE","tab_id":"wE:t1","pane_id":"wE:p1","agent":"pi","agent_status":"idle","cwd":"${repo}"}]}}'
+fi
+`,
+		);
+		chmodSync(join(bin, "herdr"), 0o755);
+		const folders = createFolderLookupCache({ mainCheckout: (cwd) => cwd });
+		const savedEnv = { HERDR_ENV: process.env.HERDR_ENV, PATH: process.env.PATH };
+		process.env.HERDR_ENV = "1";
+		process.env.PATH = `${bin}:${process.env.PATH}`;
+		try {
+			const snap = collectRadarSnapshot(profile, { includeHerdr: true, folders });
+			expect(snap.workers[0]?.lead.branch).toBeUndefined();
+			expect(snap.statusNotices?.join("\n")).toContain("Branch unavailable for repo");
+			expect(snap.statusNotices?.join("\n")).toContain("ELOOP");
+		} finally {
+			for (const [key, value] of Object.entries(savedEnv)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
+
+	test("herdr-only workspace reports unreadable HEAD and keeps the snapshot", () => {
+		const profile = tmp();
+		const repo = join(profile, "repo");
+		const bin = join(profile, "bin");
+		mkdirSync(join(repo, ".git"), { recursive: true });
+		symlinkSync("HEAD", join(repo, ".git", "HEAD"));
+		mkdirSync(bin, { recursive: true });
+		writeFileSync(
+			join(bin, "herdr"),
+			`#!/bin/sh
+if [ "$1" = "workspace" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"workspaces":[{"workspace_id":"wH","number":1,"label":"[1] Head branch","active_tab_id":"wH:t1","agent_status":"idle"}]}}'
+elif [ "$1" = "tab" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"tabs":[{"tab_id":"wH:t1","label":"[1] repo › pi"}]}}'
+elif [ "$1" = "agent" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"agents":[{"workspace_id":"wH","tab_id":"wH:t1","pane_id":"wH:p1","agent":"pi","agent_status":"idle","cwd":"${repo}"}]}}'
+fi
+`,
+		);
+		chmodSync(join(bin, "herdr"), 0o755);
+		const folders = createFolderLookupCache({ mainCheckout: (cwd) => cwd });
+		const savedEnv = { HERDR_ENV: process.env.HERDR_ENV, PATH: process.env.PATH };
+		process.env.HERDR_ENV = "1";
+		process.env.PATH = `${bin}:${process.env.PATH}`;
+		try {
+			const snap = collectRadarSnapshot(profile, { includeHerdr: true, folders });
+			expect(snap.workers[0]?.lead.branch).toBeUndefined();
+			expect(snap.statusNotices?.join("\n")).toContain("Branch unavailable for repo");
+			expect(snap.statusNotices?.join("\n")).toContain("ELOOP");
+		} finally {
+			for (const [key, value] of Object.entries(savedEnv)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
+
+	test("herdr-only workspace shows non-branch HEAD targets", () => {
+		const profile = tmp();
+		const repo = join(profile, "repo");
+		const bin = join(profile, "bin");
+		mkdirSync(join(repo, ".git"), { recursive: true });
+		writeFileSync(join(repo, ".git", "HEAD"), "ref: refs/tags/v1\n");
+		mkdirSync(bin, { recursive: true });
+		writeFileSync(
+			join(bin, "herdr"),
+			`#!/bin/sh
+if [ "$1" = "workspace" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"workspaces":[{"workspace_id":"wT","number":1,"label":"[1] Tag branch","active_tab_id":"wT:t1","agent_status":"idle"}]}}'
+elif [ "$1" = "tab" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"tabs":[{"tab_id":"wT:t1","label":"[1] repo › pi"}]}}'
+elif [ "$1" = "agent" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"agents":[{"workspace_id":"wT","tab_id":"wT:t1","pane_id":"wT:p1","agent":"pi","agent_status":"idle","cwd":"${repo}"}]}}'
+fi
+`,
+		);
+		chmodSync(join(bin, "herdr"), 0o755);
+		const folders = createFolderLookupCache({ mainCheckout: (cwd) => cwd });
+		const savedEnv = { HERDR_ENV: process.env.HERDR_ENV, PATH: process.env.PATH };
+		process.env.HERDR_ENV = "1";
+		process.env.PATH = `${bin}:${process.env.PATH}`;
+		try {
+			const snap = collectRadarSnapshot(profile, { includeHerdr: true, folders });
+			expect(snap.workers[0]?.lead.branch).toBe("refs/tags/v1");
+		} finally {
+			for (const [key, value] of Object.entries(savedEnv)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
+
+	test("reuses cached folder git lookups on the next unchanged refresh", () => {
+		const profile = tmp();
+		const repo = join(profile, "repo");
+		let gitCalls = 0;
+		mkdirSync(repo, { recursive: true });
+		writeSession(profile, {
+			id: "lead-git",
+			role: "lead",
+			pid: process.pid,
+			cwd: repo,
+			repo,
+			status: "idle",
+			startedAt: "2026-10-16T10:00:00.000Z",
+			updatedAt: "2026-10-16T10:00:00.000Z",
+		});
+		const folders = createFolderLookupCache({
+			mainCheckout: (cwd) => {
+				gitCalls++;
+				return cwd;
+			},
+		});
+		let snap = collectRadarSnapshot(profile, { folders });
+		collectWorkerRepos(snap.workers, folders);
+		gitCalls = 0;
+		snap = collectRadarSnapshot(profile, { folders });
+		collectWorkerRepos(snap.workers, folders);
+		expect(gitCalls).toBe(0);
+	});
+
+	test("parses an unchanged transcript tail once across refreshes", () => {
+		const profile = tmp();
+		const transcript = join(profile, "lead.jsonl");
+		writeFileSync(
+			transcript,
+			`${JSON.stringify({
+				type: "message",
+				timestamp: "2026-10-16T10:00:00.000Z",
+				message: { role: "assistant", content: [{ type: "text", text: "Parsed once." }] },
+			})}\n`,
+		);
+		writeSession(profile, {
+			id: "lead-parse",
+			role: "lead",
+			pid: process.pid,
+			cwd: profile,
+			repo: profile,
+			sessionFile: transcript,
+			status: "working",
+			startedAt: "2026-10-16T10:00:00.000Z",
+			updatedAt: "2026-10-16T10:00:00.000Z",
+		});
+		let parses = 0;
+		const transcripts = createTranscriptCache(
+			(file) => readFileSync(file, "utf8"),
+			(line) => {
+				parses++;
+				return JSON.parse(line);
+			},
+		);
+		collectRadarSnapshot(profile, { transcripts });
+		collectRadarSnapshot(profile, { transcripts });
+		expect(parses).toBe(1);
 	});
 
 	test("bursts of refresh requests run at most once per interval, with one trailing refresh", () => {
