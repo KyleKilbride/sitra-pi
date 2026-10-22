@@ -262,11 +262,46 @@ describe("Pi wiring", () => {
 		const before = readFileSync(path, "utf8");
 		const toolStatus = await tools.get("loop_status")?.execute("1", {}, undefined, undefined, ctx(cwd));
 		userMessages.length = 0;
+		const notifications: { message: string; type?: "info" | "warning" | "error" }[] = [];
+		const statusCtx = {
+			cwd,
+			ui: {
+				setStatus() {},
+				notify: (message: string, type?: "info" | "warning" | "error") => notifications.push({ message, type }),
+			},
+		};
 
-		await commands.get("loop")?.handler("status", ctx(cwd));
+		await commands.get("loop")?.handler("status", statusCtx);
 
-		expect(userMessages).toEqual([toolStatus?.content[0]?.text]);
+		expect(notifications).toEqual([{ message: toolStatus?.content[0]?.text, type: "info" }]);
+		expect(userMessages).toEqual([]);
 		expect(readFileSync(path, "utf8")).toBe(before);
+	});
+
+	test("/loop status without UI fails clearly instead of starting a fallback", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, userMessages } = fakePi();
+		const { cwd } = gitWorktree();
+		await commands.get("loop")?.handler("start Add the runner", ctx(cwd));
+		userMessages.length = 0;
+
+		await expect(commands.get("loop")?.handler("status", { cwd })).rejects.toThrow(
+			"/loop status requires an interactive UI",
+		);
+		expect(userMessages).toEqual([]);
+	});
+
+	test("loop_status reports a clear no-loop error without writing", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { tools } = fakePi();
+		const { cwd } = gitWorktree();
+
+		await expect(tools.get("loop_status")?.execute("1", {}, undefined, undefined, ctx(cwd))).rejects.toThrow(
+			`no loop on feature in ${cwd}; start one with /loop start <task>`,
+		);
+		expect(existsSync(join(profile, "loops"))).toBe(false);
 	});
 
 	test("loop_status is read-only and reports staleness without writing", async () => {

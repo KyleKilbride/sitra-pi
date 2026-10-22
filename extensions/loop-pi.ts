@@ -43,6 +43,8 @@ interface ToolResult {
 
 const LOOP_USAGE =
 	"usage: /loop start [--base <ref>] <task> | /loop answer <answer> | /loop plan <plan> | /loop approve <summary> | /loop status";
+const LOOP_VERBS = ["start", "answer", "plan", "approve", "status"] as const;
+type LoopVerb = (typeof LOOP_VERBS)[number];
 
 interface Pi {
 	on(event: string, handler: (event: never, ctx: Ctx) => unknown): void;
@@ -158,6 +160,10 @@ function splitCommand(args: string): { verb: string; rest: string } {
 	return { verb: trimmed.slice(0, space), rest: trimmed.slice(space + 1).trim() };
 }
 
+function isLoopVerb(verb: string): verb is LoopVerb {
+	return (LOOP_VERBS as readonly string[]).includes(verb);
+}
+
 function parseStart(rest: string): { baseRef?: string; goal: string } {
 	const prefix = "--base ";
 	if (!rest.startsWith(prefix)) return { goal: rest };
@@ -171,10 +177,6 @@ function isBaseBranch(branch: string, baseRef: string): boolean {
 	const remotePrefix = "origin/";
 	const baseBranch = baseRef.startsWith(remotePrefix) ? baseRef.slice(remotePrefix.length) : baseRef;
 	return `refs/heads/${branch}` === `refs/heads/${baseBranch}`;
-}
-
-function loadCurrentState(gitState: GitState): LoopState {
-	return readLoopStateFile(statePathFor(gitState));
 }
 
 function loadExistingCurrentState(checkout: Omit<GitState, "baseRef" | "baseHead">): {
@@ -265,7 +267,7 @@ function loopStatus(cwd: string, state: LoopState): ToolResult {
 
 async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> {
 	const { verb, rest } = splitCommand(args);
-	if (!verb || !["start", "answer", "plan", "approve", "status"].includes(verb)) throw new Error(LOOP_USAGE);
+	if (!verb || !isLoopVerb(verb)) throw new Error(LOOP_USAGE);
 	if (verb === "start") {
 		if (!rest) throw new Error(LOOP_USAGE);
 		const parsed = parseStart(rest);
@@ -290,10 +292,8 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 	const checkout = checkoutGit(ctx.cwd);
 	const { path, state: currentState } = loadExistingCurrentState(checkout);
 	if (verb === "status") {
-		pi.sendUserMessage(loopStatus(ctx.cwd, currentState).content[0]?.text ?? "", {
-			deliverAs: "followUp",
-			streamingBehavior: "followUp",
-		});
+		if (!ctx.ui?.notify) throw new Error("/loop status requires an interactive UI");
+		ctx.ui.notify(loopStatus(ctx.cwd, currentState).content[0]?.text ?? "", "info");
 		return;
 	}
 	let gitState: GitState;
@@ -474,7 +474,7 @@ export default function sitraLoop(pi: Pi): void {
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
 			const checkout = checkoutGit(ctx.cwd);
-			const state = loadCurrentState({ ...checkout, baseRef: "", baseHead: "" });
+			const { state } = loadExistingCurrentState(checkout);
 			return loopStatus(ctx.cwd, state);
 		},
 	});
