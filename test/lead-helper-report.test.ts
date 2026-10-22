@@ -44,9 +44,7 @@ const content = (text: string) => [{ type: "text", text }];
 
 afterEach(() => vi.unstubAllEnvs());
 
-function installFakeHerdr(
-	options: { waitFails?: boolean; waitFailures?: number; splitPaneIds?: string[] } = {},
-): {
+function installFakeHerdr(options: { waitFails?: boolean; waitFailures?: number; splitPaneIds?: string[] } = {}): {
 	cwd: string;
 	calls(): string[][];
 } {
