@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -379,6 +379,17 @@ describe("Pi wiring", () => {
 		);
 	});
 
+	test("/loop abandon reports the same clear no-loop error before reading missing state", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands } = fakePi();
+		const { cwd } = gitWorktree();
+
+		await expect(commands.get("loop")?.handler("abandon superseded", ctx(cwd))).rejects.toThrow(
+			`no loop on feature in ${cwd}; start one with /loop start <task>`,
+		);
+	});
+
 	test("/loop status reports a clear no-loop error without writing", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
@@ -635,6 +646,57 @@ describe("Pi wiring", () => {
 		const answered = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
 		expect(answered.stage).toBe("advise");
 		expect(answered.dispatchedAdvisors).toEqual(["intent"]);
+	});
+
+	test("/loop abandon archives a blocked loop, loop_status reports no loop, and start works again", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers, tools } = fakePi();
+		const notifications: { message: string; type?: "info" | "warning" | "error" }[] = [];
+		const { cwd } = gitWorktree();
+		const loopCtx = {
+			...ctx(cwd),
+			ui: {
+				setStatus() {},
+				notify: (message: string, type?: "info" | "warning" | "error") => notifications.push({ message, type }),
+			},
+		};
+		await commands.get("loop")?.handler("start Add the runner", loopCtx);
+		await handlers.get("message_end")?.(
+			subagentResult("intent-advisor", join(profile, "missing-session.jsonl")),
+			loopCtx,
+		);
+		const path = loopStatePath(profile, cwd, "feature");
+		const blocked = readLoopStateFile(path);
+		expect(blocked.stage).toBe("blocked");
+
+		await commands.get("loop")?.handler("abandon superseded by manual fix", loopCtx);
+
+		expect(existsSync(path)).toBe(false);
+		const abandonedDir = join(profile, "loops", "abandoned");
+		const archived = readdirSync(abandonedDir);
+		expect(archived).toHaveLength(1);
+		const abandoned = JSON.parse(readFileSync(join(abandonedDir, archived[0] ?? ""), "utf8")) as {
+			stage: string;
+			goal: string;
+			abandonedAt?: string;
+			abandonReason?: string;
+		};
+		expect(abandoned).toMatchObject({
+			stage: "blocked",
+			goal: "Add the runner",
+			abandonReason: "superseded by manual fix",
+		});
+		expect(abandoned.abandonedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+		expect(notifications).toEqual([
+			{ message: "Abandoned loop on feature in " + cwd + ".", type: "info" },
+		]);
+		await expect(tools.get("loop_status")?.execute("1", {}, undefined, undefined, loopCtx)).rejects.toThrow(
+			`no loop on feature in ${cwd}; start one with /loop start <task>`,
+		);
+
+		await commands.get("loop")?.handler("start Start again", loopCtx);
+		expect(readLoopStateFile(path).goal).toBe("Start again");
 	});
 
 	test("stale blocking through wiring can be left by /loop answer", async () => {
