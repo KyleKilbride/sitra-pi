@@ -11,7 +11,7 @@ const BaseFields = {
 	assumptions: Type.Array(Type.String()),
 };
 
-const ReworkClass = Type.Union([
+export const ReworkClass = Type.Union([
 	Type.Literal("context-missed"),
 	Type.Literal("context-missing"),
 	Type.Literal("wrong-intent"),
@@ -20,12 +20,13 @@ const ReworkClass = Type.Union([
 	Type.Literal("check-gap"),
 ]);
 
-const Question = Type.Object(
+export const Question = Type.Object(
 	{
 		id: Type.String({ minLength: 1 }),
 		text: Type.String({ minLength: 1 }),
 		recommended: Type.String({ minLength: 1 }),
 		dependsOn: Type.Array(Type.String()),
+		answer: Type.Optional(Type.String()),
 	},
 	{ additionalProperties: false },
 );
@@ -40,7 +41,7 @@ const AcceptanceTest = Type.Object(
 	{ additionalProperties: false },
 );
 
-const LogDecision = Type.Object(
+export const LogDecision = Type.Object(
 	{
 		log: Type.String({ minLength: 1 }),
 		reason: Type.String({ minLength: 1 }),
@@ -48,7 +49,7 @@ const LogDecision = Type.Object(
 	{ additionalProperties: false },
 );
 
-const RerunCheck = Type.Object(
+export const RerunCheck = Type.Object(
 	{
 		command: Type.String({ minLength: 1 }),
 		log: Type.String({ minLength: 1 }),
