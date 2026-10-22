@@ -174,7 +174,8 @@ describe("run_in_pane loop metadata", () => {
 			undefined,
 			{ cwd },
 		);
-		const log = result?.details.log as string;
+		const details = result?.details as { log: string; runId: string };
+		const log = details.log;
 		execFileSync("bash", [
 			"-c",
 			`for i in {1..50}; do [ -s ${JSON.stringify(log)} ] && exit 0; sleep 0.05; done; exit 1`,
@@ -187,6 +188,6 @@ describe("run_in_pane loop metadata", () => {
 				sha256: execFileSync("sha256sum", ["loop.test.ts"], { cwd, encoding: "utf8" }).split(/\s+/)[0],
 			},
 		]);
-		expect(result?.details.runId).toBeTypeOf("string");
+		expect(details.runId).toBeTypeOf("string");
 	});
 });
