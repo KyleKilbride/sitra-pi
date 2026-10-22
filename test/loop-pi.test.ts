@@ -345,14 +345,40 @@ describe("Pi wiring", () => {
 	test("active-loop git base-ref failures persist a git block", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
-		const { commands } = fakePi();
+		const { commands, handlers, tools } = fakePi();
 		const { cwd } = gitWorktree({ originHead: false });
 		await commands.get("loop")?.handler("start --base origin/main Add the runner", ctx(cwd));
+		const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
 		execFileSync("git", ["update-ref", "-d", "refs/remotes/origin/main"], { cwd, stdio: "ignore" });
 		await commands.get("loop")?.handler("plan cannot run", ctx(cwd));
-		const state = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		const path = loopStatePath(profile, cwd, "feature");
+		const state = readLoopStateFile(path);
 		expect(state.stage).toBe("blocked");
 		expect(state.block).toMatchObject({ kind: "git" });
 		expect(state.questions.at(-1)?.text).toContain("origin/main");
+
+		const beforeScout = readFileSync(path, "utf8");
+		await handlers.get("message_end")?.(
+			subagentResult(
+				"scout",
+				sessionFileWithHelperReport(helperReport("intent", { questions: [], doneCandidates: [], ambiguities: [] })),
+			),
+			ctx(cwd),
+		);
+		expect(readFileSync(path, "utf8")).toBe(beforeScout);
+
+		await commands.get("loop")?.handler("answer not yet fixed", ctx(cwd));
+		expect(readLoopStateFile(path).block).toMatchObject({ kind: "git" });
+		const beforeStatus = readFileSync(path, "utf8");
+		const status = await tools.get("loop_status")?.execute("1", {}, undefined, undefined, ctx(cwd));
+		expect(status?.content[0]?.text).toContain("git:");
+		expect(readFileSync(path, "utf8")).toBe(beforeStatus);
+
+		execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd, stdio: "ignore" });
+		await commands.get("loop")?.handler("answer fixed now", ctx(cwd));
+		const resumed = readLoopStateFile(path);
+		expect(resumed.stage).toBe("advise");
+		expect(resumed.block).toBeUndefined();
+		expect(resumed.dispatchedAdvisors).toEqual(["intent", "codebase"]);
 	});
 });

@@ -20,7 +20,6 @@ import {
 	type LoopEffect,
 	type LoopState,
 	roleForAgent,
-	STALE_STATE_QUESTION_ID,
 	staleReason,
 	startLoop,
 	tokensFromSubagentResult,
@@ -160,7 +159,9 @@ function parseStart(rest: string): { baseRef?: string; goal: string } {
 }
 
 function isBaseBranch(branch: string, baseRef: string): boolean {
-	return branch === baseRef || `origin/${branch}` === baseRef || baseRef.endsWith(`/${branch}`);
+	const remotePrefix = "origin/";
+	const baseBranch = baseRef.startsWith(remotePrefix) ? baseRef.slice(remotePrefix.length) : baseRef;
+	return `refs/heads/${branch}` === `refs/heads/${baseBranch}`;
 }
 
 function loadCurrentState(gitState: GitState): LoopState {
@@ -250,8 +251,7 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 	if (verb === "answer") {
 		if (!rest) throw new Error("usage: /loop answer <answer>");
 		const rawState = currentState;
-		const isStaleAnswer =
-			rawState.stage === "blocked" && rawState.questions.some((question) => question.id === STALE_STATE_QUESTION_ID);
+		const isStaleAnswer = rawState.stage === "blocked" && rawState.block?.kind === "stale";
 		const state = isStaleAnswer ? rawState : loadMutableState(gitState);
 		const result = answerLoopQuestion(state, { answer: rest, current: gitState });
 		writeLoopStateFile(path, result.state);
@@ -290,6 +290,10 @@ async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<v
 	const path = statePathFor({ ...checkout, baseRef: "", baseHead: "" });
 	if (!existsSync(path)) return;
 	const state = readLoopStateFile(path);
+	const raw = event as Record<string, unknown>;
+	const role = roleForAgent(raw.agent);
+	if (!role || !state.dispatchedAdvisors.includes(role)) return;
+	if (state.stage !== "advise" && state.stage !== "architecture-review") return;
 	let gitState: GitState;
 	try {
 		gitState = currentGitForState(ctx.cwd, state);
@@ -299,10 +303,6 @@ async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<v
 		emitEffects(pi, blocked.state, blocked.effects);
 		return;
 	}
-	const raw = event as Record<string, unknown>;
-	const role = roleForAgent(raw.agent);
-	if (!role || !state.dispatchedAdvisors.includes(role)) return;
-	if (state.stage !== "advise" && state.stage !== "architecture-review") return;
 	const stale = blockForStaleState(state, { branch: gitState.branch, baseHead: gitState.baseHead });
 	if (stale.state.stage === "blocked") {
 		writeLoopStateFile(path, stale.state);
@@ -404,14 +404,12 @@ export default function sitraLoop(pi: Pi): void {
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
 			const checkout = checkoutGit(ctx.cwd);
-			const path = statePathFor({ ...checkout, baseRef: "", baseHead: "" });
 			const state = loadCurrentState({ ...checkout, baseRef: "", baseHead: "" });
 			let gitState: GitState;
 			try {
 				gitState = currentGitForState(ctx.cwd, state);
 			} catch (error) {
 				const blocked = blockForGitFailure(state, String(error));
-				writeLoopStateFile(path, blocked.state);
 				return {
 					content: [{ type: "text", text: `stage: blocked\ngit: ${String(error)}` }],
 					details: blocked.state,

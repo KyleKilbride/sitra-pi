@@ -148,8 +148,6 @@ export const LOOP_STATE_SCHEMA = Type.Object(
 		baseRef: Type.String(),
 		baseHead: Type.String(),
 		stage: LoopStageSchema,
-		blockedFrom: Type.Optional(LoopStageSchema),
-		blockedAdvisor: Type.Optional(AdvisorRoleSchema),
 		block: Type.Optional(Block),
 		goal: Type.String(),
 		limits: Type.Array(Type.String()),
@@ -362,13 +360,27 @@ function withBlock(
 		resumeStage?: LoopStage;
 	},
 ): { state: LoopState; effects: LoopEffect[] } {
+	if (state.block) {
+		const questions = state.questions.map((question) =>
+			question.id === state.block?.questionId
+				? { ...question, text: `${question.text}\n\nAdditional problem: ${input.question.text}` }
+				: question,
+		);
+		const current = questions.find((question) => question.id === state.block?.questionId) ?? input.question;
+		return {
+			state: { ...state, questions },
+			effects: [{ type: "ask-person", reason: state.block.kind, question: current }],
+		};
+	}
+	const resumeStage = input.resumeStage ?? state.stage;
+	const safeResumeStage = resumeStage === "blocked" || resumeStage === "needs-person" ? "advise" : resumeStage;
 	const blocked: LoopState = {
 		...state,
 		stage: input.kind === "questions" ? "needs-person" : "blocked",
 		block: {
 			kind: input.kind,
 			questionId: input.question.id,
-			resumeStage: input.resumeStage ?? state.stage,
+			resumeStage: safeResumeStage,
 			pendingAdvisors: input.pendingAdvisors ?? pendingAdvisorsForResume(state),
 		},
 		questions: [...state.questions, input.question],

@@ -6,6 +6,7 @@ import {
 	applyAdvisorReport,
 	applyLeadPlan,
 	approveBrief,
+	blockForAdvisorIntakeFailure,
 	blockForStaleState,
 	briefHash,
 	buildBrief,
@@ -440,6 +441,24 @@ describe("stale state and validation", () => {
 		const blocked = blockForStaleState(state, { ...context, baseHead: "base-b" }).state;
 		expect(blocked.questions[0]?.answer).toBe("A1");
 		expect(blocked.questions.at(-1)?.id).toBe("stale-state");
+	});
+
+	test("an existing block is structural and is not overwritten by later problems", () => {
+		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+		state = applyAdvisorReport(state, report("intent"), { outputTokens: 1, contextTokens: 0 }).state;
+		const blocked = blockForStaleState(state, { ...context, baseHead: "base-b" }).state;
+		const stacked = blockForAdvisorIntakeFailure(blocked, "codebase", "helper report missing").state;
+		expect(stacked.block).toMatchObject({ kind: "stale", resumeStage: "advise", pendingAdvisors: ["codebase"] });
+		expect(stacked.block?.resumeStage).not.toBe("blocked");
+		expect(stacked.block?.resumeStage).not.toBe("needs-person");
+		expect(stacked.questions.at(-1)?.text).toContain("Additional problem");
+		const answered = answerLoopQuestion(stacked, {
+			answer: "Continue.",
+			current: { ...context, baseHead: "base-b" },
+		}).state;
+		expect(answered.stage).toBe("advise");
+		expect(answered.block).toBeUndefined();
+		expect(answered.dispatchedAdvisors).toEqual(["codebase"]);
 	});
 
 	test("validates TypeBox state fields loudly", () => {
