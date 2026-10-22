@@ -3,8 +3,9 @@
  * search (`grimoire_search`) and propose (`grimoire_propose`), and only the person approves (`/grimoire`).
  * `/grimoire-reflect` asks the agent what this session taught that future agents need. `/kb` still works and points here.
  */
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { Type } from "typebox";
 import {
 	decide,
@@ -24,6 +25,7 @@ import {
 	writeProposal,
 } from "./grimoire.ts";
 import {
+	callKey,
 	captureMoment,
 	learningOn,
 	markRepeatSeen,
@@ -32,6 +34,9 @@ import {
 	repeats,
 	tally,
 } from "./learn.ts";
+import type { AdvisorRole, LoopState } from "./loop.ts";
+import { roleForAgent } from "./loop.ts";
+import { loopStatePath, readLoopStateFile } from "./loop-state.ts";
 import { mainCheckout, readLastLines } from "./sessions.ts";
 import { actionFromPi, entriesForAction, parseTrigger, pauseMessage } from "./triggers.ts";
 
@@ -94,6 +99,96 @@ const GRIMOIRE_TOOLS = ["grimoire_propose", "grimoire_search"];
 const REFLECT =
 	"Look back over this session. What did we learn that a future agent must know: a mistake and what would have caught it, how something really works, a decision and its reason, or a change to the agent setup? Check Grimoire first (the catalogue in your prompt, or grimoire_search) and skip anything it already says. Propose at most 3 entries with grimoire_propose, each with evidence. For a lesson, say what failed, the verified cause, the fix, whether it held, and what would catch it next time. Then stop.";
 
+function gitValue(cwd: string, args: string[]): string | undefined {
+	try {
+		return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+	} catch {
+		return undefined;
+	}
+}
+
+function loopProfileDir(): string {
+	if (process.env.PI_CODING_AGENT_DIR?.trim()) return process.env.PI_CODING_AGENT_DIR.trim();
+	const g = grimoireDir({ ...process.env, SITRA_GRIMOIRE: undefined });
+	return dirname(g);
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+function subagentChildren(input: Record<string, unknown>): Record<string, unknown>[] | undefined {
+	if (Array.isArray(input.children)) {
+		const children = input.children.map(objectRecord);
+		return children.every((child): child is Record<string, unknown> => !!child) && children.length > 0
+			? children
+			: undefined;
+	}
+	return "agent" in input || "name" in input ? [input] : undefined;
+}
+
+function childAgent(child: Record<string, unknown>): string | undefined {
+	return typeof child.agent === "string" ? child.agent : typeof child.name === "string" ? child.name : undefined;
+}
+
+function dispatchIdFrom(value: unknown): string | undefined {
+	const record = objectRecord(value);
+	if (!record) return undefined;
+	if (typeof record.dispatchId === "string" && record.dispatchId) return record.dispatchId;
+	if (typeof record.dispatch_id === "string" && record.dispatch_id) return record.dispatch_id;
+	for (const key of ["params", "input", "task"]) {
+		const found = dispatchIdFrom(record[key]);
+		if (found) return found;
+	}
+	return undefined;
+}
+
+function currentLoopState(cwd: string): { state?: LoopState; warning?: string } {
+	const worktree = gitValue(cwd, ["rev-parse", "--show-toplevel"]);
+	const branch = gitValue(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
+	if (!worktree || !branch) return {};
+	const path = loopStatePath(loopProfileDir(), worktree, branch);
+	if (!existsSync(path)) return {};
+	try {
+		return { state: readLoopStateFile(path) };
+	} catch (error) {
+		return { warning: `LOOPS state could not be checked for the Grimoire gate: ${String(error).slice(0, 200)}` };
+	}
+}
+
+function matchesPendingVerifier(state: LoopState, child: Record<string, unknown>, verifierAvailable: boolean): boolean {
+	if (!verifierAvailable || childAgent(child) !== "verifier" || state.stage !== "verify" || !state.verifierRequest) {
+		return false;
+	}
+	const childDispatchId = dispatchIdFrom(child);
+	return !childDispatchId || childDispatchId === state.verifierRequest.dispatchId;
+}
+
+function loopPendingSubagentDispatch(
+	input: Record<string, unknown>,
+	cwd: string,
+): { exempt: boolean; warning?: string } {
+	const children = subagentChildren(input);
+	if (!children) return { exempt: false };
+	const loaded = currentLoopState(cwd);
+	if (!loaded.state) return { exempt: false, warning: loaded.warning };
+	const pendingAdvisors = new Set<AdvisorRole>(loaded.state.dispatchedAdvisors);
+	let verifierAvailable = loaded.state.stage === "verify" && !!loaded.state.verifierRequest;
+	for (const child of children) {
+		const role = roleForAgent(childAgent(child));
+		if (role && pendingAdvisors.has(role)) {
+			pendingAdvisors.delete(role);
+			continue;
+		}
+		if (matchesPendingVerifier(loaded.state, child, verifierAvailable)) {
+			verifierAvailable = false;
+			continue;
+		}
+		return { exempt: false };
+	}
+	return { exempt: true };
+}
+
 export default function sitraKnowledge(pi: Pi): void {
 	const dir = () => grimoireDir(process.env);
 	const who = () => process.env.SITRA_USER_NAME?.trim() || "the person you work with";
@@ -153,6 +248,8 @@ export default function sitraKnowledge(pi: Pi): void {
 	});
 	/** Rules tied to actions already shown in this session; each pauses one action, once. */
 	let shown = new Set<string>();
+	/** Exact tool calls already blocked by either Grimoire pre-action gate in this session. */
+	let pausedActions = new Set<string>();
 	/** Whether the agent has opened or searched Grimoire this session, and whether the first-change look happened. */
 	let looked = false;
 	let lookAsked = false;
@@ -185,22 +282,54 @@ export default function sitraKnowledge(pi: Pi): void {
 			}
 			const entries = loaded.entries;
 			const firstChange = ["edit", "write", "subagent"].includes(event.toolName);
-			if (firstChange && !looked && !lookAsked && entries.length > 0 && process.env.SITRA_GRIMOIRE_LOOK !== "0") {
-				// Models under-use memory unless nudged (Anthropic's memory tool insists on a look before acting).
-				lookAsked = true;
-				return {
-					block: true,
-					reason: `Paused once before your first change in this session: check the Grimoire catalogue in your prompt. If an entry might touch this work, read it (its path is listed) or use grimoire_search. Then run this again unchanged, or adjust it.`,
-				};
+			const identity = callKey(call);
+			const alreadyPaused = pausedActions.has(identity);
+			if (event.toolName === "subagent") {
+				const loopDispatch = loopPendingSubagentDispatch(raw, ctx.cwd);
+				if (loopDispatch.warning) ctx?.ui?.notify(loopDispatch.warning, "warning");
+				if (loopDispatch.exempt) return undefined;
 			}
 			const tied = entries.filter((e) => e.when?.length);
-			if (tied.length === 0) return undefined;
 			const input = event.input && typeof event.input === "object" ? event.input : {};
-			const matched = entriesForAction(tied, actionFromPi(event.toolName, input), ctx.cwd, shown);
+			const matched = alreadyPaused ? [] : entriesForAction(tied, actionFromPi(event.toolName, input), ctx.cwd, shown);
+			const message = matched.length > 0 ? pauseMessage(matched, g) : undefined;
+			const included = message?.included ?? [];
+			if (
+				firstChange &&
+				!alreadyPaused &&
+				!looked &&
+				!lookAsked &&
+				entries.length > 0 &&
+				process.env.SITRA_GRIMOIRE_LOOK !== "0"
+			) {
+				// Models under-use memory unless nudged (Anthropic's memory tool insists on a look before acting).
+				lookAsked = true;
+				pausedActions.add(identity);
+				for (const e of included) shown.add(e.file);
+				if (included.length > 0) {
+					try {
+						recordPause(
+							g,
+							session,
+							included.map((e) => e.file),
+							call,
+							{ turn: String(turn), cwd: ctx.cwd },
+						);
+					} catch {
+						// Measuring never gets in the way of a rule.
+					}
+				}
+				const reason = `Paused once before your first change in this session: check the Grimoire catalogue in your prompt. If an entry might touch this work, read it (its path is listed) or use grimoire_search. Then run this again unchanged, or adjust it.`;
+				return {
+					block: true,
+					reason: included.length > 0 && message ? `${reason}\n\n${message.text}` : reason,
+				};
+			}
+			if (tied.length === 0) return undefined;
 			if (matched.length === 0) return undefined;
-			const { text, included } = pauseMessage(matched, g);
 			if (included.length === 0) return undefined;
 			for (const e of included) shown.add(e.file);
+			pausedActions.add(identity);
 			try {
 				recordPause(
 					g,
@@ -212,7 +341,7 @@ export default function sitraKnowledge(pi: Pi): void {
 			} catch {
 				// Measuring never gets in the way of a rule.
 			}
-			return { block: true, reason: text };
+			return { block: true, reason: message?.text ?? "" };
 		} catch (error) {
 			ctx?.ui?.notify(`Grimoire action triggers could not be checked: ${String(error).slice(0, 200)}`, "warning");
 			return undefined;
@@ -223,6 +352,7 @@ export default function sitraKnowledge(pi: Pi): void {
 		looked = false;
 		lookAsked = false;
 		shown = new Set();
+		pausedActions = new Set();
 		// Claude Code imports the root from this file once `sitra grimoire install` has run; keep it current.
 		const g = dir();
 		if (existsSync(join(g, ".sitra", "root.md"))) {
