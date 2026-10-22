@@ -808,6 +808,23 @@ export function answerLoopQuestion(
 	if (state.block.kind === "new-information") {
 		return { state: { ...state, questions: answered }, effects: nextLoopEffects(state) };
 	}
+	if (state.block.kind === "new-information-denied") {
+		const next: LoopState = {
+			...state,
+			stage: "advise",
+			block: undefined,
+			questions: answered,
+			advisorRuns: {},
+			plan: undefined,
+			approval: undefined,
+			frozenBrief: undefined,
+			frozenBriefHash: undefined,
+			build: { testFiles: [], testHashes: [] },
+			verifierRequest: undefined,
+			dispatchedAdvisors: [],
+		};
+		return dispatch(next, ["intent", "codebase"]);
+	}
 	if (state.block.kind === "rework-learning") {
 		const next: LoopState = {
 			...state,
@@ -824,6 +841,7 @@ export function answerLoopQuestion(
 		const roles = state.block.pendingAdvisors;
 		const advisorRuns = { ...state.advisorRuns };
 		for (const role of roles) delete advisorRuns[advisorKey(role)];
+		delete advisorRuns.testDesign;
 		const next: LoopState = {
 			...state,
 			stage: state.block.resumeStage,
@@ -1188,7 +1206,7 @@ function classifiedMiss(
 		const blocked = withBlock(classified, {
 			kind: "same-rework-class",
 			resumeStage: "advise",
-			pendingAdvisors: ["intent", "codebase", "test-design"],
+			pendingAdvisors: ["intent", "codebase"],
 			question: {
 				id: "same-rework-class",
 				text: `The verifier reported ${missClass} again in this task. What should change before the loop continues?`,
@@ -1202,7 +1220,7 @@ function classifiedMiss(
 		const blocked = withBlock(classified, {
 			kind: "second-rework",
 			resumeStage: "advise",
-			pendingAdvisors: ["intent", "codebase", "test-design"],
+			pendingAdvisors: ["intent", "codebase"],
 			question: {
 				id: "second-rework",
 				text: `The verifier found another miss after one rework build (${missClass}). What new constraint or learning should restart intake?`,

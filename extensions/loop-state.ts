@@ -44,22 +44,45 @@ export function abandonLoopStateFile(path: string, state: LoopState, reason: str
 	return target;
 }
 
-export function readLoopMetricStateFiles(profile: string): (LoopState | AbandonedLoopState)[] {
+export function readLoopMetricStateFiles(profile: string): {
+	states: (LoopState | AbandonedLoopState)[];
+	badFiles: string[];
+} {
 	const dir = join(profile, "loops");
-	if (!existsSync(dir)) return [];
-	const readJson = (path: string): unknown => JSON.parse(readFileSync(path, "utf8"));
+	if (!existsSync(dir)) return { states: [], badFiles: [] };
+	const badFiles: string[] = [];
+	const readJson = (path: string, label: string): unknown | undefined => {
+		try {
+			return JSON.parse(readFileSync(path, "utf8"));
+		} catch {
+			badFiles.push(label);
+			return undefined;
+		}
+	};
 	const active = readdirSync(dir)
 		.filter((file) => file.endsWith(".json"))
 		.flatMap((file) => {
-			const parsed = readJson(join(dir, file));
+			const parsed = readJson(join(dir, file), file);
+			if (!parsed) return [];
 			const valid = validateLoopState(parsed);
-			return valid.ok ? [valid.state] : [];
+			if (valid.ok) return [valid.state];
+			badFiles.push(file);
+			return [];
 		});
 	const abandonedDir = join(dir, "abandoned");
 	const abandoned = existsSync(abandonedDir)
 		? readdirSync(abandonedDir)
 				.filter((file) => file.endsWith(".json"))
-				.map((file) => readJson(join(abandonedDir, file)) as AbandonedLoopState)
+				.flatMap((file) => {
+					const label = `abandoned/${file}`;
+					const parsed = readJson(join(abandonedDir, file), label);
+					if (!parsed || typeof parsed !== "object") return [];
+					const { abandonedAt, abandonReason: _abandonReason, ...activeState } = parsed as Record<string, unknown>;
+					const valid = validateLoopState(activeState);
+					if (typeof abandonedAt === "string" && valid.ok) return [parsed as AbandonedLoopState];
+					badFiles.push(label);
+					return [];
+				})
 		: [];
-	return [...active, ...abandoned];
+	return { states: [...active, ...abandoned], badFiles };
 }

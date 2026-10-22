@@ -427,6 +427,7 @@ function loopStatus(cwd: string, state: LoopState): ToolResult {
 			stale = { kind: "test-hashes", detail: `test hashes could not be checked: ${String(error)}` };
 		}
 	}
+	const metrics = readLoopMetricStateFiles(profileDir());
 	return {
 		content: [
 			{
@@ -434,7 +435,8 @@ function loopStatus(cwd: string, state: LoopState): ToolResult {
 				text: [
 					`stage: ${state.stage}`,
 					`goal: ${state.goal}`,
-					loopMetricsLine(readLoopMetricStateFiles(profileDir())),
+					loopMetricsLine(metrics.states),
+					...(metrics.badFiles.length ? [`loop metrics unreadable: ${metrics.badFiles.join(", ")}`] : []),
 					...(stale ? [`stale: ${stale.kind === "test-hashes" ? "test hashes" : staleReasonText(stale)}`] : []),
 				].join("\n"),
 			},
