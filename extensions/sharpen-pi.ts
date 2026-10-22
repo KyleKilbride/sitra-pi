@@ -8,6 +8,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	HANDOVER_INSTRUCTIONS,
+	HandoverConfigError,
 	handoverPrompt,
 	handoverSummary,
 	handoverThreshold,
@@ -44,6 +45,27 @@ interface Pi {
 const on = () => process.env.SITRA_SHARPEN !== "0";
 const isHelper = () => Boolean(process.env.PI_SUBAGENT_NAME);
 const BRIEF_MARK = "## Context from the lead's conversation";
+
+function configuredHandoverTokens(): number | undefined {
+	const raw = process.env.SITRA_HANDOVER_TOKENS;
+	if (raw === undefined) return undefined;
+	const value = Number(raw);
+	if (!Number.isInteger(value) || value <= 0) {
+		throw new HandoverConfigError("handoverTokens in config.json must be a positive integer.");
+	}
+	return value;
+}
+
+function currentHandoverThreshold(contextWindow: number): number {
+	return handoverThreshold(contextWindow, configuredHandoverTokens());
+}
+
+function failLoudlyOnHandoverConfig(error: unknown, ctx: Ctx): void {
+	if (error instanceof HandoverConfigError) {
+		ctx.ui?.notify(error.message, "error");
+		throw error;
+	}
+}
 
 function branchMessages(ctx: Ctx): Msg[] {
 	return (ctx.sessionManager?.getBranch?.() ?? []).flatMap((e) =>
@@ -152,13 +174,14 @@ export default function sitraSharpen(pi: Pi): void {
 			if (!usage?.tokens || !usage.contextWindow) return;
 			// A single huge turn has nothing earlier to summarise; Pi would only report "nothing to compact".
 			const turns = branchMessages(ctx).filter((m) => m.role === "user").length;
-			const over = usage.tokens >= handoverThreshold(usage.contextWindow);
+			const over = usage.tokens >= currentHandoverThreshold(usage.contextWindow);
 			if (!over) armed = true;
 			if (over && armed && turns >= 2) {
 				armed = false;
 				handOver(ctx, `The conversation reached ${Math.round(usage.tokens / 1000)}k tokens.`);
 			}
-		} catch {
+		} catch (error) {
+			failLoudlyOnHandoverConfig(error, ctx);
 			// The session carries on; Pi's own compaction still applies near the limit.
 		}
 	});
@@ -182,7 +205,7 @@ export default function sitraSharpen(pi: Pi): void {
 			if (!working) return undefined;
 			const usage = ctx.getContextUsage?.();
 			if (!usage?.tokens || !usage.contextWindow) return undefined;
-			const over = usage.tokens >= handoverThreshold(usage.contextWindow);
+			const over = usage.tokens >= currentHandoverThreshold(usage.contextWindow);
 			if (!over) armed = true;
 			if (!over || !armed || !ctx.model || !ctx.modelRegistry) return undefined;
 			const messages = event.context?.contextMessages ?? [];
@@ -203,7 +226,8 @@ export default function sitraSharpen(pi: Pi): void {
 			}
 			saveHandover(summary, ctx);
 			return { entries: [{ type: "compaction", summary, firstKeptEntryId: event.messageEntryId }] };
-		} catch {
+		} catch (error) {
+			failLoudlyOnHandoverConfig(error, ctx);
 			return undefined;
 		}
 	});

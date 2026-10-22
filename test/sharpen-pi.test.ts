@@ -141,20 +141,20 @@ describe("handing over", () => {
 		});
 		handlers.get("agent_settled")?.({ aborted: false }, ctx(100_000));
 		expect(compacts).toHaveLength(0);
-		handlers.get("agent_end")?.({}, ctx(170_000));
+		handlers.get("agent_end")?.({}, ctx(410_000));
 		expect(compacts).toHaveLength(0);
-		handlers.get("agent_settled")?.({ aborted: true }, ctx(170_000));
+		handlers.get("agent_settled")?.({ aborted: true }, ctx(410_000));
 		expect(compacts).toHaveLength(0);
-		handlers.get("agent_settled")?.({}, ctx(170_000));
+		handlers.get("agent_settled")?.({}, ctx(410_000));
 		expect(compacts).toHaveLength(0);
-		handlers.get("agent_settled")?.({ aborted: false }, ctx(170_000, 1));
+		handlers.get("agent_settled")?.({ aborted: false }, ctx(410_000, 1));
 		expect(compacts).toHaveLength(0);
-		handlers.get("agent_settled")?.({ aborted: false }, ctx(170_000));
+		handlers.get("agent_settled")?.({ aborted: false }, ctx(410_000));
 		expect(compacts).toHaveLength(1);
 		expect(compacts[0]?.customInstructions).toMatch(/handover/i);
 		expect(notes.join(" ")).toMatch(/handing over/i);
 		vi.stubEnv("PI_SUBAGENT_NAME", "builder");
-		handlers.get("agent_settled")?.({ aborted: false }, ctx(170_000));
+		handlers.get("agent_settled")?.({ aborted: false }, ctx(410_000));
 		expect(compacts).toHaveLength(1);
 	});
 
@@ -173,12 +173,12 @@ describe("handing over", () => {
 			compact: (o: unknown) => compacts.push(o),
 		});
 		const settle = (tokens: number) => handlers.get("agent_settled")?.({ aborted: false }, ctx(tokens));
-		settle(170_000);
-		settle(175_000);
-		settle(180_000);
+		settle(410_000);
+		settle(415_000);
+		settle(420_000);
 		expect(compacts).toHaveLength(1);
 		settle(60_000);
-		settle(170_000);
+		settle(410_000);
 		expect(compacts).toHaveLength(2);
 	});
 
@@ -270,7 +270,7 @@ describe("handing over mid-run", () => {
 		const dir = realpathSync(mkdtempSync(join(tmpdir(), "sitra-midrun-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", dir);
 		const { handlers } = fakePi();
-		const c = ctx(170_000);
+		const c = ctx(410_000);
 		const r = (await handlers.get("turn_end")?.(turnEnd(run(6)), c.ctx)) as Result;
 		expect(r.entries).toHaveLength(1);
 		const entry = r.entries?.[0];
@@ -291,7 +291,7 @@ describe("handing over mid-run", () => {
 		vi.stubEnv("PI_CODING_AGENT_DIR", realpathSync(mkdtempSync(join(tmpdir(), "sitra-midrun-"))));
 		vi.stubEnv("PI_SUBAGENT_NAME", "builder");
 		const { handlers } = fakePi();
-		const r = (await handlers.get("turn_end")?.(turnEnd(run(6)), ctx(170_000).ctx)) as Result;
+		const r = (await handlers.get("turn_end")?.(turnEnd(run(6)), ctx(410_000).ctx)) as Result;
 		expect(r.entries).toHaveLength(1);
 	});
 
@@ -301,11 +301,11 @@ describe("handing over mid-run", () => {
 		const below = ctx(100_000);
 		expect(await te?.(turnEnd(run(6)), below.ctx)).toBeUndefined();
 		const final = [...run(6), { role: "assistant", content: [{ type: "text", text: "done" }] } as Msg];
-		expect(await te?.(turnEnd(final), ctx(170_000).ctx)).toBeUndefined();
-		expect(await te?.(turnEnd(run(6), { outcome: "error" }), ctx(170_000).ctx)).toBeUndefined();
-		expect(await te?.(turnEnd(run(1)), ctx(170_000).ctx)).toBeUndefined();
+		expect(await te?.(turnEnd(final), ctx(410_000).ctx)).toBeUndefined();
+		expect(await te?.(turnEnd(run(6), { outcome: "error" }), ctx(410_000).ctx)).toBeUndefined();
+		expect(await te?.(turnEnd(run(1)), ctx(410_000).ctx)).toBeUndefined();
 		vi.stubEnv("SITRA_SHARPEN", "0");
-		const off = ctx(170_000);
+		const off = ctx(410_000);
 		expect(await te?.(turnEnd(run(6)), off.ctx)).toBeUndefined();
 		expect(off.calls).toHaveLength(0);
 		expect(below.calls).toHaveLength(0);
@@ -315,13 +315,13 @@ describe("handing over mid-run", () => {
 		vi.stubEnv("PI_CODING_AGENT_DIR", realpathSync(mkdtempSync(join(tmpdir(), "sitra-midrun-"))));
 		const { handlers } = fakePi();
 		const te = handlers.get("turn_end") as (event: unknown, ctx: unknown) => Promise<unknown>;
-		expect(((await te(turnEnd(run(6)), ctx(170_000).ctx)) as Result).entries).toHaveLength(1);
-		expect(await te(turnEnd(run(7)), ctx(175_000).ctx)).toBeUndefined();
+		expect(((await te(turnEnd(run(6)), ctx(410_000).ctx)) as Result).entries).toHaveLength(1);
+		expect(await te(turnEnd(run(7)), ctx(415_000).ctx)).toBeUndefined();
 		expect(await te(turnEnd(run(8)), ctx(60_000).ctx)).toBeUndefined();
-		const failing = ctx(170_000, new Error("429"));
+		const failing = ctx(410_000, new Error("429"));
 		expect(await te(turnEnd(run(9)), failing.ctx)).toBeUndefined();
 		expect(failing.notes.join(" ")).toMatch(/couldn't hand over/i);
-		const again = ctx(172_000);
+		const again = ctx(412_000);
 		expect(await te(turnEnd(run(10)), again.ctx)).toBeUndefined();
 		expect(again.calls).toHaveLength(0);
 	});

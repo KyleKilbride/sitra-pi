@@ -8,12 +8,14 @@ export default function (pi) {
 	const call = fauxAssistantMessage(fauxToolCall("read", { path: process.env.SITRA_TEST_FILE }), {
 		stopReason: "toolUse",
 	});
-	call.usage = { ...call.usage, input: 170_000, totalTokens: 170_000 };
+	call.usage = { ...call.usage, input: 410_000, totalTokens: 410_000 };
+	const recovered = fauxAssistantMessage("RECOVERED AFTER RETRY");
+	recovered.usage = { ...recovered.usage, input: 410_000, totalTokens: 410_000 };
 	const script = [
 		fauxAssistantMessage("Noted."),
 		call,
 		fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limit exceeded" }),
-		fauxAssistantMessage("RECOVERED AFTER RETRY"),
+		recovered,
 	];
 	const text = (m) =>
 		typeof m?.content === "string" ? m.content : (m?.content ?? []).map((p) => p.text ?? "").join("");

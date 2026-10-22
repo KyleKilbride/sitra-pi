@@ -137,11 +137,20 @@ describe("helper briefs", () => {
 
 describe("handing over", () => {
 	test("hands over well before the window is full, scaled to the model", () => {
-		expect(handoverThreshold(1_000_000)).toBe(160_000);
+		expect(handoverThreshold(1_000_000)).toBe(400_000);
 		expect(handoverThreshold(200_000)).toBe(80_000);
 		expect(handoverThreshold(32_000)).toBe(16_000); // half the window for small windows, so there's room to work
 		expect(HANDOVER_INSTRUCTIONS).toMatch(/decisions/i);
 		expect(HANDOVER_INSTRUCTIONS).toMatch(/verbatim|own words/i);
+	});
+
+	test("handoverTokens overrides the default threshold", () => {
+		expect(handoverThreshold(1_000_000, 250_000)).toBe(250_000);
+	});
+
+	test("invalid handoverTokens errors instead of falling back", () => {
+		expect(() => handoverThreshold(1_000_000, 0)).toThrow(/handoverTokens.*positive integer/i);
+		expect(() => handoverThreshold(100_000, 120_000)).toThrow(/handoverTokens.*context window/i);
 	});
 });
 

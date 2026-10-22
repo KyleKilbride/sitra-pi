@@ -7,15 +7,21 @@ export default function (pi) {
 	});
 	let calls = 0;
 	const text = (m) => (typeof m.content === "string" ? m.content : (m.content ?? []).map((p) => p.text ?? "").join(""));
+	const overLine = (m) => {
+		m.usage = { ...m.usage, input: 410_000, totalTokens: 410_000 };
+		return m;
+	};
 	const step = (context) => {
 		const all = context.messages.map(text).join("\n");
 		if (text(context.messages.at(-1) ?? {}).startsWith("This summary is a handover"))
 			return fauxAssistantMessage("1. Goal: MIDRUN SUMMARY");
 		calls++;
 		if (calls <= 5) {
-			return fauxAssistantMessage(fauxToolCall("read", { path: process.env.SITRA_TEST_FILE }), {
-				stopReason: "toolUse",
-			});
+			return overLine(
+				fauxAssistantMessage(fauxToolCall("read", { path: process.env.SITRA_TEST_FILE }), {
+					stopReason: "toolUse",
+				}),
+			);
 		}
 		return fauxAssistantMessage(
 			`FINAL summary=${all.includes("MIDRUN SUMMARY")} request=${all.includes("Keep going until done")}`,

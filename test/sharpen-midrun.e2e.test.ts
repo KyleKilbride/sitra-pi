@@ -19,7 +19,13 @@ test("a real pi run that crosses the line while working hands over and keeps goi
 			["--mode", "rpc", "--no-extensions", "-e", MODEL, "-e", EXT, "--model", "sitra-faux/midrun"],
 			{
 				cwd: dir,
-				env: { ...process.env, PI_CODING_AGENT_DIR: dir, PI_SUBAGENT_NAME: "", SITRA_TEST_FILE: join(dir, "f.txt") },
+				env: {
+					...process.env,
+					PI_CODING_AGENT_DIR: dir,
+					PI_SUBAGENT_NAME: "",
+					SITRA_HANDOVER_TOKENS: "160000",
+					SITRA_TEST_FILE: join(dir, "f.txt"),
+				},
 				stdio: ["pipe", "pipe", "inherit"],
 			},
 		);

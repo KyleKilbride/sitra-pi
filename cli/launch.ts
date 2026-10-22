@@ -32,6 +32,7 @@ export function piEnv(
 		PI_CODING_AGENT_DIR: profile,
 		PI_MEMORY_DIR: join(profile, "memory"),
 		SITRA_USER_NAME: config.name,
+		...(config.handoverTokens !== undefined ? { SITRA_HANDOVER_TOKENS: String(config.handoverTokens) } : {}),
 		...learnEnv(config),
 	};
 	if (role === "tower") {

@@ -36,8 +36,14 @@ describe("config", () => {
 	test("reads back what was written, and starts empty", () => {
 		const dir = tmp();
 		expect(readConfig(dir)).toEqual({ name: "", skills: [] });
-		writeConfig(dir, { name: "Sam", skills: ["/skills/a"] });
-		expect(readConfig(dir)).toEqual({ name: "Sam", skills: ["/skills/a"] });
+		writeConfig(dir, { name: "Sam", skills: ["/skills/a"], handoverTokens: 250_000 });
+		expect(readConfig(dir)).toEqual({ name: "Sam", skills: ["/skills/a"], handoverTokens: 250_000 });
+	});
+
+	test("fails loudly when handoverTokens is not a positive integer", () => {
+		const dir = tmp();
+		writeFileSync(join(dir, "config.json"), '{"name":"Sam","skills":[],"handoverTokens":0}\n');
+		expect(() => readConfig(dir)).toThrow(/handoverTokens.*positive integer/i);
 	});
 });
 
@@ -58,11 +64,12 @@ describe("launch", () => {
 	});
 
 	test("points Pi at the sitra profile and tells the lead who it works with", () => {
-		const env = piEnv("/home/sam/.sitra", { name: "Sam", skills: [] }, { PATH: "/bin" });
+		const env = piEnv("/home/sam/.sitra", { name: "Sam", skills: [], handoverTokens: 250_000 }, { PATH: "/bin" });
 		expect(env).toEqual({
 			PATH: "/bin",
 			PI_CODING_AGENT_DIR: "/home/sam/.sitra/profile",
 			PI_MEMORY_DIR: "/home/sam/.sitra/profile/memory",
+			SITRA_HANDOVER_TOKENS: "250000",
 			SITRA_USER_NAME: "Sam",
 		});
 	});
