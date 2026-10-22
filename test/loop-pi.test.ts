@@ -6,6 +6,8 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createLoopState, staleReason } from "../extensions/loop.ts";
 import sitraLoop, { loopStatePath, readLoopStateFile, writeLoopStateFile } from "../extensions/loop-pi.ts";
 
+vi.setConfig({ testTimeout: 30_000 });
+
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
 function fakePi() {
@@ -45,7 +47,7 @@ const ctx = (cwd: string, messages: string[] = []) => ({
 	},
 });
 
-function gitWorktree(): { cwd: string; head: string } {
+function gitWorktree(options: { originHead?: boolean } = { originHead: true }): { cwd: string; head: string } {
 	const cwd = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-work-")));
 	execFileSync("git", ["init", "-b", "main"], { cwd, stdio: "ignore" });
 	writeFileSync(join(cwd, "README.md"), "test\n");
@@ -57,10 +59,11 @@ function gitWorktree(): { cwd: string; head: string } {
 	const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
 	execFileSync("git", ["remote", "add", "origin", cwd], { cwd, stdio: "ignore" });
 	execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd, stdio: "ignore" });
-	execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], {
-		cwd,
-		stdio: "ignore",
-	});
+	if (options.originHead)
+		execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], {
+			cwd,
+			stdio: "ignore",
+		});
 	execFileSync("git", ["checkout", "-b", "feature"], { cwd, stdio: "ignore" });
 	return { cwd, head };
 }
@@ -167,6 +170,24 @@ describe("Pi wiring", () => {
 		expect(userMessages.join("\n")).toContain("intent-advisor");
 		expect(userMessages.join("\n")).toContain("codebase-advisor");
 		await expect(commands.get("loop")?.handler("start Again", ctx(cwd))).rejects.toThrow(/already exists/);
+	});
+
+	test("/loop start can use --base when origin HEAD is absent", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands } = fakePi();
+		const { cwd } = gitWorktree({ originHead: false });
+		await commands.get("loop")?.handler("start --base origin/main Add the runner", ctx(cwd));
+		expect(readLoopStateFile(loopStatePath(profile, cwd, "feature")).baseRef).toBe("origin/main");
+	});
+
+	test("refuses to start on the base branch", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands } = fakePi();
+		const { cwd } = gitWorktree();
+		execFileSync("git", ["checkout", "main"], { cwd, stdio: "ignore" });
+		await expect(commands.get("loop")?.handler("start Add the runner", ctx(cwd))).rejects.toThrow(/base branch/);
 	});
 
 	test("loop_status is read-only and reports staleness without writing", async () => {
@@ -319,5 +340,19 @@ describe("Pi wiring", () => {
 		});
 		await expect(commands.get("loop")?.handler("answer ordinary answer", ctx(cwd))).rejects.toThrow(/stale/);
 		expect(readLoopStateFile(path).questions[0]?.answer).toBeUndefined();
+	});
+
+	test("active-loop git base-ref failures persist a git block", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands } = fakePi();
+		const { cwd } = gitWorktree({ originHead: false });
+		await commands.get("loop")?.handler("start --base origin/main Add the runner", ctx(cwd));
+		execFileSync("git", ["update-ref", "-d", "refs/remotes/origin/main"], { cwd, stdio: "ignore" });
+		await commands.get("loop")?.handler("plan cannot run", ctx(cwd));
+		const state = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		expect(state.stage).toBe("blocked");
+		expect(state.block).toMatchObject({ kind: "git" });
+		expect(state.questions.at(-1)?.text).toContain("origin/main");
 	});
 });

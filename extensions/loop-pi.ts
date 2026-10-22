@@ -15,6 +15,7 @@ import {
 	applyLeadPlan,
 	approveBrief,
 	blockForAdvisorIntakeFailure,
+	blockForGitFailure,
 	blockForStaleState,
 	type LoopEffect,
 	type LoopState,
@@ -126,16 +127,16 @@ function defaultBaseRef(cwd: string): string {
 	return git(cwd, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
 }
 
-function currentGitForState(cwd: string, state: LoopState): GitState {
-	return currentGit(cwd, state.baseRef);
+function checkoutGit(cwd: string): Omit<GitState, "baseRef" | "baseHead"> {
+	return {
+		worktree: git(cwd, ["rev-parse", "--show-toplevel"]),
+		branch: git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]),
+	};
 }
 
-function tryCurrentGit(cwd: string): GitState | undefined {
-	try {
-		return currentGit(cwd);
-	} catch {
-		return undefined;
-	}
+function currentGitForState(cwd: string, state: LoopState): GitState {
+	const checkout = checkoutGit(cwd);
+	return { ...checkout, baseRef: state.baseRef, baseHead: git(cwd, ["rev-parse", state.baseRef]) };
 }
 
 function statePathFor(gitState: GitState): string {
@@ -234,10 +235,18 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 		emitEffects(pi, result.state, result.effects);
 		return;
 	}
-	const initial = currentGit(ctx.cwd);
-	const path = statePathFor(initial);
+	const checkout = checkoutGit(ctx.cwd);
+	const path = statePathFor({ ...checkout, baseRef: "", baseHead: "" });
 	const currentState = readLoopStateFile(path);
-	const gitState = currentGitForState(ctx.cwd, currentState);
+	let gitState: GitState;
+	try {
+		gitState = currentGitForState(ctx.cwd, currentState);
+	} catch (error) {
+		const blocked = blockForGitFailure(currentState, String(error));
+		writeLoopStateFile(path, blocked.state);
+		emitEffects(pi, blocked.state, blocked.effects);
+		return;
+	}
 	if (verb === "answer") {
 		if (!rest) throw new Error("usage: /loop answer <answer>");
 		const rawState = currentState;
@@ -272,12 +281,24 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 
 async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<void> {
 	if (!event || typeof event !== "object") return;
-	const initial = tryCurrentGit(ctx.cwd);
-	if (!initial) return;
-	const path = statePathFor(initial);
+	let checkout: Omit<GitState, "baseRef" | "baseHead">;
+	try {
+		checkout = checkoutGit(ctx.cwd);
+	} catch {
+		return;
+	}
+	const path = statePathFor({ ...checkout, baseRef: "", baseHead: "" });
 	if (!existsSync(path)) return;
 	const state = readLoopStateFile(path);
-	const gitState = currentGitForState(ctx.cwd, state);
+	let gitState: GitState;
+	try {
+		gitState = currentGitForState(ctx.cwd, state);
+	} catch (error) {
+		const blocked = blockForGitFailure(state, String(error));
+		writeLoopStateFile(path, blocked.state);
+		emitEffects(pi, blocked.state, blocked.effects);
+		return;
+	}
 	const raw = event as Record<string, unknown>;
 	const role = roleForAgent(raw.agent);
 	if (!role || !state.dispatchedAdvisors.includes(role)) return;
@@ -382,9 +403,20 @@ export default function sitraLoop(pi: Pi): void {
 		promptSnippet: "loop_status: read the current LOOPS runner stage and frozen brief status",
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
-			const initial = currentGit(ctx.cwd);
-			const state = loadCurrentState(initial);
-			const gitState = currentGitForState(ctx.cwd, state);
+			const checkout = checkoutGit(ctx.cwd);
+			const path = statePathFor({ ...checkout, baseRef: "", baseHead: "" });
+			const state = loadCurrentState({ ...checkout, baseRef: "", baseHead: "" });
+			let gitState: GitState;
+			try {
+				gitState = currentGitForState(ctx.cwd, state);
+			} catch (error) {
+				const blocked = blockForGitFailure(state, String(error));
+				writeLoopStateFile(path, blocked.state);
+				return {
+					content: [{ type: "text", text: `stage: blocked\ngit: ${String(error)}` }],
+					details: blocked.state,
+				};
+			}
 			const stale = staleReason(state, { branch: gitState.branch, baseHead: gitState.baseHead });
 			const tokens = Object.values(state.advisorRuns).reduce(
 				(sum, run) => sum + (run?.outputTokens ?? 0) + (run?.contextTokens ?? 0),

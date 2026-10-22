@@ -268,6 +268,36 @@ describe("advisor transition and ordering", () => {
 		expect(state.questions[0]?.text).toContain("Checklist unreadable.");
 	});
 
+	test("intent blocked status and open questions block intake instead of dispatching test-design", () => {
+		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+		state = applyAdvisorReport(
+			state,
+			report("intent", {
+				status: "blocked",
+				openQuestions: ["Which repo?"],
+				details: {
+					questions: [
+						{
+							id: "q-intent",
+							text: "Use the existing profile?",
+							recommended: "Yes.",
+							dependsOn: [],
+						},
+					],
+					doneCandidates: [],
+					ambiguities: [],
+				},
+			}),
+			{ outputTokens: 1, contextTokens: 0 },
+		).state;
+		state = applyAdvisorReport(state, report("codebase"), { outputTokens: 1, contextTokens: 0 }).state;
+		expect(state.stage).toBe("needs-person");
+		expect(state.block).toMatchObject({ kind: "questions" });
+		expect(state.questions.at(-1)?.text).toContain("Which repo?");
+		expect(state.questions.at(-1)?.text).toContain("Use the existing profile?");
+		expect(state.dispatchedAdvisors).toEqual([]);
+	});
+
 	test("rejects reports outside the active stage or from undispatched advisors", () => {
 		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
 		expect(() =>
@@ -361,6 +391,55 @@ describe("stale state and validation", () => {
 		expect(answered.branch).toBe("feature");
 		expect(answered.baseHead).toBe("base-b");
 		expect(staleReason(answered, { ...context, branch: "feature", baseHead: "base-b" })).toBeUndefined();
+	});
+
+	test("answering stale mid-advise persists redispatch state so the next report is accepted", () => {
+		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+		state = applyAdvisorReport(state, report("intent"), { outputTokens: 1, contextTokens: 0 }).state;
+		const blocked = blockForStaleState(state, { ...context, baseHead: "base-b" }).state;
+		const answered = answerLoopQuestion(blocked, {
+			answer: "Continue.",
+			current: { ...context, baseHead: "base-b" },
+		}).state;
+		expect(answered.dispatchedAdvisors).toEqual(["codebase"]);
+		const reported = applyAdvisorReport(answered, report("codebase"), { outputTokens: 1, contextTokens: 0 }).state;
+		expect(reported.stage).toBe("advise");
+		expect(reported.advisorRuns.codebase?.summary).toBe("codebase done");
+	});
+
+	test("answered stale history does not hijack a later normal question round", () => {
+		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+		state = applyAdvisorReport(state, report("intent"), { outputTokens: 1, contextTokens: 0 }).state;
+		const blocked = blockForStaleState(state, { ...context, baseHead: "base-b" }).state;
+		state = answerLoopQuestion(blocked, { answer: "Continue.", current: { ...context, baseHead: "base-b" } }).state;
+		state = applyAdvisorReport(state, report("codebase", { openQuestions: ["Keep state under the profile?"] }), {
+			outputTokens: 1,
+			contextTokens: 0,
+		}).state;
+		expect(state.stage).toBe("needs-person");
+		const answered = answerLoopQuestion(state, {
+			answer: "Yes, keep it in the profile.",
+			current: { ...context, baseHead: "base-b" },
+		}).state;
+		expect(answered.stage).toBe("advise");
+		expect(answered.questions.at(-1)?.answer).toBe("Yes, keep it in the profile.");
+		expect(answered.branch).toBe("feature");
+	});
+
+	test("stale blocks append to answered question history", () => {
+		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+		state = applyAdvisorReport(state, report("intent"), {
+			outputTokens: 1,
+			contextTokens: 0,
+		}).state;
+		state = applyAdvisorReport(state, report("codebase", { openQuestions: ["A1?"] }), {
+			outputTokens: 1,
+			contextTokens: 0,
+		}).state;
+		state = answerLoopQuestion(state, { answer: "A1", current: context }).state;
+		const blocked = blockForStaleState(state, { ...context, baseHead: "base-b" }).state;
+		expect(blocked.questions[0]?.answer).toBe("A1");
+		expect(blocked.questions.at(-1)?.id).toBe("stale-state");
 	});
 
 	test("validates TypeBox state fields loudly", () => {

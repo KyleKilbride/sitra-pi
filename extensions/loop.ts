@@ -108,6 +108,22 @@ const AdvisorRuns = Type.Object(
 
 export const STALE_STATE_QUESTION_ID = "stale-state";
 
+const Block = Type.Object(
+	{
+		kind: Type.Union([
+			Type.Literal("stale"),
+			Type.Literal("grimoire-unreadable"),
+			Type.Literal("intake-failed"),
+			Type.Literal("questions"),
+			Type.Literal("git"),
+		]),
+		questionId: Type.String({ minLength: 1 }),
+		resumeStage: LoopStageSchema,
+		pendingAdvisors: Type.Array(AdvisorRoleSchema),
+	},
+	{ additionalProperties: false },
+);
+
 export const LOOP_BRIEF_SCHEMA = Type.Object(
 	{
 		version: Type.Literal(1),
@@ -134,6 +150,7 @@ export const LOOP_STATE_SCHEMA = Type.Object(
 		stage: LoopStageSchema,
 		blockedFrom: Type.Optional(LoopStageSchema),
 		blockedAdvisor: Type.Optional(AdvisorRoleSchema),
+		block: Type.Optional(Block),
 		goal: Type.String(),
 		limits: Type.Array(Type.String()),
 		done: Type.Array(Type.String()),
@@ -324,6 +341,42 @@ function groupedQuestion(id: string, reason: string, questions: LoopQuestion[]):
 	};
 }
 
+function pendingAdvisorsForResume(state: LoopState): AdvisorRole[] {
+	if (state.dispatchedAdvisors.length > 0) return state.dispatchedAdvisors;
+	if (state.stage === "advise") {
+		if (!state.advisorRuns.intent) return ["intent"];
+		if (!state.advisorRuns.codebase) return ["codebase"];
+		if (!state.advisorRuns.testDesign) return ["test-design"];
+		return [];
+	}
+	if (state.stage === "architecture-review" && !state.advisorRuns.architecture) return ["architecture"];
+	return [];
+}
+
+function withBlock(
+	state: LoopState,
+	input: {
+		kind: NonNullable<LoopState["block"]>["kind"];
+		question: LoopQuestion;
+		pendingAdvisors?: AdvisorRole[];
+		resumeStage?: LoopStage;
+	},
+): { state: LoopState; effects: LoopEffect[] } {
+	const blocked: LoopState = {
+		...state,
+		stage: input.kind === "questions" ? "needs-person" : "blocked",
+		block: {
+			kind: input.kind,
+			questionId: input.question.id,
+			resumeStage: input.resumeStage ?? state.stage,
+			pendingAdvisors: input.pendingAdvisors ?? pendingAdvisorsForResume(state),
+		},
+		questions: [...state.questions, input.question],
+		dispatchedAdvisors: [],
+	};
+	return { state: blocked, effects: [{ type: "ask-person", reason: input.kind, question: input.question }] };
+}
+
 function grimoireQuestion(status: Extract<GrimoireStoreStatus, { state: "unreadable" }>): LoopQuestion {
 	return {
 		id: "grimoire-unreadable",
@@ -346,10 +399,7 @@ export function startLoop(input: {
 	const state = createLoopState(input);
 	if (input.grimoire.state === "unreadable") {
 		const question = grimoireQuestion(input.grimoire);
-		return {
-			state: { ...state, stage: "blocked", questions: [question], dispatchedAdvisors: [] },
-			effects: [{ type: "ask-person", reason: "grimoire-unreadable", question }],
-		};
+		return withBlock(state, { kind: "grimoire-unreadable", question, pendingAdvisors: ["intent", "codebase"] });
 	}
 	return dispatch(state, ["intent", "codebase"]);
 }
@@ -359,7 +409,6 @@ function reportQuestions(role: HelperReportRole, report: HelperReport): LoopQues
 	if (role === "intent") {
 		const details = report.details as { questions: LoopQuestion[] };
 		for (const question of details.questions) out.push(question);
-		return out;
 	}
 	for (const [index, text] of report.openQuestions.entries()) {
 		out.push({
@@ -410,26 +459,14 @@ function adviseEffects(state: LoopState): { state: LoopState; effects: LoopEffec
 		const earlyQuestions = [...intent.openQuestions, ...codebase.openQuestions];
 		if (earlyQuestions.length > 0) {
 			const question = groupedQuestion("advisor-questions", "Advisor questions need an answer.", earlyQuestions);
-			const next = {
-				...state,
-				stage: "needs-person" as const,
-				questions: [...state.questions, question],
-				dispatchedAdvisors: [],
-			};
-			return { state: next, effects: [{ type: "ask-person", reason: "advisor-questions", question }] };
+			return withBlock(state, { kind: "questions", question, pendingAdvisors: affectedAdvisors(state) });
 		}
 		if (!testDesign) return dispatch(state, ["test-design"]);
 		if (state.dispatchedAdvisors.includes("test-design")) return { state, effects: [] };
 		const allQuestions = [...testDesign.openQuestions];
 		if (allQuestions.length > 0) {
 			const question = groupedQuestion("advisor-questions", "Advisor questions need an answer.", allQuestions);
-			const next = {
-				...state,
-				stage: "needs-person" as const,
-				questions: [...state.questions, question],
-				dispatchedAdvisors: [],
-			};
-			return { state: next, effects: [{ type: "ask-person", reason: "advisor-questions", question }] };
+			return withBlock(state, { kind: "questions", question, pendingAdvisors: affectedAdvisors(state) });
 		}
 		const next = { ...state, stage: "plan" as const, dispatchedAdvisors: [] };
 		return { state: next, effects: [{ type: "write-lead-plan", brief: buildBrief(next) }] };
@@ -451,13 +488,7 @@ function architectureEffects(state: LoopState): { state: LoopState; effects: Loo
 			"Architecture questions need an answer.",
 			run.openQuestions,
 		);
-		const next = {
-			...state,
-			stage: "needs-person" as const,
-			questions: [...state.questions, question],
-			dispatchedAdvisors: [],
-		};
-		return { state: next, effects: [{ type: "ask-person", reason: "architecture-questions", question }] };
+		return withBlock(state, { kind: "questions", question, pendingAdvisors: ["architecture"] });
 	}
 	const question: LoopQuestion = {
 		id: "brief-approval",
@@ -515,42 +546,49 @@ export function answerLoopQuestion(
 	if (state.stage !== "needs-person" && state.stage !== "blocked")
 		throw new Error(`cannot answer while stage is ${state.stage}`);
 	const answered = state.questions.map((question) =>
-		question.answer ? question : { ...question, answer: input.answer },
+		question.answer || question.id !== state.block?.questionId ? question : { ...question, answer: input.answer },
 	);
-	const isStaleAnswer = state.questions.some((question) => question.id === STALE_STATE_QUESTION_ID);
-	if (isStaleAnswer) {
-		const nextStage = state.blockedFrom ?? "advise";
+	if (!state.block) throw new Error("blocked state is missing block details");
+	if (state.block.kind === "stale") {
+		const nextStage = state.block.resumeStage;
 		const updated: LoopState = {
 			...state,
 			stage: nextStage,
-			blockedFrom: undefined,
-			blockedAdvisor: undefined,
+			block: undefined,
 			branch: input.current.branch,
 			baseHead: input.current.baseHead,
 			questions: answered,
-			dispatchedAdvisors: [],
+			dispatchedAdvisors: state.block.pendingAdvisors,
 		};
 		const next = state.frozenBriefHash ? { ...updated, frozenBriefHash: briefHash(buildBrief(updated)) } : updated;
-		return { state: next, effects: nextLoopEffects(next) };
+		return next.dispatchedAdvisors.length
+			? dispatch(next, next.dispatchedAdvisors)
+			: { state: next, effects: nextLoopEffects(next) };
 	}
-	if (state.blockedAdvisor) {
+	if (
+		state.block.kind === "intake-failed" ||
+		state.block.kind === "grimoire-unreadable" ||
+		state.block.kind === "git"
+	) {
 		const next: LoopState = {
 			...state,
-			stage: state.blockedFrom ?? "advise",
-			blockedFrom: undefined,
-			blockedAdvisor: undefined,
+			stage: state.block.resumeStage,
+			block: undefined,
 			questions: answered,
 			dispatchedAdvisors: [],
 		};
-		return dispatch(next, [state.blockedAdvisor]);
+		return state.block.pendingAdvisors.length
+			? dispatch(next, state.block.pendingAdvisors)
+			: { state: next, effects: nextLoopEffects(next) };
 	}
-	const roles = affectedAdvisors(state);
+	const roles = state.block.kind === "questions" ? state.block.pendingAdvisors : affectedAdvisors(state);
 	const advisorRuns = { ...state.advisorRuns };
 	for (const role of roles) delete advisorRuns[advisorKey(role)];
 	const architectureAffected = roles.includes("architecture");
 	const next: LoopState = {
 		...state,
-		stage: architectureAffected ? "architecture-review" : "advise",
+		stage: architectureAffected ? "architecture-review" : state.block.resumeStage,
+		block: undefined,
 		questions: answered,
 		advisorRuns,
 		dispatchedAdvisors: [],
@@ -598,15 +636,7 @@ export function blockForStaleState(
 		recommended: "Answer how to proceed before the runner dispatches more work.",
 		dependsOn: [],
 	};
-	const blocked: LoopState = {
-		...state,
-		stage: "blocked",
-		blockedFrom: state.stage,
-		blockedAdvisor: undefined,
-		questions: [question],
-		dispatchedAdvisors: [],
-	};
-	return { state: blocked, effects: [{ type: "ask-person", reason: "stale-state", question }] };
+	return withBlock(state, { kind: "stale", question, pendingAdvisors: pendingAdvisorsForResume(state) });
 }
 
 export function blockForAdvisorIntakeFailure(
@@ -620,13 +650,15 @@ export function blockForAdvisorIntakeFailure(
 		recommended: "Answer how to proceed; retrying the advisor is usually safest.",
 		dependsOn: [],
 	};
-	const blocked: LoopState = {
-		...state,
-		stage: "blocked",
-		blockedFrom: state.stage,
-		blockedAdvisor: role,
-		questions: [...state.questions, question],
-		dispatchedAdvisors: [],
+	return withBlock(state, { kind: "intake-failed", question, pendingAdvisors: [role] });
+}
+
+export function blockForGitFailure(state: LoopState, reason: string): { state: LoopState; effects: LoopEffect[] } {
+	const question: LoopQuestion = {
+		id: "git-state",
+		text: `Git state could not be resolved for this loop: ${reason}. Fix the repository refs, then answer to continue.`,
+		recommended: "Restore the missing git ref or say how to proceed.",
+		dependsOn: [],
 	};
-	return { state: blocked, effects: [{ type: "ask-person", reason: "advisor-intake-failure", question }] };
+	return withBlock(state, { kind: "git", question, pendingAdvisors: pendingAdvisorsForResume(state) });
 }
