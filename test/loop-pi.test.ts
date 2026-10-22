@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { listProposals } from "../extensions/grimoire.ts";
 import { briefHash, buildBrief, createLoopState, type LoopState, staleReason } from "../extensions/loop.ts";
 import sitraLoop, { loopStatePath, readLoopStateFile, writeLoopStateFile } from "../extensions/loop-pi.ts";
 import { EXIT_MARKER, HEADER_MARKER } from "../extensions/runs.ts";
@@ -456,6 +457,43 @@ describe("Pi wiring", () => {
 		const result = await tools.get("loop_status")?.execute("1", {}, undefined, undefined, ctx(cwd));
 		expect(result?.content[0]?.text).toContain("stage: advise");
 		expect(result?.content[0]?.text).toContain("stale:");
+		expect(readFileSync(path, "utf8")).toBe(before);
+	});
+
+	test("loop_status includes the documented per-loop metrics line without writing", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { tools } = fakePi();
+		const { cwd } = gitWorktree();
+		const state: LoopState = {
+			...createLoopState({
+				worktree: cwd,
+				branch: "feature",
+				baseRef: "origin/main",
+				baseHead: execFileSync("git", ["rev-parse", "origin/main"], { cwd, encoding: "utf8" }).trim(),
+				goal: "Add metrics",
+				limits: [],
+				done: [],
+			}),
+			stage: "done",
+			advisorRuns: {
+				intent: { status: "done", summary: "intent", evidence: [], openQuestions: [], assumptions: [], outputTokens: 500, contextTokens: 500 },
+				codebase: { status: "done", summary: "codebase", evidence: [], openQuestions: [], assumptions: [], outputTokens: 1000, contextTokens: 1000 },
+			},
+			rework: [
+				{ class: "context-missed", evidence: ["a"], proposalPath: "proposals/a.md" },
+				{ class: "wrong-intent", evidence: ["b"], proposalPath: "proposals/b.md" },
+				{ class: "check-gap", evidence: ["c"], proposalPath: "proposals/c.md" },
+			],
+		};
+		const path = loopStatePath(profile, cwd, "feature");
+		writeLoopStateFile(path, state);
+		const before = readFileSync(path, "utf8");
+
+		const result = await tools.get("loop_status")?.execute("1", {}, undefined, undefined, ctx(cwd));
+		expect(result?.content[0]?.text).toContain(
+			"loops: first-pass 0/1 · rounds 4 · avoidable rework context 1 intent 1 check 1 · tokens 3k",
+		);
 		expect(readFileSync(path, "utf8")).toBe(before);
 	});
 
@@ -1005,6 +1043,70 @@ describe("Pi wiring", () => {
 		expect(missed.stage).toBe("blocked");
 		expect(missed.block).toMatchObject({ kind: "questions", resumeStage: "classify" });
 		expect(missed.verification).toMatchObject({ status: "missed", summary: "Verifier found a miss." });
+	});
+
+	test("verifier misses write Grimoire proposals only and leave the loop ready for one rework build", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers, tools, userMessages } = fakePi();
+		const { cwd } = gitWorktree();
+		approvedLoop(profile, cwd);
+		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
+		const redCommit = commitAll(cwd, "add tests");
+		writeFileSync(join(cwd, "impl.ts"), "green\n");
+		const greenCommit = commitAll(cwd, "implement");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		const hash = sha256sum(cwd, "loop.test.ts");
+		const redLog = join(profile, "red.log");
+		const greenLog = join(profile, "green.log");
+		writeHeaderLoopLog(redLog, {
+			commit: redCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 1,
+		});
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 0,
+		});
+		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
+
+		await handlers.get("message_end")?.(
+			subagentResult(
+				"verifier",
+				sessionFileWithVerifierReport(
+					{
+						...helperReport("verifier", {
+							checksRun: [],
+							rerunChecks: [],
+							acceptedLogs: [],
+							testHashesChecked: ["loop.test.ts"],
+							goalMatched: false,
+							missClass: "context-missed",
+						}),
+						summary: "Verifier found a context miss.",
+						evidence: ["extensions/loop.ts:1"],
+					},
+					readLoopStateFile(loopStatePath(profile, cwd, "feature")).verifierRequest?.task ?? "",
+				),
+			),
+			ctx(cwd),
+		);
+
+		const state = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		const proposals = listProposals(join(profile, "grimoire"));
+		expect(state.stage).toBe("brief-approved");
+		expect(state.rework).toEqual([
+			{ class: "context-missed", evidence: ["extensions/loop.ts:1"], proposalPath: proposals[0]?.file },
+		]);
+		expect(proposals).toHaveLength(1);
+		expect(proposals[0]).toMatchObject({
+			kind: "lesson",
+			proposedBy: "sitra-loops",
+			tags: ["loops", "rework", "context-missed"],
+		});
+		expect(existsSync(join(profile, "grimoire", "kinds"))).toBe(false);
+		expect(userMessages.join("\n")).toContain("LOOPS stage: brief-approved");
 	});
 
 	test("verifier intake requires clean worktree and the recorded verifier dispatch", async () => {

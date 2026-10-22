@@ -56,6 +56,44 @@ const run = (
 	},
 });
 
+function verifiedState(dispatchId = "dispatch") {
+	return recordBuildEvidence(startBuild(approvedState()).state, {
+		commit: "commit-a",
+		diff: "diff",
+		testFiles: ["test/loop.test.ts"],
+		testHashes,
+		redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
+		greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+		dispatchId,
+		maxVerifierRerunMs: 120_000,
+	}).state;
+}
+
+function verifierMiss(
+	missClass: NonNullable<NonNullable<HelperReport["details"]> extends never ? never : string>,
+	dispatchId = "dispatch",
+	extra: Partial<HelperReport> = {},
+): HelperReport {
+	return {
+		status: "done",
+		role: "verifier",
+		summary: "Verifier found a miss.",
+		evidence: ["test/loop.test.ts:12"],
+		openQuestions: [],
+		assumptions: [],
+		dispatchId,
+		details: {
+			checksRun: [],
+			rerunChecks: [],
+			acceptedLogs: [],
+			testHashesChecked: ["test/loop.test.ts"],
+			goalMatched: false,
+			missClass,
+		},
+		...extra,
+	};
+}
+
 const report = (role: HelperReport["role"], extra: Partial<HelperReport> = {}): HelperReport => ({
 	status: "done",
 	role,
@@ -765,6 +803,89 @@ describe("build and verify slice", () => {
 		).state;
 		expect(blocked.stage).toBe("blocked");
 		expect(blocked.verification).toMatchObject({ status: "blocked" });
+	});
+
+	test("classifies a verifier miss, drafts one Grimoire proposal effect, and allows one rework build", () => {
+		const state = verifiedState();
+		const result = applyVerifierReport(state, verifierMiss("execution-slip"), { acceptedLogs: [] });
+
+		expect(result.state.stage).toBe("classify");
+		expect(result.state.rework).toEqual([
+			{ class: "execution-slip", evidence: ["test/loop.test.ts:12"] },
+		]);
+		expect(result.effects).toMatchObject([
+			{
+				type: "write-grimoire-proposal",
+				reworkIndex: 0,
+				proposal: {
+					kind: "lesson",
+					proposedBy: "sitra-loops",
+					tags: ["loops", "rework", "execution-slip"],
+				},
+			},
+		]);
+	});
+
+	test("verifier miss reports must match the recorded dispatch before classification is accepted", () => {
+		const missing = applyVerifierReport(
+			verifiedState("dispatch-a"),
+			{ ...verifierMiss("check-gap", undefined as never), dispatchId: undefined },
+			{ acceptedLogs: [] },
+		);
+		expect(missing.state.stage).toBe("blocked");
+		expect(missing.block).toMatchObject({ kind: "intake-failed", resumeStage: "verify" });
+		expect(missing.questions.at(-1)?.text).toContain("missing dispatchId");
+
+		const mismatched = applyVerifierReport(verifiedState("dispatch-a"), verifierMiss("check-gap", "dispatch-b"), {
+			acceptedLogs: [],
+		});
+		expect(mismatched.state.stage).toBe("blocked");
+		expect(mismatched.block).toMatchObject({ kind: "intake-failed", resumeStage: "verify" });
+		expect(mismatched.questions.at(-1)?.text).toContain("did not match");
+	});
+
+	test("new information waits for a person answer before drafting the proposal and rework build", () => {
+		const classified = applyVerifierReport(verifiedState(), verifierMiss("new-information"), { acceptedLogs: [] });
+
+		expect(classified.state.stage).toBe("blocked");
+		expect(classified.state.block).toMatchObject({ kind: "new-information", resumeStage: "classify" });
+		expect(classified.state.rework).toEqual([{ class: "new-information", evidence: ["test/loop.test.ts:12"] }]);
+		expect(classified.effects).toMatchObject([{ type: "ask-person", reason: "new-information" }]);
+
+		const answered = answerLoopQuestion(classified.state, {
+			answer: "This is real new information from the product owner.",
+			current: context,
+		});
+		expect(answered.state.stage).toBe("classify");
+		expect(answered.state.block).toBeUndefined();
+		expect(answered.effects).toMatchObject([
+			{
+				type: "write-grimoire-proposal",
+				reworkIndex: 0,
+				proposal: { tags: ["loops", "rework", "new-information"] },
+			},
+		]);
+	});
+
+	test("a second miss after rework blocks instead of starting a blind retry, and answering reruns advisors", () => {
+		const state = {
+			...verifiedState(),
+			rework: [{ class: "execution-slip" as const, evidence: ["first miss"], proposalPath: "proposals/first.md" }],
+		};
+		const blocked = applyVerifierReport(state, verifierMiss("check-gap"), { acceptedLogs: [] });
+
+		expect(blocked.state.stage).toBe("blocked");
+		expect(blocked.state.block).toMatchObject({ kind: "second-rework", resumeStage: "advise" });
+		expect(blocked.state.rework).toEqual([
+			{ class: "execution-slip", evidence: ["first miss"], proposalPath: "proposals/first.md" },
+			{ class: "check-gap", evidence: ["test/loop.test.ts:12"] },
+		]);
+
+		const answered = answerLoopQuestion(blocked.state, { answer: "Rerun intake with this new constraint.", current: context });
+		expect(answered.state.stage).toBe("advise");
+		expect(answered.state.build.testHashes).toEqual([]);
+		expect(answered.state.verifierRequest).toBeUndefined();
+		expect(answered.effects).toMatchObject([{ type: "dispatch-advisors", roles: ["intent", "codebase"] }]);
 	});
 
 	test("rejects verifier reports that accept logs not tied to the exact commit and test hashes", () => {
