@@ -521,6 +521,32 @@ describe("ended sessions leave the registry", () => {
 		expect(detectSessionAlerts(listed).map((a) => a.kind)).toEqual(["stopped"]);
 	});
 
+	test("a stopped lead with no recorded cwd is kept", () => {
+		const profile = tmp();
+		const record: Partial<SessionRecord> = { ...baseLead, pid: 2_147_483_000 };
+		delete record.cwd;
+		writeSession(profile, record as SessionRecord);
+
+		expect(pruneEndedSessions(profile, () => false)).toEqual([]);
+		expect(listSessions(profile, () => false).map((s) => s.id)).toEqual(["lead-flights"]);
+	});
+
+	test("a stopped lead is kept when checking its cwd fails for a reason other than ENOENT", () => {
+		const profile = tmp();
+		const locked = join(profile, "locked");
+		const cwd = join(locked, "checkout");
+		mkdirSync(locked);
+		chmodSync(locked, 0);
+		try {
+			writeSession(profile, { ...baseLead, cwd, pid: 2_147_483_000 });
+
+			expect(pruneEndedSessions(profile, () => false)).toEqual([]);
+			expect(listSessions(profile, () => false).map((s) => s.id)).toEqual(["lead-flights"]);
+		} finally {
+			chmodSync(locked, 0o700);
+		}
+	});
+
 	test("a running session is never removed, even if its folder is gone", () => {
 		const profile = tmp();
 		writeSession(profile, { ...baseLead, cwd: join(profile, "gone"), pid: process.pid });

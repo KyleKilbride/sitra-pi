@@ -11,6 +11,7 @@ import { writeTowerSummary } from "./radar-store.ts";
 import {
 	auditSessionsFriction,
 	createTailReader,
+	defaultPidAlive,
 	detectSessionAlerts,
 	drainInbox,
 	findSession,
@@ -136,14 +137,6 @@ export default function sitraTower(pi: Pi): void {
 
 	const herdr = (args: string[]) =>
 		execFileSync("herdr", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-	const isPidAlive = (pid: number): boolean => {
-		try {
-			process.kill(pid, 0);
-			return true;
-		} catch {
-			return false;
-		}
-	};
 	const inspectPane = (id: string): { alive: boolean; runningRadar: boolean } => {
 		try {
 			const info = herdr(["pane", "get", id]);
@@ -491,7 +484,7 @@ export default function sitraTower(pi: Pi): void {
 					details: { removed: undefined, reason: "not_found" },
 				};
 			}
-			if (isPidAlive(match.pid)) {
+			if (defaultPidAlive(match.pid)) {
 				return {
 					content: [
 						{

@@ -231,7 +231,7 @@ function recordPath(profileDir: string, id: string): string {
 	return join(sessionsDir(profileDir), `${safeFileId(id)}.json`);
 }
 
-function defaultPidAlive(pid: number): boolean {
+export function defaultPidAlive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
 		return true;
@@ -361,7 +361,7 @@ export function removeSession(profileDir: string, id: string): void {
 export function pruneEndedSessions(
 	profileDir: string,
 	isPidAlive: (pid: number) => boolean = defaultPidAlive,
-	folderExists: (path: string) => boolean = existsSync,
+	statCwd: (path: string) => unknown = statSync,
 ): string[] {
 	const dir = sessionsDir(profileDir);
 	if (!existsSync(dir)) return [];
@@ -371,7 +371,7 @@ export function pruneEndedSessions(
 		const fullPath = join(dir, file);
 		try {
 			const record = JSON.parse(readFileSync(fullPath, "utf8")) as SessionRecord;
-			if (isPidAlive(record.pid) || folderExists(record.cwd)) continue;
+			if (isPidAlive(record.pid) || !cwdDefinitelyMissing(record.cwd, statCwd)) continue;
 			rmSync(fullPath, { force: true });
 			removed.push(record.id);
 		} catch {
@@ -379,6 +379,16 @@ export function pruneEndedSessions(
 		}
 	}
 	return removed;
+}
+
+function cwdDefinitelyMissing(cwd: unknown, statCwd: (path: string) => unknown): boolean {
+	if (typeof cwd !== "string" || cwd.length === 0) return false;
+	try {
+		statCwd(cwd);
+		return false;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "ENOENT";
+	}
 }
 
 export function listSessions(
