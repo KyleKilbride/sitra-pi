@@ -98,7 +98,7 @@ export function readRunHeader(
 		const branch = text(meta?.branch);
 		const agent = text(meta?.agent);
 		const sessionId = text(meta?.sessionId);
-		const command = text(meta?.command);
+		const command = typeof meta?.command === "string" ? meta.command : undefined;
 		const nonce = text(meta?.nonce);
 		const loop =
 			meta?.loop &&

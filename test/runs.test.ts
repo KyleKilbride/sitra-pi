@@ -44,6 +44,14 @@ describe("runs in panes", () => {
 	test("an invalid new-format header does not fall back to legacy exit parsing", () => {
 		expect(() => readRun(`${HEADER_MARKER}{not-json}\n${EXIT_MARKER}0\n`)).toThrow(/invalid run header/);
 	});
+
+	test("run header keeps the full command for verifier evidence", () => {
+		const command = `pnpm vitest run ${Array.from({ length: 40 }, (_, index) => `test/file-${index}.test.ts`).join(" ")}`;
+		const header = readRunHeader(
+			`${HEADER_MARKER}${JSON.stringify({ pid: 123, meta: { command } })}`,
+		);
+		expect(header?.meta.command).toBe(command);
+	});
 });
 
 describe("the pane runs your shell, not bash", () => {
