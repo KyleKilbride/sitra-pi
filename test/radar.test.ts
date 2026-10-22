@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -492,12 +491,8 @@ describe("radar refresh cost", () => {
 		const profile = tmp();
 		const repo = join(profile, "repo");
 		const bin = join(profile, "bin");
-		mkdirSync(repo, { recursive: true });
-		execFileSync("git", ["init", "-q"], { cwd: repo });
-		execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"], {
-			cwd: repo,
-		});
-		execFileSync("git", ["checkout", "-q", "-b", "one"], { cwd: repo });
+		mkdirSync(join(repo, ".git"), { recursive: true });
+		writeFileSync(join(repo, ".git", "HEAD"), "ref: refs/heads/one\n");
 		mkdirSync(bin, { recursive: true });
 		writeFileSync(
 			join(bin, "herdr"),
@@ -512,14 +507,14 @@ fi
 `,
 		);
 		chmodSync(join(bin, "herdr"), 0o755);
-		const folders = createFolderLookupCache();
+		const folders = createFolderLookupCache({ mainCheckout: (cwd) => cwd });
 		const savedEnv = { HERDR_ENV: process.env.HERDR_ENV, PATH: process.env.PATH };
 		process.env.HERDR_ENV = "1";
 		process.env.PATH = `${bin}:${process.env.PATH}`;
 		try {
 			let snap = collectRadarSnapshot(profile, { includeHerdr: true, folders });
 			expect(snap.workers[0]?.lead.branch).toBe("one");
-			execFileSync("git", ["checkout", "-q", "-b", "two"], { cwd: repo });
+			writeFileSync(join(repo, ".git", "HEAD"), "ref: refs/heads/two\n");
 			snap = collectRadarSnapshot(profile, { includeHerdr: true, folders });
 			expect(snap.workers[0]?.lead.branch).toBe("two");
 		} finally {
