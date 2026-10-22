@@ -42,6 +42,9 @@ frozen test-design command, and `loop_record_build` accepts only those runner-re
 hashes. When a `/loop answer` unblocks a stage, the runner tells the lead the resumed stage, the answer it recorded,
 and the next expected action.
 
+Anything the lead's shell can write, including the loop state file, can still be forged; the verifier remains the
+independent check on the frozen brief, diff, hashes and logs.
+
 Other useful verbs:
 
 | Verb/tool | Who uses it | What it does |

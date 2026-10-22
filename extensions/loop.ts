@@ -593,7 +593,7 @@ function withBlock(
 	},
 ): { state: LoopState; effects: LoopEffect[] } {
 	if (state.block) {
-		if (state.block.kind !== input.kind) {
+		if (state.block.kind === "build-evidence" && state.block.kind !== input.kind) {
 			const blocked: LoopState = {
 				...state,
 				stage: input.kind === "questions" ? "needs-person" : "blocked",

@@ -8,6 +8,7 @@ import {
 	applyVerifierReport,
 	approveBrief,
 	blockForAdvisorIntakeFailure,
+	blockForGitFailure,
 	blockForStaleState,
 	blockForVerifierIntakeFailure,
 	briefHash,
@@ -740,18 +741,19 @@ describe("stale state and validation", () => {
 		expect(blocked.questions.at(-1)?.id).toBe("stale-state");
 	});
 
-	test("a later non-matching block kind replaces the existing structural block", () => {
+	test("non-build-evidence structural blocks are not overwritten by later problems", () => {
 		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
 		state = applyAdvisorReport(state, report("intent"), { outputTokens: 1, contextTokens: 0 }).state;
 		const blocked = blockForStaleState(state, { ...context, baseHead: "base-b" }).state;
 		const stacked = blockForAdvisorIntakeFailure(blocked, "codebase", "helper report missing").state;
 		expect(stacked.block).toMatchObject({
-			kind: "intake-failed",
+			kind: "stale",
 			resumeStage: "advise",
 			pendingAdvisors: ["codebase"],
 		});
 		expect(stacked.block?.resumeStage).not.toBe("blocked");
 		expect(stacked.block?.resumeStage).not.toBe("needs-person");
+		expect(stacked.questions.at(-1)?.text).toContain("Additional problem");
 		expect(stacked.questions.at(-1)?.text).toContain("helper report missing");
 		const answered = answerLoopQuestion(stacked, {
 			answer: "Continue.",
@@ -1324,6 +1326,32 @@ describe("build and verify slice", () => {
 				reworkIndex: 0,
 			},
 		]);
+	});
+
+	test("git and stale problems do not erase a pending new-information decision block", () => {
+		const classified = applyVerifierReport(verifiedState(), verifierMiss("new-information"), {
+			acceptedLogs: [],
+		}).state;
+		const gitBlocked = blockForGitFailure(classified, "missing origin/main").state;
+		expect(gitBlocked.block).toMatchObject({ kind: "new-information", resumeStage: "classify" });
+		expect(gitBlocked.questions.at(-1)?.text).toContain("Additional problem");
+		expect(gitBlocked.questions.at(-1)?.text).toContain("missing origin/main");
+		const gitAnswered = answerLoopQuestion(gitBlocked, { answer: "fixed git", current: context });
+		expect(gitAnswered.state.stage).toBe("blocked");
+		expect(gitAnswered.state.block).toMatchObject({ kind: "new-information", resumeStage: "classify" });
+		expect(gitAnswered.effects).toEqual([]);
+
+		const staleBlocked = blockForStaleState(classified, { ...context, baseHead: "base-b" }).state;
+		expect(staleBlocked.block).toMatchObject({ kind: "new-information", resumeStage: "classify" });
+		expect(staleBlocked.questions.at(-1)?.text).toContain("Additional problem");
+		expect(staleBlocked.questions.at(-1)?.text).toContain("base head changed");
+		const staleAnswered = answerLoopQuestion(staleBlocked, {
+			answer: "fixed stale",
+			current: { ...context, baseHead: "base-b" },
+		});
+		expect(staleAnswered.state.stage).toBe("blocked");
+		expect(staleAnswered.state.block).toMatchObject({ kind: "new-information", resumeStage: "classify" });
+		expect(staleAnswered.effects).toEqual([]);
 	});
 
 	test("rework proposals require recorded verification summary", () => {

@@ -231,6 +231,17 @@ function buildEvidenceProblem(reason: string, satisfy: string): { reason: string
 	return { reason, satisfy };
 }
 
+function answerBuildEvidenceQuestions(state: LoopState): LoopState {
+	return {
+		...state,
+		questions: state.questions.map((question) =>
+			question.id === "build-evidence" && !question.answer
+				? { ...question, answer: "superseded by successful build evidence retry" }
+				: question,
+		),
+	};
+}
+
 function testsOnlyAncestorProblem(
 	cwd: string,
 	baseRef: string,
@@ -333,25 +344,42 @@ function spawnEvidenceCommand(input: {
 	signal?: AbortSignal;
 }): Promise<{ code: number | undefined; signal: NodeJS.Signals | null }> {
 	return new Promise((resolve, reject) => {
-		const child = spawn("bash", ["-c", input.commandLine], { cwd: input.cwd, stdio: "ignore" });
+		const child = spawn("bash", ["-c", input.commandLine], { cwd: input.cwd, detached: true, stdio: "ignore" });
 		let settled = false;
+		let timedOut = false;
+		let aborted = false;
+		let forceTimer: NodeJS.Timeout | undefined;
 		const finish = (fn: () => void) => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
+			if (forceTimer) clearTimeout(forceTimer);
 			input.signal?.removeEventListener("abort", abort);
 			fn();
 		};
 		const kill = () => {
-			if (!child.killed) child.kill("SIGTERM");
+			if (!child.pid) return;
+			try {
+				process.kill(-child.pid, "SIGTERM");
+			} catch {
+				if (!child.killed) child.kill("SIGTERM");
+			}
+			forceTimer = setTimeout(() => {
+				if (!child.pid) return;
+				try {
+					process.kill(-child.pid, "SIGKILL");
+				} catch {
+					if (!child.killed) child.kill("SIGKILL");
+				}
+			}, 1_000);
 		};
 		const timer = setTimeout(() => {
+			timedOut = true;
 			kill();
-			finish(() => reject(new Error(`loop evidence command timed out after ${input.timeoutMs}ms`)));
 		}, input.timeoutMs);
 		const abort = () => {
+			aborted = true;
 			kill();
-			finish(() => reject(new Error("loop evidence command aborted")));
 		};
 		if (input.signal?.aborted) {
 			abort();
@@ -359,7 +387,19 @@ function spawnEvidenceCommand(input: {
 		}
 		input.signal?.addEventListener("abort", abort, { once: true });
 		child.on("error", (error) => finish(() => reject(error)));
-		child.on("exit", (code, signal) => finish(() => resolve({ code: code ?? undefined, signal })));
+		child.on("exit", (code, signal) =>
+			finish(() => {
+				if (timedOut) {
+					reject(new Error(`loop evidence command timed out after ${input.timeoutMs}ms`));
+					return;
+				}
+				if (aborted) {
+					reject(new Error("loop evidence command aborted"));
+					return;
+				}
+				resolve({ code: code ?? undefined, signal });
+			}),
+		);
 	});
 }
 
@@ -856,6 +896,18 @@ function recordBuildFromParams(
 		emitEffects(pi, blocked.state, blocked.effects);
 		return blocked.state;
 	}
+	if (redEvidence.command !== greenEvidence.command) {
+		const blocked = blockForBuildEvidenceFailure(
+			recordingState,
+			buildEvidenceProblem(
+				"red and green evidence used different agreed commands",
+				"Rerun red and green evidence with the same frozen test-design command.",
+			),
+		);
+		writeLoopStateFile(path, blocked.state);
+		emitEffects(pi, blocked.state, blocked.effects);
+		return blocked.state;
+	}
 	const redRun = parseLoopRunLog(runLogForId(params.redRunId));
 	const greenRun = parseLoopRunLog(runLogForId(params.greenRunId));
 	if (redRun.loop?.commit) {
@@ -883,9 +935,10 @@ function recordBuildFromParams(
 		dispatchId: createHash("sha256").update(`${Date.now()}:${Math.random()}:${path}`).digest("hex"),
 		maxVerifierRerunMs: params.maxVerifierRerunMs ?? 120_000,
 	});
-	writeLoopStateFile(path, result.state);
-	emitEffects(pi, result.state, result.effects);
-	return result.state;
+	const nextState = result.state.stage === "verify" ? answerBuildEvidenceQuestions(result.state) : result.state;
+	writeLoopStateFile(path, nextState);
+	emitEffects(pi, nextState, result.effects);
+	return nextState;
 }
 
 async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> {
