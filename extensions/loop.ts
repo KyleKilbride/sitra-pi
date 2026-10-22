@@ -84,6 +84,8 @@ const BuildState = Type.Object(
 		testHashes: Type.Array(TestHash),
 		redRunLog: Type.Optional(Type.String()),
 		greenRunLog: Type.Optional(Type.String()),
+		redRunCommand: Type.Optional(Type.String()),
+		greenRunCommand: Type.Optional(Type.String()),
 	},
 	{ additionalProperties: false },
 );
@@ -622,6 +624,12 @@ export function answerLoopQuestion(
 			baseHead: input.current.baseHead,
 			questions: answered,
 			dispatchedAdvisors: state.block.pendingAdvisors,
+			...(nextStage === "build"
+				? {
+						build: { testFiles: [], testHashes: [] },
+						verifierRequest: undefined,
+					}
+				: {}),
 		};
 		return updated.dispatchedAdvisors.length
 			? dispatch(updated, updated.dispatchedAdvisors)
@@ -728,6 +736,7 @@ export interface LoopRunEvidence {
 	log: string;
 	done: boolean;
 	exitCode?: number;
+	command?: string;
 	loop?: { commit: string; testHashes: LoopTestHash[] };
 }
 
@@ -813,6 +822,8 @@ export function verifierTask(input: {
 	testHashes: LoopTestHash[];
 	redRunLog: string;
 	greenRunLog: string;
+	redRunCommand?: string;
+	greenRunCommand?: string;
 	maxVerifierRerunMs: number;
 }): string {
 	return [
@@ -827,7 +838,9 @@ export function verifierTask(input: {
 		JSON.stringify(input.testHashes, null, "\t"),
 		"Run logs:",
 		`- redRunLog: ${input.redRunLog}`,
+		...(input.redRunCommand ? [`  command: ${input.redRunCommand}`] : []),
 		`- greenRunLog: ${input.greenRunLog}`,
+		...(input.greenRunCommand ? [`  command: ${input.greenRunCommand}`] : []),
 		"",
 		"Report only with helper_report role verifier details. Record every check rerun and every log accepted with a reason. Accept a saved log only when it is tied to this exact commit and test hashes; otherwise rerun the check if it is cheap under maxVerifierRerunMs and not a full suite, or report blocked.",
 	].join("\n");
@@ -856,6 +869,8 @@ export function recordBuildEvidence(
 			testHashes: input.testHashes,
 			...(input.redRun ? { redRunLog: input.redRun.log } : {}),
 			...(input.greenRun ? { greenRunLog: input.greenRun.log } : {}),
+			...(input.redRun?.command ? { redRunCommand: input.redRun.command } : {}),
+			...(input.greenRun?.command ? { greenRunCommand: input.greenRun.command } : {}),
 		},
 	};
 	if (agreedProblem) return buildBlock(buildState, agreedProblem);
@@ -873,6 +888,8 @@ export function recordBuildEvidence(
 		testHashes: input.testHashes,
 		redRunLog,
 		greenRunLog,
+		redRunCommand: input.redRun?.command,
+		greenRunCommand: input.greenRun?.command,
 		maxVerifierRerunMs: input.maxVerifierRerunMs,
 	});
 	const next: LoopState = {

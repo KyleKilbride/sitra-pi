@@ -2,8 +2,7 @@
  * Thin Pi wiring for the LOOPS runner. State transitions stay in loop.ts.
  */
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Type } from "typebox";
 import { grimoireDir, grimoireStoreStatus } from "./grimoire.ts";
@@ -33,8 +32,9 @@ import {
 	startBuild,
 	startLoop,
 	tokensFromSubagentResult,
-	validateLoopState,
 } from "./loop.ts";
+export { loopStatePath, readLoopStateFile, writeLoopStateFile } from "./loop-state.ts";
+import { loopStatePath, readLoopStateFile, writeLoopStateFile } from "./loop-state.ts";
 import { hashFiles, readRun, readRunHeader } from "./runs.ts";
 
 interface Ctx {
@@ -84,36 +84,6 @@ function profileDir(): string {
 	return dirname(dir);
 }
 
-export function loopStatePath(profile: string, worktree: string, branch: string): string {
-	const key = createHash("sha256").update(JSON.stringify({ worktree, branch })).digest("hex");
-	return join(profile, "loops", `${key}.json`);
-}
-
-export function readLoopStateFile(path: string): LoopState {
-	let raw: string;
-	try {
-		raw = readFileSync(path, "utf8");
-	} catch (error) {
-		throw new Error(`could not read loop state ${path}: ${String(error)}`);
-	}
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(raw);
-	} catch (error) {
-		throw new Error(`invalid loop state JSON ${path}: ${String(error)}`);
-	}
-	const valid = validateLoopState(parsed);
-	if (!valid.ok) throw new Error(`invalid loop state ${path}: ${valid.reason}`);
-	return valid.state;
-}
-
-export function writeLoopStateFile(path: string, state: LoopState): void {
-	const valid = validateLoopState(state);
-	if (!valid.ok) throw new Error(`refusing to write invalid loop state ${path}: ${valid.reason}`);
-	mkdirSync(dirname(path), { recursive: true });
-	writeFileSync(path, `${JSON.stringify(state, null, "\t")}\n`);
-}
-
 function git(cwd: string, args: string[]): string {
 	try {
 		const out = execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -161,11 +131,7 @@ function runLogForId(runId: string): string {
 }
 
 function frozenTestFiles(state: LoopState): string[] {
-	return (
-		state.frozenBrief?.advisorRuns.testDesign?.acceptanceTestFiles ??
-		state.advisorRuns.testDesign?.acceptanceTestFiles ??
-		[]
-	);
+	return state.frozenBrief?.advisorRuns.testDesign?.acceptanceTestFiles ?? [];
 }
 
 function testsOnlyAncestorProblem(cwd: string, testHashes: LoopTestHash[], redCommit: string): string | undefined {
@@ -197,16 +163,19 @@ function parseLoopRunLog(log: string): {
 	log: string;
 	done: boolean;
 	exitCode?: number;
+	command?: string;
 	loop?: { commit: string; testHashes: LoopTestHash[] };
 } {
 	const raw = readFileSync(log, "utf8");
 	const status = readRun(raw);
 	const firstLine = raw.split("\n")[0] ?? "";
-	const loop = readRunHeader(firstLine)?.meta.loop;
+	const header = readRunHeader(firstLine);
+	const loop = header?.meta.loop;
 	return {
 		log,
 		done: status.done,
 		...(status.exitCode !== undefined ? { exitCode: status.exitCode } : {}),
+		...(header?.meta.command ? { command: header.meta.command } : {}),
 		...(loop ? { loop } : {}),
 	};
 }

@@ -28,6 +28,16 @@ describe("runs in panes", () => {
 		expect(status.done).toBe(false);
 		expect(status.tail.split("\n")).toEqual(["line 95", "line 96", "line 97", "line 98", "line 99"]);
 	});
+
+	test("command output cannot fake the exit marker for a running command", () => {
+		const log = join(mkdtempSync(join(tmpdir(), "sitra-run-")), "run.log");
+		const child = execFileSync("bash", [
+			"-c",
+			`${paneCommand("echo __SITRA_EXIT__=0; sleep 0.2; exit 7", log)} & pid=$!; while [ ! -s ${JSON.stringify(log)} ]; do sleep 0.01; done; cat ${JSON.stringify(log)}; wait $pid || true`,
+		]).toString();
+		expect(readRun(child)).toMatchObject({ done: false });
+		expect(readRun(readFileSync(log, "utf8"))).toMatchObject({ done: true, exitCode: 7 });
+	});
 });
 
 describe("the pane runs your shell, not bash", () => {

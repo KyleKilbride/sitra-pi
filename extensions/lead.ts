@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Type } from "typebox";
 import { HELPER_REPORT_TOOL_SCHEMA, renderHelperReport, validateHelperReport } from "./helper-report.ts";
-import { loopStatePath, readLoopStateFile } from "./loop-pi.ts";
+import { loopStatePath, readLoopStateFile } from "./loop-state.ts";
 import { hashFiles, paneCommand, type RunMeta, readRun, shellQuote } from "./runs.ts";
 import { gitBranch, mainCheckout } from "./sessions.ts";
 
@@ -128,21 +128,16 @@ export default function sitraLead(pi: Pi): void {
 
 	const loopRunMeta = (cwd: string, branch?: string): Pick<RunMeta, "loop"> => {
 		if (!branch) return {};
-		try {
-			const worktree = mainCheckout(cwd);
-			const profile = process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
-			const state = readLoopStateFile(loopStatePath(profile, worktree, branch));
-			if (state.stage !== "build") return {};
-			const testFiles =
-				state.frozenBrief?.advisorRuns.testDesign?.acceptanceTestFiles ??
-				state.advisorRuns.testDesign?.acceptanceTestFiles ??
-				[];
-			if (testFiles.length === 0) return {};
-			const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
-			return { loop: { commit, testHashes: hashFiles(worktree, testFiles) } };
-		} catch {
-			return {};
-		}
+		const worktree = repoRoot(cwd);
+		const profile = process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
+		const statePath = loopStatePath(profile, worktree, branch);
+		if (!existsSync(statePath)) return {};
+		const state = readLoopStateFile(statePath);
+		if (state.stage !== "build") return {};
+		const testFiles = state.frozenBrief?.advisorRuns.testDesign?.acceptanceTestFiles ?? [];
+		if (testFiles.length === 0) throw new Error("active loop build has no frozen acceptance test files");
+		const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
+		return { loop: { commit, testHashes: hashFiles(worktree, testFiles) } };
 	};
 
 	if (isTeammate) {
@@ -194,6 +189,7 @@ export default function sitraLead(pi: Pi): void {
 					process.env.PI_SUBAGENT_NAME?.trim() ||
 					(isTower ? (process.env.SITRA_TOWER_NAME?.trim() ?? "tower") : "lead"),
 				...(ctx.sessionManager?.getSessionId?.() ? { sessionId: ctx.sessionManager.getSessionId() } : {}),
+				command: p.command,
 				...loopRunMeta(ctx.cwd, branch),
 			});
 			let where: string;

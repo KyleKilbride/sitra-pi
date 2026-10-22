@@ -13,6 +13,8 @@ export interface RunMeta {
 	branch?: string;
 	agent?: string;
 	sessionId?: string;
+	command?: string;
+	nonce?: string;
 	loop?: {
 		commit: string;
 		testHashes: { file: string; sha256: string }[];
@@ -35,12 +37,15 @@ export function shellQuote(s: string): string {
 /** The line typed into the pane: record who runs it, run the command, keep a full log, record the exit code. */
 export function paneCommand(command: string, log: string, meta: RunMeta = {}): string {
 	const q = shellQuote(log);
+	const nonce = createHash("sha256").update(`${Date.now()}:${Math.random()}:${log}`).digest("hex").slice(0, 16);
+	const metaWithNonce = { ...meta, nonce };
 	const head = shellQuote(`${HEADER_MARKER}{"pid":`);
 	const pidStart = shellQuote(`,"pidStart":"`);
 	const pidStartKind = shellQuote(`","pidStartKind":"`);
-	const tail = shellQuote(`","meta":${JSON.stringify(meta)}}`);
+	const tail = shellQuote(`","meta":${JSON.stringify(metaWithNonce)}}`);
+	const exit = shellQuote(`${EXIT_MARKER}${nonce}=`);
 	// Always bash, whatever shell the pane runs (herdr panes run the user's zsh).
-	const script = `pid_start=""; pid_start_kind=""; if [ -r "/proc/$$/stat" ]; then pid_start=$(awk '{print $22}' "/proc/$$/stat" 2>/dev/null || true); if [ -n "$pid_start" ]; then pid_start_kind="proc"; fi; fi; if [ -z "$pid_start" ]; then pid_start=$(ps -o lstart= -p "$$" 2>/dev/null | awk '{$1=$1; print}' || true); if [ -n "$pid_start" ]; then pid_start_kind="ps-lstart"; fi; fi; printf '%s%s%s%s%s%s%s\\n' ${head} "$$" ${pidStart} "$pid_start" ${pidStartKind} "$pid_start_kind" ${tail} > ${q}; { ${command} ; } 2>&1 | tee -a ${q}; echo "${EXIT_MARKER}\${PIPESTATUS[0]}" >> ${q}`;
+	const script = `pid_start=""; pid_start_kind=""; if [ -r "/proc/$$/stat" ]; then pid_start=$(awk '{print $22}' "/proc/$$/stat" 2>/dev/null || true); if [ -n "$pid_start" ]; then pid_start_kind="proc"; fi; fi; if [ -z "$pid_start" ]; then pid_start=$(ps -o lstart= -p "$$" 2>/dev/null | awk '{$1=$1; print}' || true); if [ -n "$pid_start" ]; then pid_start_kind="ps-lstart"; fi; fi; printf '%s%s%s%s%s%s%s\\n' ${head} "$$" ${pidStart} "$pid_start" ${pidStartKind} "$pid_start_kind" ${tail} > ${q}; { ${command} ; } 2>&1 | tee -a ${q}; echo "${exit}\${PIPESTATUS[0]}" >> ${q}`;
 	return `bash -c ${shellQuote(script)}`;
 }
 
@@ -52,11 +57,14 @@ export interface RunStatus {
 
 export function readRun(logText: string, tailLines = 40): RunStatus {
 	const lines = logText.replace(/\n$/, "").split("\n");
-	const marker = lines.findLastIndex((l) => l.startsWith(EXIT_MARKER));
+	const header = readRunHeader(lines[0] ?? "");
+	const nonce = typeof header?.meta.nonce === "string" ? header.meta.nonce : undefined;
+	const marker = lines.findLastIndex((l) => (nonce ? l.startsWith(`${EXIT_MARKER}${nonce}=`) : l.startsWith(EXIT_MARKER)));
 	const body = (marker === -1 ? lines : lines.slice(0, marker)).filter((l) => !l.startsWith(HEADER_MARKER));
 	const tail = body.slice(-tailLines).join("\n");
 	if (marker === -1) return { done: false, tail };
-	return { done: true, exitCode: Number(lines[marker]?.slice(EXIT_MARKER.length)), tail };
+	const prefix = nonce ? `${EXIT_MARKER}${nonce}=` : EXIT_MARKER;
+	return { done: true, exitCode: Number(lines[marker]?.slice(prefix.length)), tail };
 }
 
 /** The pid and owner recorded on the log's first line, if the run was started by `paneCommand`. */
@@ -80,6 +88,8 @@ export function readRunHeader(
 		const branch = text(meta?.branch);
 		const agent = text(meta?.agent);
 		const sessionId = text(meta?.sessionId);
+		const command = text(meta?.command);
+		const nonce = text(meta?.nonce);
 		const loop =
 			meta?.loop &&
 			typeof meta.loop === "object" &&
@@ -118,6 +128,8 @@ export function readRunHeader(
 				...(branch ? { branch } : {}),
 				...(agent ? { agent } : {}),
 				...(sessionId ? { sessionId } : {}),
+				...(command ? { command } : {}),
+				...(nonce ? { nonce } : {}),
 				...(loop ? { loop } : {}),
 			},
 		};
