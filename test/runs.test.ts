@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { paneCommand, readRun } from "../extensions/runs.ts";
+import { EXIT_MARKER, HEADER_MARKER, paneCommand, readRun } from "../extensions/runs.ts";
 
 describe("runs in panes", () => {
 	test("the pane command runs the command, logs everything, and records the exit code", () => {
@@ -39,6 +39,10 @@ describe("runs in panes", () => {
 		]);
 		expect(readRun(readFileSync(partial, "utf8"))).toMatchObject({ done: false });
 		expect(readRun(readFileSync(log, "utf8"))).toMatchObject({ done: true, exitCode: 7 });
+	});
+
+	test("an invalid new-format header does not fall back to legacy exit parsing", () => {
+		expect(() => readRun(`${HEADER_MARKER}{not-json}\n${EXIT_MARKER}0\n`)).toThrow(/invalid run header/);
 	});
 });
 

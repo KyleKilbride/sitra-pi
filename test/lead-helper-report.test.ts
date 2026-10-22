@@ -288,4 +288,52 @@ describe("run_in_pane loop metadata", () => {
 			tools.get("run_in_pane")?.execute("1", { command: "true", label: "loop red" }, undefined, undefined, { cwd }),
 		).rejects.toThrow(/invalid loop state JSON/);
 	});
+
+	test("ordinary runs during build record missing frozen test files instead of failing", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-lead-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { tools } = fakePi();
+		const { cwd, head } = gitWorktree();
+		const state: LoopState = {
+			...createLoopState({
+				worktree: cwd,
+				branch: "feature",
+				baseRef: "origin/main",
+				baseHead: head,
+				goal: "Add the runner",
+				limits: [],
+				done: [],
+			}),
+			stage: "build",
+			frozenBrief: {
+				version: 1,
+				goal: "Add the runner",
+				limits: [],
+				done: [],
+				questions: [],
+				advisorRuns: {
+					testDesign: {
+						status: "done",
+						summary: "tests",
+						evidence: [],
+						openQuestions: [],
+						assumptions: [],
+						acceptanceTestFiles: ["missing.test.ts"],
+					},
+				},
+			},
+		};
+		writeLoopStateFile(loopStatePath(profile, cwd, "feature"), state);
+
+		const result = await tools
+			.get("run_in_pane")
+			?.execute("1", { command: "ls", label: "ordinary" }, undefined, undefined, { cwd });
+		const details = result?.details as { log: string };
+		execFileSync("bash", [
+			"-c",
+			`for i in {1..50}; do [ -s ${JSON.stringify(details.log)} ] && exit 0; sleep 0.05; done; exit 1`,
+		]);
+		const header = readRunHeader(readFileSync(details.log, "utf8").split("\n")[0] ?? "");
+		expect(header?.meta.loop?.testHashes).toEqual([{ file: "missing.test.ts", missing: true }]);
+	});
 });
