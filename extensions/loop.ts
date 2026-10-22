@@ -137,7 +137,6 @@ const VerifierRequest = Type.Object(
 		diffHash: Type.String({ minLength: 1 }),
 		testHashes: Type.Array(TestHash),
 		task: Type.String({ minLength: 1 }),
-		taskHash: Type.String({ minLength: 1 }),
 		dispatchId: Type.String({ minLength: 1 }),
 		runLogs: Type.Array(Type.String()),
 		maxVerifierRerunMs: Type.Number(),
@@ -832,7 +831,7 @@ export function verifierTask(input: {
 	greenRunLog: string;
 	redRunCommand?: string;
 	greenRunCommand?: string;
-	dispatchId?: string;
+	dispatchId: string;
 	maxVerifierRerunMs: number;
 }): string {
 	return [
@@ -866,7 +865,7 @@ export function recordBuildEvidence(
 		testHashes: LoopTestHash[];
 		redRun?: LoopRunEvidence;
 		greenRun?: LoopRunEvidence;
-		dispatchId?: string;
+		dispatchId: string;
 		maxVerifierRerunMs: number;
 	},
 ): { state: LoopState; effects: LoopEffect[] } {
@@ -893,7 +892,6 @@ export function recordBuildEvidence(
 	const redRunLog = input.redRun?.log;
 	const greenRunLog = input.greenRun?.log;
 	if (!redRunLog || !greenRunLog) return buildBlock(buildState, "run logs are missing");
-	const dispatchId = input.dispatchId ?? sha256Text(`${input.commit}:${input.diff}:${Date.now()}:${Math.random()}`);
 	const task = verifierTask({
 		brief: buildBrief(buildState),
 		diff: input.diff,
@@ -903,7 +901,7 @@ export function recordBuildEvidence(
 		greenRunLog,
 		redRunCommand: input.redRun?.command,
 		greenRunCommand: input.greenRun?.command,
-		dispatchId,
+		dispatchId: input.dispatchId,
 		maxVerifierRerunMs: input.maxVerifierRerunMs,
 	});
 	const next: LoopState = {
@@ -915,8 +913,7 @@ export function recordBuildEvidence(
 			diffHash: diffHash(input.diff),
 			testHashes: input.testHashes,
 			task,
-			taskHash: sha256Text(task),
-			dispatchId,
+			dispatchId: input.dispatchId,
 			runLogs: [redRunLog, greenRunLog],
 			maxVerifierRerunMs: input.maxVerifierRerunMs,
 		},

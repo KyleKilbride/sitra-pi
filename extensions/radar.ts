@@ -392,7 +392,7 @@ function collectRuns(
 		.sort()
 		.reverse()
 		.slice(0, 30);
-	const runs = files.map((file): RunSummary => {
+	const runs = files.flatMap((file): RunSummary[] => {
 		try {
 			const full = join(dir, file);
 			const firstLine = readFirstLine(full);
@@ -406,7 +406,7 @@ function collectRuns(
 					? "passed"
 					: "failed"
 				: unfinishedRunState(header, mtimeMs, nowMs, pidAlive);
-			return {
+			return [{
 				id: full,
 				label,
 				state,
@@ -418,18 +418,18 @@ function collectRuns(
 				done: status.done,
 				...(status.exitCode !== undefined ? { exitCode: status.exitCode } : {}),
 				updatedAt: new Date(mtimeMs).toISOString(),
-			};
+			}];
 		} catch (error) {
+			if ((error as { code?: unknown }).code === "ENOENT") return [];
 			const full = join(dir, file);
-			const mtimeMs = statSync(full).mtimeMs;
-			return {
+			return [{
 				id: full,
 				label: file.replace(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-/, "").replace(/\.log$/, ""),
 				state: "unknown",
 				tail: `Run log error: ${String(error)}`,
 				done: false,
-				updatedAt: new Date(mtimeMs).toISOString(),
-			};
+				updatedAt: new Date(nowMs).toISOString(),
+			}];
 		}
 	});
 	// Live runs first so "who is running what" is the top of the list; unknowns stay visible just below them.

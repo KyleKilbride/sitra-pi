@@ -523,6 +523,7 @@ describe("build and verify slice", () => {
 			testHashes,
 			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
 			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+			dispatchId: "dispatch",
 			maxVerifierRerunMs: 120_000,
 		});
 		expect(result.state.stage).toBe("verify");
@@ -561,6 +562,7 @@ describe("build and verify slice", () => {
 				testHashes,
 				redRun,
 				greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+				dispatchId: "dispatch",
 				maxVerifierRerunMs: 120_000,
 			});
 			expect(result.state.stage).toBe("blocked");
@@ -578,6 +580,7 @@ describe("build and verify slice", () => {
 			testHashes,
 			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
 			greenRun: run({ log: "/tmp/green.log", exitCode: 0, commit: "impl-head" }),
+			dispatchId: "dispatch",
 			maxVerifierRerunMs: 120_000,
 		});
 		expect(result.state.stage).toBe("verify");
@@ -593,6 +596,7 @@ describe("build and verify slice", () => {
 			testHashes: [],
 			redRun: run({ log: "/tmp/red.log", exitCode: 1, testHashes: [] }),
 			greenRun: run({ log: "/tmp/green.log", exitCode: 0, testHashes: [] }),
+			dispatchId: "dispatch",
 			maxVerifierRerunMs: 120_000,
 		});
 		expect(empty.state.stage).toBe("blocked");
@@ -613,6 +617,7 @@ describe("build and verify slice", () => {
 				exitCode: 0,
 				testHashes: [{ file: "test/not-agreed.test.ts", sha256: "hash" }],
 			}),
+			dispatchId: "dispatch",
 			maxVerifierRerunMs: 120_000,
 		});
 		expect(unagreed.state.stage).toBe("blocked");
@@ -628,6 +633,7 @@ describe("build and verify slice", () => {
 			testHashes,
 			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
 			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+			dispatchId: "dispatch",
 			maxVerifierRerunMs: 120_000,
 		}).state;
 		expect(staleReason(state, { ...context, testHashes })).toBeUndefined();
@@ -647,6 +653,7 @@ describe("build and verify slice", () => {
 			testHashes,
 			redRun: undefined,
 			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+			dispatchId: "dispatch",
 			maxVerifierRerunMs: 120_000,
 		}).state;
 		expect(blocked.stage).toBe("blocked");
@@ -687,6 +694,7 @@ describe("build and verify slice", () => {
 			testHashes,
 			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
 			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+			dispatchId: "dispatch",
 			maxVerifierRerunMs: 120_000,
 		}).state;
 		const passed = applyVerifierReport(
@@ -767,6 +775,7 @@ describe("build and verify slice", () => {
 			testHashes,
 			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
 			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+			dispatchId: "dispatch",
 			maxVerifierRerunMs: 120_000,
 		}).state;
 		const result = applyVerifierReport(
@@ -823,6 +832,7 @@ describe("build and verify slice", () => {
 			testHashes,
 			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
 			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+			dispatchId: "dispatch",
 			maxVerifierRerunMs: 120_000,
 		}).state;
 		const blocked = blockForStaleState(state, {
@@ -841,6 +851,7 @@ describe("build and verify slice", () => {
 			testHashes,
 			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
 			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+			dispatchId: "dispatch",
 			maxVerifierRerunMs: 120_000,
 		}).state;
 		expect(
