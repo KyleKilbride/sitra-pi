@@ -19,7 +19,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { shellQuote } from "./runs.ts";
 
 export type SessionRole = "lead" | "teammate" | "tower";
@@ -271,6 +271,41 @@ export function gitBranch(cwd: string): string | undefined {
 	}
 }
 
+function gitDirFor(cwd: string): string | undefined {
+	let dir = resolve(cwd);
+	while (true) {
+		const dotGit = join(dir, ".git");
+		try {
+			const stat = statSync(dotGit);
+			if (stat.isDirectory()) return dotGit;
+			if (stat.isFile()) {
+				const text = readFileSync(dotGit, "utf8").trim();
+				if (!text.startsWith("gitdir:")) return undefined;
+				const raw = text.slice("gitdir:".length).trim();
+				if (!raw) return undefined;
+				return isAbsolute(raw) ? raw : resolve(dir, raw);
+			}
+		} catch {}
+		const parent = dirname(dir);
+		if (parent === dir) return undefined;
+		dir = parent;
+	}
+}
+
+export function readGitHeadBranch(cwd: string): string | undefined {
+	const gitDir = gitDirFor(cwd);
+	if (!gitDir) return undefined;
+	try {
+		const head = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
+		if (!head.startsWith("ref: ")) return undefined;
+		const ref = head.slice("ref: ".length).trim();
+		const prefix = "refs/heads/";
+		return ref.startsWith(prefix) ? ref.slice(prefix.length) || undefined : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 export function writeSession(profileDir: string, record: SessionRecord): void {
 	const dir = sessionsDir(profileDir);
 	mkdirSync(dir, { recursive: true });
@@ -513,44 +548,49 @@ export function createTailReader(
 	};
 }
 
+export function transcriptItemFromEntry(entry: unknown): TranscriptItem | undefined {
+	const value = entry as {
+		type?: string;
+		content?: unknown;
+		message?: {
+			role?: string;
+			toolName?: string;
+			isError?: boolean;
+			content?: unknown;
+		};
+	};
+	if (value.type === "custom_message" && value.content) {
+		const text = extractText(value.content);
+		return text ? { role: "custom", text } : undefined;
+	}
+	if (value.type !== "message" || !value.message) return undefined;
+	const msg = value.message;
+	if (msg.role === "user") {
+		const text = extractText(msg.content);
+		return text ? { role: "user", text } : undefined;
+	}
+	if (msg.role === "assistant") {
+		const text = extractText(msg.content);
+		return text ? { role: "assistant", text } : undefined;
+	}
+	if (msg.role === "toolResult") {
+		const tool = msg.toolName ?? "tool";
+		if (msg.isError) {
+			const text = extractText(msg.content).split("\n")[0] || "failed";
+			return { role: "tool", text: `${tool} error: ${text}`, error: true };
+		}
+		return { role: "tool", text: `${tool} ok`, error: false };
+	}
+	return undefined;
+}
+
 export function readTranscriptTail(jsonl: string, maxItems = 8): TranscriptItem[] {
 	const items: TranscriptItem[] = [];
 	for (const line of jsonl.split("\n")) {
 		if (!line.trim()) continue;
 		try {
-			const entry = JSON.parse(line) as {
-				type?: string;
-				customType?: string;
-				content?: unknown;
-				message?: {
-					role?: string;
-					toolName?: string;
-					isError?: boolean;
-					content?: unknown;
-				};
-			};
-			if (entry.type === "custom_message" && entry.content) {
-				const text = extractText(entry.content);
-				if (text) items.push({ role: "custom", text });
-				continue;
-			}
-			if (entry.type !== "message" || !entry.message) continue;
-			const msg = entry.message;
-			if (msg.role === "user") {
-				const text = extractText(msg.content);
-				if (text) items.push({ role: "user", text });
-			} else if (msg.role === "assistant") {
-				const text = extractText(msg.content);
-				if (text) items.push({ role: "assistant", text });
-			} else if (msg.role === "toolResult") {
-				const tool = msg.toolName ?? "tool";
-				if (msg.isError) {
-					const text = extractText(msg.content).split("\n")[0] || "failed";
-					items.push({ role: "tool", text: `${tool} error: ${text}`, error: true });
-				} else {
-					items.push({ role: "tool", text: `${tool} ok`, error: false });
-				}
-			}
+			const item = transcriptItemFromEntry(JSON.parse(line));
+			if (item) items.push(item);
 		} catch {
 			// Skip malformed lines.
 		}

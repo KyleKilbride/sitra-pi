@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +14,7 @@ import {
 	renderRadarFrame,
 	visibleWidth,
 } from "../extensions/radar.ts";
+import { createPullRequestScheduler } from "../extensions/radar-runtime.ts";
 import { readTowerSummary } from "../extensions/radar-store.ts";
 import { EXIT_MARKER } from "../extensions/runs.ts";
 import { type SessionRecord, writeSession } from "../extensions/sessions.ts";
@@ -438,40 +440,93 @@ describe("radar refresh cost", () => {
 		expect(snap.workers[0]?.lastLine).toBe("Only the tail was read.");
 	});
 
-	test("does not run gh while collecting a refresh snapshot", () => {
+	test("pull request scheduler loads outside refreshes, serializes, surfaces failures and aborts cleanup", async () => {
+		let now = 1_000;
+		let calls = 0;
+		let firstResolve:
+			| ((value: {
+					items: { id: string; project: string; number: number; title: string }[];
+					notices: string[];
+			  }) => void)
+			| undefined;
+		let aborts = 0;
+		const scheduler = createPullRequestScheduler(
+			(_repos, signal) => {
+				calls++;
+				signal.addEventListener("abort", () => aborts++, { once: true });
+				if (calls === 1) {
+					return new Promise((resolve) => {
+						firstResolve = resolve;
+					});
+				}
+				if (calls === 2)
+					return Promise.resolve({ items: [], notices: ["Open PRs unavailable for kept; gh pr list failed."] });
+				return new Promise(() => {});
+			},
+			{ intervalMs: 60_000, now: () => now },
+		);
+
+		scheduler.retain(["/repos/old"]);
+		expect(calls).toBe(0);
+		expect(scheduler.request(["/repos/old"])).toBe(true);
+		expect(scheduler.request(["/repos/old"])).toBe(false);
+		expect(calls).toBe(1);
+
+		scheduler.retain(["/repos/kept"]);
+		firstResolve?.({ items: [{ id: "old#1", project: "old", number: 1, title: "stale" }], notices: [] });
+		await scheduler.whenIdle();
+		expect(scheduler.snapshot().items).toEqual([]);
+
+		now += 60_001;
+		expect(scheduler.request(["/repos/kept"])).toBe(true);
+		await scheduler.whenIdle();
+		expect(scheduler.snapshot().notices).toEqual(["Open PRs unavailable for kept; gh pr list failed."]);
+
+		now += 60_001;
+		expect(scheduler.request(["/repos/kept"])).toBe(true);
+		scheduler.cleanup();
+		expect(aborts).toBeGreaterThan(0);
+	});
+
+	test("herdr-only workspace rereads the branch after checkout changes", () => {
 		const profile = tmp();
 		const repo = join(profile, "repo");
 		const bin = join(profile, "bin");
-		const marker = join(profile, "gh-called");
 		mkdirSync(repo, { recursive: true });
+		execFileSync("git", ["init", "-q"], { cwd: repo });
+		execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"], {
+			cwd: repo,
+		});
+		execFileSync("git", ["checkout", "-q", "-b", "one"], { cwd: repo });
 		mkdirSync(bin, { recursive: true });
 		writeFileSync(
-			join(bin, "gh"),
+			join(bin, "herdr"),
 			`#!/bin/sh
-echo called > "${marker}"
-echo '[]'
+if [ "$1" = "workspace" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"workspaces":[{"workspace_id":"wB","number":1,"label":"[1] Branch watcher","active_tab_id":"wB:t1","agent_status":"idle"}]}}'
+elif [ "$1" = "tab" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"tabs":[{"tab_id":"wB:t1","label":"[1] repo › pi"}]}}'
+elif [ "$1" = "agent" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"agents":[{"workspace_id":"wB","tab_id":"wB:t1","pane_id":"wB:p1","agent":"pi","agent_status":"idle","cwd":"${repo}"}]}}'
+fi
 `,
 		);
-		chmodSync(join(bin, "gh"), 0o755);
-		writeSession(profile, {
-			id: "lead-gh",
-			role: "lead",
-			pid: process.pid,
-			cwd: repo,
-			repo,
-			status: "idle",
-			startedAt: "2026-10-16T10:00:00.000Z",
-			updatedAt: "2026-10-16T10:00:00.000Z",
-		});
-		const savedPath = process.env.PATH;
+		chmodSync(join(bin, "herdr"), 0o755);
+		const folders = createFolderLookupCache();
+		const savedEnv = { HERDR_ENV: process.env.HERDR_ENV, PATH: process.env.PATH };
+		process.env.HERDR_ENV = "1";
 		process.env.PATH = `${bin}:${process.env.PATH}`;
 		try {
-			collectRadarSnapshot(profile, {
-				pullRequests: { items: [], notices: [] },
-			});
-			expect(() => readFileSync(marker, "utf8")).toThrow();
+			let snap = collectRadarSnapshot(profile, { includeHerdr: true, folders });
+			expect(snap.workers[0]?.lead.branch).toBe("one");
+			execFileSync("git", ["checkout", "-q", "-b", "two"], { cwd: repo });
+			snap = collectRadarSnapshot(profile, { includeHerdr: true, folders });
+			expect(snap.workers[0]?.lead.branch).toBe("two");
 		} finally {
-			process.env.PATH = savedPath;
+			for (const [key, value] of Object.entries(savedEnv)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
 		}
 	});
 
@@ -494,10 +549,6 @@ echo '[]'
 			mainCheckout: (cwd) => {
 				gitCalls++;
 				return cwd;
-			},
-			gitBranch: () => {
-				gitCalls++;
-				return "main";
 			},
 		});
 		let snap = collectRadarSnapshot(profile, { folders });

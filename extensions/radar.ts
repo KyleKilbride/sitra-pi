@@ -10,15 +10,15 @@ import { readRun, readRunHeader } from "./runs.ts";
 import {
 	createTailReader,
 	detectSessionAlerts,
-	extractText,
-	gitBranch,
 	groupWorkerSessions,
 	listSessions,
 	mainCheckout,
+	readGitHeadBranch,
 	readLastLines,
 	type SessionAlert,
 	type SessionRecord,
 	type TranscriptItem,
+	transcriptItemFromEntry,
 } from "./sessions.ts";
 
 export type VisualState = "working" | "waiting_for_user" | "error_loop" | "idle" | "stopped";
@@ -194,19 +194,21 @@ function cleanMarkdown(text: string): string {
 export const TRANSCRIPT_TAIL_LINES = 200;
 
 export interface FolderLookupCache {
-	values: Map<string, { mainCheckout?: string; branch?: string | null }>;
+	values: Map<string, { mainCheckout?: string }>;
 	mainCheckout(cwd: string): string;
-	gitBranch(cwd: string): string | undefined;
+	retain(folders: ReadonlySet<string>): void;
 }
 
-export function createFolderLookupCache(lookups?: {
-	mainCheckout?(cwd: string): string;
-	gitBranch?(cwd: string): string | undefined;
-}): FolderLookupCache {
+export function createFolderLookupCache(lookups?: { mainCheckout?(cwd: string): string }): FolderLookupCache {
+	const values = new Map<string, { mainCheckout?: string }>();
 	return {
-		values: new Map(),
+		values,
 		mainCheckout: lookups?.mainCheckout ?? mainCheckout,
-		gitBranch: lookups?.gitBranch ?? gitBranch,
+		retain(folders) {
+			for (const folder of values.keys()) {
+				if (!folders.has(folder)) values.delete(folder);
+			}
+		},
 	};
 }
 
@@ -216,15 +218,6 @@ function cachedMainCheckout(cwd: string, folders: FolderLookupCache | undefined)
 	if (hit?.mainCheckout) return hit.mainCheckout;
 	const value = folders.mainCheckout(cwd);
 	folders.values.set(cwd, { ...hit, mainCheckout: value });
-	return value;
-}
-
-function cachedGitBranch(cwd: string, folders: FolderLookupCache | undefined): string | undefined {
-	if (!folders) return gitBranch(cwd);
-	const hit = folders.values.get(cwd);
-	if (hit && "branch" in hit) return hit.branch ?? undefined;
-	const value = folders.gitBranch(cwd);
-	folders.values.set(cwd, { ...hit, branch: value ?? null });
 	return value;
 }
 
@@ -298,46 +291,10 @@ function parseTranscriptItems(jsonl: string, parseJson: JsonParse): unknown[] {
 	return items;
 }
 
-function transcriptItem(entry: unknown): TranscriptItem | undefined {
-	const value = entry as {
-		type?: string;
-		content?: unknown;
-		message?: {
-			role?: string;
-			toolName?: string;
-			isError?: boolean;
-			content?: unknown;
-		};
-	};
-	if (value.type === "custom_message" && value.content) {
-		const text = extractText(value.content);
-		return text ? { role: "custom", text } : undefined;
-	}
-	if (value.type !== "message" || !value.message) return undefined;
-	const msg = value.message;
-	if (msg.role === "user") {
-		const text = extractText(msg.content);
-		return text ? { role: "user", text } : undefined;
-	}
-	if (msg.role === "assistant") {
-		const text = extractText(msg.content);
-		return text ? { role: "assistant", text } : undefined;
-	}
-	if (msg.role === "toolResult") {
-		const tool = msg.toolName ?? "tool";
-		if (msg.isError) {
-			const text = extractText(msg.content).split("\n")[0] || "failed";
-			return { role: "tool", text: `${tool} error: ${text}`, error: true };
-		}
-		return { role: "tool", text: `${tool} ok`, error: false };
-	}
-	return undefined;
-}
-
 function transcriptItemsFromParsed(items: readonly unknown[], maxItems: number): TranscriptItem[] {
 	const out: TranscriptItem[] = [];
 	for (const item of items) {
-		const parsed = transcriptItem(item);
+		const parsed = transcriptItemFromEntry(item);
 		if (parsed) out.push(parsed);
 	}
 	return out.slice(-maxItems);
@@ -426,9 +383,11 @@ function readTranscriptInsightsFromParsed(
 export function createTranscriptCache(
 	readLines: (file: string) => string,
 	parseJson: JsonParse = JSON.parse,
+	onRead?: (file: string) => void,
 ): TranscriptCache {
 	const cache = new Map<string, ParsedTranscript>();
 	const parsedFor = (file: string): ParsedTranscript | undefined => {
+		onRead?.(file);
 		let size: number;
 		let mtimeMs: number;
 		try {
@@ -639,6 +598,8 @@ export interface PullRequestSnapshot {
 	notices: string[];
 }
 
+const PULL_REQUEST_CONCURRENCY = 4;
+
 function ghPrList(repo: string, signal?: AbortSignal): Promise<string> {
 	return new Promise((resolve, reject) => {
 		execFile(
@@ -657,9 +618,13 @@ export async function loadPullRequests(repos: readonly string[], signal?: AbortS
 	const items: PullRequestSummary[] = [];
 	const notices: string[] = [];
 	const seenRepos = new Set<string>();
-	for (const repo of repos) {
-		if (seenRepos.has(repo) || !existsSync(repo)) continue;
+	const uniqueRepos = repos.filter((repo) => {
+		if (seenRepos.has(repo) || !existsSync(repo)) return false;
 		seenRepos.add(repo);
+		return true;
+	});
+	let next = 0;
+	const loadOne = async (repo: string) => {
 		const project = basename(repo);
 		try {
 			const raw = await ghPrList(repo, signal);
@@ -685,7 +650,15 @@ export async function loadPullRequests(repos: readonly string[], signal?: AbortS
 		} catch {
 			notices.push(`Open PRs unavailable for ${project}; gh pr list failed.`);
 		}
-	}
+	};
+	await Promise.all(
+		Array.from({ length: Math.min(PULL_REQUEST_CONCURRENCY, uniqueRepos.length) }, async () => {
+			while (next < uniqueRepos.length) {
+				const repo = uniqueRepos[next++];
+				if (repo) await loadOne(repo);
+			}
+		}),
+	);
 	return { items, notices };
 }
 
@@ -884,7 +857,7 @@ export function collectRadarSnapshot(
 						: matchedGroup?.lead.status === "stopped"
 							? "stopped"
 							: "idle";
-			const branch = matchedGroup ? undefined : cachedGitBranch(cwd, options?.folders);
+			const branch = matchedGroup ? undefined : readGitHeadBranch(cwd);
 			const lead: SessionRecord = matchedGroup?.lead
 				? {
 						...matchedGroup.lead,
