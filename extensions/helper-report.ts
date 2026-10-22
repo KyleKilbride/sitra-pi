@@ -24,6 +24,8 @@ export const ReworkClass = Type.Union([
 const QuestionSource = Type.Object(
 	{
 		id: Type.String({ minLength: 1 }),
+		sourceId: Type.Optional(Type.String({ minLength: 1 })),
+		decision: Type.Optional(Type.Union([Type.Literal("person"), Type.Literal("engineering")])),
 		text: Type.String({ minLength: 1 }),
 		recommended: Type.String({ minLength: 1 }),
 		dependsOn: Type.Array(Type.String()),
@@ -34,6 +36,8 @@ const QuestionSource = Type.Object(
 export const Question = Type.Object(
 	{
 		id: Type.String({ minLength: 1 }),
+		sourceId: Type.Optional(Type.String({ minLength: 1 })),
+		decision: Type.Optional(Type.Union([Type.Literal("person"), Type.Literal("engineering")])),
 		text: Type.String({ minLength: 1 }),
 		recommended: Type.String({ minLength: 1 }),
 		dependsOn: Type.Array(Type.String()),

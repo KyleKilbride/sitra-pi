@@ -802,6 +802,42 @@ describe("Pi wiring", () => {
 		expect(status?.content[0]?.text).toContain("intent-advisor: not started");
 	});
 
+	test("loop_status shows advise cap assumptions visibly", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { tools } = fakePi();
+		const { cwd, head } = gitWorktree();
+		const state: LoopState = {
+			...createLoopState({
+				worktree: cwd,
+				branch: "feature",
+				baseRef: "origin/main",
+				baseHead: head,
+				goal: "Add the runner",
+				limits: [],
+				done: [],
+			}),
+			advisorRuns: {
+				intent: {
+					status: "done",
+					summary: "intent done",
+					evidence: [],
+					openQuestions: [],
+					assumptions: [
+						"Advise rerun cap reached; moving on with remaining advisor questions as assumptions:\n- leftover?",
+					],
+				},
+			},
+		};
+		writeLoopStateFile(loopStatePath(profile, cwd, "feature"), state);
+
+		const status = await tools.get("loop_status")?.execute("1", {}, undefined, undefined, ctx(cwd));
+
+		expect(status?.content[0]?.text).toContain("advise assumptions:");
+		expect(status?.content[0]?.text).toContain("Advise rerun cap reached");
+		expect(status?.content[0]?.text).toContain("leftover?");
+	});
+
 	test("advisor intake failure clears started state before redispatch", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);

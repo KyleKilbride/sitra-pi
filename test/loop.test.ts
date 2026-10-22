@@ -16,6 +16,8 @@ import {
 	confirmNewInformation,
 	createLoopState,
 	denyNewInformation,
+	type LoopQuestion,
+	type LoopState,
 	nextLoopEffects,
 	recordBuildEvidence,
 	reworkProposal,
@@ -134,6 +136,18 @@ const report = (role: HelperReport["role"], extra: Partial<HelperReport> = {}): 
 						: undefined,
 	...extra,
 });
+
+function questions(prefix: string, count: number): LoopQuestion[] {
+	return Array.from({ length: count }, (_, index) => {
+		const number = index + 1;
+		return {
+			id: `${prefix}-${number}`,
+			text: `${prefix} question ${number}?`,
+			recommended: `Answer ${prefix} ${number}.`,
+			dependsOn: [],
+		};
+	});
+}
 
 describe("loop schema and start", () => {
 	test("starts only from an explicit event and dispatches intent/codebase in parallel", () => {
@@ -259,44 +273,63 @@ describe("advisor transition and ordering", () => {
 		expect(task).toContain("Yes, write red first.");
 	});
 
-	test("groups several ready questions into one person question", () => {
+	test("caps each advisor ask round at three questions and leaves the rest open for later rounds", () => {
 		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
 		state = applyAdvisorReport(
 			state,
 			report("intent", {
 				details: {
-					questions: [
-						{
-							id: "q1",
-							text: "Should the runner ask before build?",
-							recommended: "Yes, ask before build.",
-							dependsOn: [],
-						},
-						{
-							id: "q2",
-							text: "Which command starts the graph?",
-							recommended: "Use /loop start.",
-							dependsOn: [],
-						},
-					],
+					questions: questions("intent", 8),
 					doneCandidates: [],
 					ambiguities: [],
 				},
 			}),
 			{ outputTokens: 1, contextTokens: 0 },
 		).state;
-		state = applyAdvisorReport(state, report("codebase", { openQuestions: ["Should state live in the profile?"] }), {
+		const codebaseQuestions = questions("codebase", 5).map((question) => question.text);
+		state = applyAdvisorReport(state, report("codebase", { openQuestions: codebaseQuestions }), {
 			outputTokens: 2,
 			contextTokens: 0,
 		}).state;
 		expect(state.stage).toBe("needs-person");
 		expect(state.questions).toHaveLength(1);
-		expect(state.questions[0]?.text).toContain("Should the runner ask before build?");
-		expect(state.questions[0]?.text).toContain("Which command starts the graph?");
-		expect(state.questions[0]?.text).toContain("Should state live in the profile?");
+		expect(state.questions[0]?.sourceQuestions).toHaveLength(3);
+		expect(state.questions[0]?.text).toContain("intent question 1?");
+		expect(state.questions[0]?.text).toContain("intent question 2?");
+		expect(state.questions[0]?.text).toContain("intent question 3?");
+		expect(state.questions[0]?.text).not.toContain("intent question 4?");
+		expect(state.advisorRuns.intent?.openQuestions).toHaveLength(8);
+		expect(state.advisorRuns.codebase?.openQuestions).toHaveLength(5);
+
+		state = answerLoopQuestion(state, { answer: "Answer the first three.", current: context }).state;
+		state = applyAdvisorReport(
+			state,
+			report("intent", {
+				details: {
+					questions: questions("intent", 8),
+					doneCandidates: [],
+					ambiguities: [],
+				},
+			}),
+			{ outputTokens: 1, contextTokens: 0 },
+		).state;
+		state = applyAdvisorReport(state, report("codebase", { openQuestions: codebaseQuestions }), {
+			outputTokens: 2,
+			contextTokens: 0,
+		}).state;
+
+		expect(state.stage).toBe("needs-person");
+		expect(state.questions).toHaveLength(2);
+		expect(state.questions[1]?.sourceQuestions).toHaveLength(3);
+		expect(state.questions[1]?.text).toContain("intent question 4?");
+		expect(state.questions[1]?.text).toContain("intent question 5?");
+		expect(state.questions[1]?.text).toContain("intent question 6?");
+		expect(state.questions[1]?.text).not.toContain("intent question 1?");
+		expect(state.advisorRuns.intent?.openQuestions).toHaveLength(8);
+		expect(state.advisorRuns.codebase?.openQuestions).toHaveLength(5);
 	});
 
-	test("dedupes answered advisor questions by normalized text but not advisor-chosen id alone", () => {
+	test("ignores a settled advisor question re-reported with the same structured id", () => {
 		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
 		state = applyAdvisorReport(
 			state,
@@ -329,7 +362,7 @@ describe("advisor transition and ordering", () => {
 						{
 							id: "q-existing",
 							text: "Should deletes be soft or hard?",
-							recommended: "Use soft deletes.",
+							recommended: "This reuses an already-settled id and should be ignored.",
 							dependsOn: [],
 						},
 						{
@@ -357,12 +390,55 @@ describe("advisor transition and ordering", () => {
 		expect(state.questions).toHaveLength(2);
 		expect(state.questions[1]?.id).not.toBe("advisor-questions");
 		expect(state.questions[1]?.id).not.toBe(firstQuestionId);
-		expect(state.questions[1]?.text).toContain("Should deletes be soft or hard?");
+		expect(state.questions[1]?.text).not.toContain("Should deletes be soft or hard?");
 		expect(state.questions[1]?.text).not.toContain("Should the CLI command be");
 		expect(state.questions[1]?.text.match(/Should the runner keep state in the profile/g)).toHaveLength(1);
 	});
 
-	test("asks a rerun advisor question that reuses q1 for new text", () => {
+	test("asks a dependent follow-up only after its parent question is answered", () => {
+		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+		const dependentQuestions: LoopQuestion[] = [
+			{
+				id: "q1",
+				text: "Should the loop use the existing slash command?",
+				recommended: "Yes, keep /loop start.",
+				dependsOn: [],
+			},
+			{
+				id: "q2",
+				text: "Should the follow-up copy mention that command?",
+				recommended: "Yes, mention the chosen command.",
+				dependsOn: ["q1"],
+			},
+		];
+		const reportDependentQuestions = () =>
+			report("intent", {
+				details: {
+					questions: dependentQuestions,
+					doneCandidates: [],
+					ambiguities: [],
+				},
+			});
+
+		state = applyAdvisorReport(state, reportDependentQuestions(), { outputTokens: 1, contextTokens: 0 }).state;
+		state = applyAdvisorReport(state, report("codebase"), { outputTokens: 1, contextTokens: 0 }).state;
+
+		expect(state.stage).toBe("needs-person");
+		expect(state.questions[0]?.sourceQuestions).toHaveLength(1);
+		expect(state.questions[0]?.text).toContain("Should the loop use the existing slash command?");
+		expect(state.questions[0]?.text).not.toContain("Should the follow-up copy mention that command?");
+
+		state = answerLoopQuestion(state, { answer: "Yes, keep /loop start.", current: context }).state;
+		state = applyAdvisorReport(state, reportDependentQuestions(), { outputTokens: 1, contextTokens: 0 }).state;
+
+		expect(state.stage).toBe("needs-person");
+		expect(state.questions).toHaveLength(2);
+		expect(state.questions[1]?.sourceQuestions).toHaveLength(1);
+		expect(state.questions[1]?.text).toContain("Should the follow-up copy mention that command?");
+		expect(state.questions[1]?.text).not.toContain("Should the loop use the existing slash command?");
+	});
+
+	test("does not ask a rerun advisor question that reuses a settled id for new text", () => {
 		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
 		state = applyAdvisorReport(
 			state,
@@ -404,12 +480,12 @@ describe("advisor transition and ordering", () => {
 			{ outputTokens: 1, contextTokens: 0 },
 		).state;
 
-		expect(state.stage).toBe("needs-person");
-		expect(state.questions.at(-1)?.text).toContain("Should deletes be soft or hard?");
-		expect(state.questions.at(-1)?.text).not.toContain("Which database?");
+		expect(state.stage).toBe("advise");
+		expect(state.questions).toHaveLength(1);
+		expect(nextLoopEffects(state)).toMatchObject([{ type: "dispatch-advisors", roles: ["test-design"] }]);
 	});
 
-	test("asks new text even when an advisor reuses a runner-looking id", () => {
+	test("ignores new text when an advisor reuses a settled runner-looking id", () => {
 		for (const reusedId of ["intent-open-x", "advisor-questions-x"]) {
 			let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
 			state = applyAdvisorReport(
@@ -452,9 +528,134 @@ describe("advisor transition and ordering", () => {
 				{ outputTokens: 1, contextTokens: 0 },
 			).state;
 
-			expect(state.stage).toBe("needs-person");
-			expect(state.questions.at(-1)?.text).toContain("Should deletes be soft or hard?");
+			expect(state.stage).toBe("advise");
+			expect(state.questions).toHaveLength(1);
+			expect(nextLoopEffects(state)).toMatchObject([{ type: "dispatch-advisors", roles: ["test-design"] }]);
 		}
+	});
+
+	test("drops empty advisor open-question items because there is no question to answer", () => {
+		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+		state = applyAdvisorReport(
+			state,
+			report("intent", {
+				details: {
+					questions: [
+						{
+							id: "q-product",
+							text: "Should the product show a retry button?",
+							recommended: "Yes, show it.",
+							dependsOn: [],
+						},
+					],
+					doneCandidates: [],
+					ambiguities: [],
+				},
+				openQuestions: ["", "   "],
+			}),
+			{ outputTokens: 1, contextTokens: 0 },
+		).state;
+		state = applyAdvisorReport(state, report("codebase", { openQuestions: [""] }), {
+			outputTokens: 1,
+			contextTokens: 0,
+		}).state;
+
+		expect(state.stage).toBe("needs-person");
+		expect(state.questions[0]?.sourceQuestions).toHaveLength(1);
+		expect(state.questions[0]?.text).toContain("Should the product show a retry button?");
+		expect(state.questions[0]?.text).not.toContain("\n2. ");
+	});
+
+	test("uses stable runner question ids across advisor reruns", () => {
+		const runWithAdvisorId = (advisorId: string) => {
+			let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+			state = applyAdvisorReport(
+				state,
+				report("intent", {
+					details: {
+						questions: [
+							{
+								id: advisorId,
+								text: "Which launch behavior should ship?",
+								recommended: "Ship the existing behavior.",
+								dependsOn: [],
+							},
+						],
+						doneCandidates: [],
+						ambiguities: [],
+					},
+				}),
+				{ outputTokens: 1, contextTokens: 0 },
+			).state;
+			return applyAdvisorReport(state, report("codebase"), { outputTokens: 1, contextTokens: 0 }).state;
+		};
+
+		const first = runWithAdvisorId("first-advisor-id");
+		const second = runWithAdvisorId("changed-advisor-id");
+
+		expect(first.questions[0]?.sourceQuestions?.[0]?.id).toBe(second.questions[0]?.sourceQuestions?.[0]?.id);
+		expect(first.questions[0]?.id).toBe(second.questions[0]?.id);
+	});
+
+	test("advise rerun cap moves on with engineering questions recorded as visible assumptions", () => {
+		let state: LoopState = {
+			...createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] }),
+			adviseReruns: 3,
+		};
+		state = applyAdvisorReport(state, report("intent"), { outputTokens: 1, contextTokens: 0 }).state;
+		const capped = applyAdvisorReport(
+			state,
+			report("codebase", { openQuestions: ["Which repository helper should own the warning?"] }),
+			{ outputTokens: 1, contextTokens: 0 },
+		);
+		state = capped.state;
+
+		expect(state.stage).toBe("advise");
+		expect(capped.effects).toMatchObject([{ type: "dispatch-advisors", roles: ["test-design"] }]);
+		expect(state.questions).toHaveLength(0);
+		const assumptions = state.advisorRuns.codebase?.assumptions.join("\n") ?? "";
+		expect(assumptions).toContain("Advise rerun cap reached");
+		expect(assumptions).toContain("Which repository helper should own the warning?");
+	});
+
+	test("advise rerun cap still asks open intent decisions and records only engineering leftovers as assumptions", () => {
+		let state: LoopState = {
+			...createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] }),
+			adviseReruns: 3,
+		};
+		state = applyAdvisorReport(
+			state,
+			report("intent", {
+				details: {
+					questions: [
+						{
+							id: "q-person",
+							text: "Should the product show the warning before delete?",
+							recommended: "Yes, show it before delete.",
+							dependsOn: [],
+						},
+					],
+					doneCandidates: [],
+					ambiguities: [],
+				},
+			}),
+			{ outputTokens: 1, contextTokens: 0 },
+		).state;
+		state = applyAdvisorReport(
+			state,
+			report("codebase", { openQuestions: ["Which repository helper should own the delete warning?"] }),
+			{ outputTokens: 1, contextTokens: 0 },
+		).state;
+
+		expect(state.stage).toBe("needs-person");
+		expect(state.questions.at(-1)?.text).toContain("Should the product show the warning before delete?");
+		expect(state.questions.at(-1)?.text).not.toContain("Which repository helper should own the delete warning?");
+		expect(state.advisorRuns.intent?.assumptions.join("\n") ?? "").not.toContain(
+			"Should the product show the warning before delete?",
+		);
+		const codebaseAssumptions = state.advisorRuns.codebase?.assumptions.join("\n") ?? "";
+		expect(codebaseAssumptions).toContain("Advise rerun cap reached");
+		expect(codebaseAssumptions).toContain("Which repository helper should own the delete warning?");
 	});
 
 	test("repeated blocked advisor summaries still block after an answer", () => {

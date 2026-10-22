@@ -90,7 +90,7 @@ function writeRunLog(
 	);
 }
 
-test("loop runner e2e: explicit start to advisor reports, person answer, plan, architecture, and brief-approved", async () => {
+test("loop runner e2e: explicit start to advisor question, person answer, and advisor rerun", async () => {
 	const cwd = gitWorktree();
 	const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-e2e-profile-")));
 	const records: { type?: string; message?: { role?: string; content?: unknown; customType?: string } }[] = [];
@@ -106,8 +106,7 @@ test("loop runner e2e: explicit start to advisor reports, person answer, plan, a
 
 	await new Promise<void>((resolve, reject) => {
 		let answered = false;
-		let planned = false;
-		let approved = false;
+		let continued = false;
 		const fail = setTimeout(() => {
 			child.kill();
 			reject(new Error(`timed out\nrecords:\n${JSON.stringify(records, null, 2)}\nstderr:\n${stderr}`));
@@ -146,12 +145,6 @@ test("loop runner e2e: explicit start to advisor reports, person answer, plan, a
 												recommended: "Yes, use /loop start.",
 												dependsOn: [],
 											},
-											{
-												id: "q-approval",
-												text: "Ask for approval before build?",
-												recommended: "Yes, freeze the brief first.",
-												dependsOn: [],
-											},
 										],
 										doneCandidates: ["Brief approved."],
 										ambiguities: [],
@@ -159,35 +152,7 @@ test("loop runner e2e: explicit start to advisor reports, person answer, plan, a
 								),
 								helper(
 									"codebase-advisor",
-									helperReport(
-										"codebase",
-										"Codebase maps to extensions.",
-										{
-											files: ["extensions/loop.ts"],
-											existingTests: [],
-											facts: [],
-											boundaries: [],
-											owners: [],
-										},
-										["Should state live in the profile?"],
-									),
-								),
-							],
-						},
-						{
-							when: "Start intent-advisor",
-							messages: [
-								helper(
-									"intent-advisor",
-									helperReport("intent", "Intent now clear.", {
-										questions: [],
-										doneCandidates: ["Brief approved."],
-										ambiguities: [],
-									}),
-								),
-								helper(
-									"codebase-advisor",
-									helperReport("codebase", "Codebase answer incorporated.", {
+									helperReport("codebase", "Codebase maps to extensions.", {
 										files: ["extensions/loop.ts"],
 										existingTests: [],
 										facts: [],
@@ -247,32 +212,26 @@ test("loop runner e2e: explicit start to advisor reports, person answer, plan, a
 				const text = JSON.stringify(record);
 				if (
 					!answered &&
+					record.type === "message_end" &&
 					text.includes("LOOPS needs one answer") &&
-					text.includes("Use /loop start?") &&
-					text.includes("Should state live in the profile?")
+					text.includes("Use /loop start?")
 				) {
 					answered = true;
 					child.stdin.write(
 						`${JSON.stringify({
 							type: "prompt",
-							message: "/loop answer Yes, use /loop start; yes, ask before build; yes, keep state in the profile.",
+							message: "/loop answer Yes, use /loop start.",
 						})}\n`,
 					);
 				}
-				if (!planned && text.includes("/loop plan <plan>")) {
-					planned = true;
-					child.stdin.write(
-						`${JSON.stringify({
-							type: "prompt",
-							message: "/loop plan Keep transitions pure and Pi wiring thin.",
-						})}\n`,
-					);
-				}
-				if (!approved && text.includes("Architecture review is ready")) {
-					approved = true;
-					child.stdin.write(`${JSON.stringify({ type: "prompt", message: "/loop approve Approved for build." })}\n`);
-				}
-				if (text.includes("brief-approved")) {
+				if (
+					!continued &&
+					record.type === "message_end" &&
+					text.includes("LOOPS runner dispatch for stage advise") &&
+					text.includes("Answers so far:") &&
+					text.includes("Answer: Yes, use /loop start.")
+				) {
+					continued = true;
 					clearTimeout(fail);
 					child.stdin.end();
 				}
@@ -291,10 +250,8 @@ test("loop runner e2e: explicit start to advisor reports, person answer, plan, a
 	});
 
 	expect(JSON.stringify(records)).toContain("intent-advisor");
-	expect(JSON.stringify(records)).toContain("Should state live in the profile?");
-	expect(JSON.stringify(records)).toContain("test-design-advisor");
-	expect(JSON.stringify(records)).toContain("architecture-advisor");
-	expect(JSON.stringify(records)).toContain("brief-approved");
+	expect(JSON.stringify(records)).toContain("LOOPS needs one answer");
+	expect(JSON.stringify(records)).toContain("Yes, use /loop start.");
 }, 75_000);
 
 async function runBuildVerifyE2e(kind: "pass" | "miss") {
