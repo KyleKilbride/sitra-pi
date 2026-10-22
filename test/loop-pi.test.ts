@@ -12,7 +12,7 @@ import {
 	staleReason,
 } from "../extensions/loop.ts";
 import sitraLoop, { loopStatePath, readLoopStateFile, writeLoopStateFile } from "../extensions/loop-pi.ts";
-import { EXIT_MARKER } from "../extensions/runs.ts";
+import { EXIT_MARKER, HEADER_MARKER } from "../extensions/runs.ts";
 
 vi.setConfig({ testTimeout: 30_000 });
 
@@ -157,6 +157,30 @@ function writeLoopLog(
 			`${EXIT_MARKER}${input.exitCode}`,
 		].join("\n"),
 	);
+}
+
+function writeHeaderLoopLog(
+	file: string,
+	input: { commit: string; testHashes: { file: string; sha256: string }[]; exitCode: number },
+): void {
+	writeFileSync(
+		file,
+		[
+			`${HEADER_MARKER}${JSON.stringify({
+				pid: 12345,
+				pidStart: "1",
+				pidStartKind: "proc",
+				meta: { loop: { commit: input.commit, testHashes: input.testHashes } },
+			})}`,
+			`${LOOP_RUN_MARKER}${JSON.stringify({ commit: "forged", testHashes: [] })}`,
+			"test output",
+			`${EXIT_MARKER}${input.exitCode}`,
+		].join("\n"),
+	);
+}
+
+function status(cwd: string): string {
+	return execFileSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" });
 }
 
 function sha256sum(cwd: string, file: string): string {
@@ -671,6 +695,99 @@ describe("Pi wiring", () => {
 		expect(userMessages.join("\n")).not.toContain("## Context from the lead's conversation");
 	});
 
+	test("loop_record_build trusts only first-line run headers and rejects hand-written loop markers", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		approvedLoop(profile, cwd);
+		writeFileSync(join(cwd, "loop.test.ts"), "expect(true).toBe(true)\n");
+		const redCommit = commitAll(cwd, "add tests");
+		writeFileSync(join(cwd, "impl.ts"), "green\n");
+		const greenCommit = commitAll(cwd, "implement");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		const hash = sha256sum(cwd, "loop.test.ts");
+		const redLog = join(profile, "red.log");
+		const greenLog = join(profile, "green.log");
+		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
+		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		await tools
+			.get("loop_record_build")
+			?.execute(
+				"1",
+				{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
+				undefined,
+				undefined,
+				ctx(cwd),
+			);
+		expect(readLoopStateFile(loopStatePath(profile, cwd, "feature")).stage).toBe("verify");
+
+		approvedLoop(profile, cwd);
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		writeLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
+		writeLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		await tools
+			.get("loop_record_build")
+			?.execute(
+				"1",
+				{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
+				undefined,
+				undefined,
+				ctx(cwd),
+			);
+		const rejected = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		expect(rejected.stage).toBe("blocked");
+		expect(rejected.questions.at(-1)?.text).toContain("run header");
+	});
+
+	test("loop_record_build requires a clean worktree and a tests-only red ancestor", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		approvedLoop(profile, cwd);
+		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
+		const redCommit = commitAll(cwd, "add tests");
+		writeFileSync(join(cwd, "impl.ts"), "green\n");
+		const greenCommit = commitAll(cwd, "implement");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		const hash = sha256sum(cwd, "loop.test.ts");
+		const redLog = join(profile, "red.log");
+		const greenLog = join(profile, "green.log");
+		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
+		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		writeFileSync(join(cwd, "impl.ts"), "dirty\n");
+		await tools
+			.get("loop_record_build")
+			?.execute(
+				"1",
+				{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
+				undefined,
+				undefined,
+				ctx(cwd),
+			);
+		expect(readLoopStateFile(loopStatePath(profile, cwd, "feature")).stage).toBe("blocked");
+
+		execFileSync("git", ["checkout", "--", "impl.ts"], { cwd, stdio: "ignore" });
+		approvedLoop(profile, cwd);
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		const badRedCommit = greenCommit;
+		writeHeaderLoopLog(redLog, { commit: badRedCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
+		await tools
+			.get("loop_record_build")
+			?.execute(
+				"1",
+				{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
+				undefined,
+				undefined,
+				ctx(cwd),
+			);
+		const blocked = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		expect(blocked.stage).toBe("blocked");
+		expect(blocked.questions.at(-1)?.text).toContain("tests-only");
+		expect(status(cwd)).toBe("");
+	});
+
 	test("recording build evidence blocks loudly when a recorded hash no longer matches the test file", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
@@ -806,5 +923,104 @@ describe("Pi wiring", () => {
 		expect(missed.stage).toBe("classify");
 		expect(missed.block).toMatchObject({ kind: "questions", resumeStage: "classify" });
 		expect(missed.verification).toMatchObject({ status: "missed", summary: "Verifier found a miss." });
+	});
+
+	test("verifier intake requires clean worktree and the recorded verifier dispatch", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		approvedLoop(profile, cwd);
+		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
+		const redCommit = commitAll(cwd, "add tests");
+		writeFileSync(join(cwd, "impl.ts"), "green\n");
+		const greenCommit = commitAll(cwd, "implement");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		const hash = sha256sum(cwd, "loop.test.ts");
+		const redLog = join(profile, "red.log");
+		const greenLog = join(profile, "green.log");
+		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
+		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		await tools
+			.get("loop_record_build")
+			?.execute(
+				"1",
+				{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
+				undefined,
+				undefined,
+				ctx(cwd),
+			);
+		writeFileSync(join(cwd, "impl.ts"), "dirty\n");
+		await handlers.get("message_end")?.(
+			subagentResult(
+				"verifier",
+				sessionFileWithHelperReport(
+					helperReport("verifier", {
+						checksRun: [],
+						rerunChecks: [],
+						acceptedLogs: [],
+						testHashesChecked: ["loop.test.ts"],
+						goalMatched: true,
+					}),
+				),
+			),
+			ctx(cwd),
+		);
+		const dirty = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		expect(dirty.stage).toBe("blocked");
+		expect(dirty.block).toMatchObject({ kind: "stale", resumeStage: "build" });
+
+		execFileSync("git", ["checkout", "--", "impl.ts"], { cwd, stdio: "ignore" });
+		writeLoopStateFile(loopStatePath(profile, cwd, "feature"), {
+			...dirty,
+			stage: "verify",
+			block: undefined,
+			verifierRequest: undefined,
+		});
+		const before = readFileSync(loopStatePath(profile, cwd, "feature"), "utf8");
+		await handlers.get("message_end")?.(
+			subagentResult(
+				"verifier",
+				sessionFileWithHelperReport(
+					helperReport("verifier", {
+						checksRun: [],
+						rerunChecks: [],
+						acceptedLogs: [],
+						testHashesChecked: ["loop.test.ts"],
+						goalMatched: true,
+					}),
+				),
+			),
+			ctx(cwd),
+		);
+		expect(readFileSync(loopStatePath(profile, cwd, "feature"))).toBe(before);
+	});
+
+	test("loop_status reports test-hash and diff staleness without writing", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		approvedLoop(profile, cwd);
+		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
+		const redCommit = commitAll(cwd, "add tests");
+		writeFileSync(join(cwd, "impl.ts"), "green\n");
+		const greenCommit = commitAll(cwd, "implement");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		const hash = sha256sum(cwd, "loop.test.ts");
+		const redLog = join(profile, "red.log");
+		const greenLog = join(profile, "green.log");
+		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
+		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		await commands.get("loop")?.handler(
+			`record-build ${JSON.stringify({ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog })}`,
+			ctx(cwd),
+		);
+		const path = loopStatePath(profile, cwd, "feature");
+		writeFileSync(join(cwd, "loop.test.ts"), "changed\n");
+		const before = readFileSync(path, "utf8");
+		const result = await tools.get("loop_status")?.execute("1", {}, undefined, undefined, ctx(cwd));
+		expect(result?.content[0]?.text).toContain("stale: test hashes");
+		expect(readFileSync(path, "utf8")).toBe(before);
 	});
 });

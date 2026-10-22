@@ -564,10 +564,60 @@ describe("build and verify slice", () => {
 				greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
 				maxVerifierRerunMs: 120_000,
 			});
-			expect(result.state.stage).toBe("build");
-			expect(result.state.block).toMatchObject({ kind: "questions", resumeStage: "build" });
+			expect(result.state.stage).toBe("blocked");
+			expect(result.state.block).toMatchObject({ resumeStage: "build" });
 			expect(result.effects).toMatchObject([{ type: "ask-person" }]);
 		}
+	});
+
+	test("allows red evidence from a tests-only ancestor and green evidence from HEAD", () => {
+		const state = startBuild(approvedState()).state;
+		const result = recordBuildEvidence(state, {
+			commit: "impl-head",
+			diff: "diff",
+			testFiles: ["test/loop.test.ts"],
+			testHashes,
+			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
+			greenRun: run({ log: "/tmp/green.log", exitCode: 0, commit: "impl-head" }),
+			maxVerifierRerunMs: 120_000,
+		});
+		expect(result.state.stage).toBe("verify");
+		expect(result.state.build).toMatchObject({ commit: "impl-head", redCommit: "tests-only" });
+	});
+
+	test("blocks build evidence when test files are empty or not in the frozen test-design brief", () => {
+		const state = startBuild(approvedState()).state;
+		const empty = recordBuildEvidence(state, {
+			commit: "commit-a",
+			diff: "diff",
+			testFiles: [],
+			testHashes: [],
+			redRun: run({ log: "/tmp/red.log", exitCode: 1, testHashes: [] }),
+			greenRun: run({ log: "/tmp/green.log", exitCode: 0, testHashes: [] }),
+			maxVerifierRerunMs: 120_000,
+		});
+		expect(empty.state.stage).toBe("blocked");
+		expect(empty.state.block).toMatchObject({ resumeStage: "build" });
+
+		const unagreed = recordBuildEvidence(state, {
+			commit: "commit-a",
+			diff: "diff",
+			testFiles: ["test/not-agreed.test.ts"],
+			testHashes: [{ file: "test/not-agreed.test.ts", sha256: "hash" }],
+			redRun: run({
+				log: "/tmp/red.log",
+				exitCode: 1,
+				testHashes: [{ file: "test/not-agreed.test.ts", sha256: "hash" }],
+			}),
+			greenRun: run({
+				log: "/tmp/green.log",
+				exitCode: 0,
+				testHashes: [{ file: "test/not-agreed.test.ts", sha256: "hash" }],
+			}),
+			maxVerifierRerunMs: 120_000,
+		});
+		expect(unagreed.state.stage).toBe("blocked");
+		expect(unagreed.state.questions.at(-1)?.text).toContain("not in the frozen brief");
 	});
 
 	test("treats changed test hashes and changed verifier diff as stale in build and verify", () => {
@@ -586,6 +636,26 @@ describe("build and verify slice", () => {
 			staleReason(state, { ...context, testHashes: [{ file: "test/loop.test.ts", sha256: "changed" }] }),
 		).toContain("test hashes");
 		expect(staleReason(state, { ...context, testHashes, diffHash: "different" })).toContain("diff");
+	});
+
+	test("post-approval block questions do not change the frozen brief hash or get re-frozen by stale answers", () => {
+		const approved = approvedState();
+		const originalHash = approved.frozenBriefHash;
+		const blocked = recordBuildEvidence(startBuild(approved).state, {
+			commit: "commit-a",
+			diff: "diff",
+			testFiles: ["test/loop.test.ts"],
+			testHashes,
+			redRun: undefined,
+			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+			maxVerifierRerunMs: 120_000,
+		}).state;
+		expect(blocked.stage).toBe("blocked");
+		expect(blocked.frozenBriefHash).toBe(originalHash);
+		expect(staleReason(blocked, context)).toBeUndefined();
+		const stale = blockForStaleState(blocked, { ...context, baseHead: "base-b" }).state;
+		const answered = answerLoopQuestion(stale, { answer: "Continue.", current: { ...context, baseHead: "base-b" } }).state;
+		expect(answered.frozenBriefHash).toBe(originalHash);
 	});
 
 	test("accepts verifier pass to the single done state and miss or blocked reports to classify with a structural block", () => {
@@ -641,7 +711,7 @@ describe("build and verify slice", () => {
 			},
 			{ acceptedLogs: [] },
 		).state;
-		expect(missed.stage).toBe("classify");
+		expect(missed.stage).toBe("blocked");
 		expect(missed.block).toMatchObject({ kind: "questions", resumeStage: "classify" });
 		expect(missed.verification).toMatchObject({ status: "missed", summary: "Goal missed." });
 
@@ -664,7 +734,7 @@ describe("build and verify slice", () => {
 			},
 			{ acceptedLogs: [] },
 		).state;
-		expect(blocked.stage).toBe("classify");
+		expect(blocked.stage).toBe("blocked");
 		expect(blocked.verification).toMatchObject({ status: "blocked" });
 	});
 
@@ -697,9 +767,49 @@ describe("build and verify slice", () => {
 			},
 			{ acceptedLogs: [run({ log: "/tmp/green.log", exitCode: 0, commit: "other" })] },
 		);
-		expect(result.state.stage).toBe("verify");
+		expect(result.state.stage).toBe("blocked");
 		expect(result.state.block).toMatchObject({ kind: "intake-failed", resumeStage: "verify" });
 		expect(result.effects[0]).toMatchObject({ type: "ask-person", reason: "intake-failed" });
+
+		const accepted = applyVerifierReport(
+			result.state,
+			{
+				status: "done",
+				role: "verifier",
+				summary: "Verified.",
+				evidence: [],
+				openQuestions: [],
+				assumptions: [],
+				details: {
+					checksRun: [],
+					rerunChecks: [],
+					acceptedLogs: [],
+					testHashesChecked: ["test/loop.test.ts"],
+					goalMatched: true,
+				},
+			},
+			{ acceptedLogs: [] },
+		);
+		expect(accepted.state.stage).toBe("blocked");
+		expect(accepted.state.block?.questionId).toBe(result.state.block?.questionId);
+	});
+
+	test("stale test or diff evidence during verify resumes at build", () => {
+		const state = recordBuildEvidence(startBuild(approvedState()).state, {
+			commit: "commit-a",
+			diff: "diff",
+			testFiles: ["test/loop.test.ts"],
+			testHashes,
+			redRun: run({ log: "/tmp/red.log", exitCode: 1 }),
+			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+			maxVerifierRerunMs: 120_000,
+		}).state;
+		const blocked = blockForStaleState(state, {
+			...context,
+			testHashes: [{ file: "test/loop.test.ts", sha256: "changed" }],
+		}).state;
+		expect(blocked.stage).toBe("blocked");
+		expect(blocked.block).toMatchObject({ kind: "stale", resumeStage: "build" });
 	});
 
 	test("exports the loop run marker so build logs do not rely on prose", () => {
