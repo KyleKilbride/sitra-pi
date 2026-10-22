@@ -614,7 +614,7 @@ async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<v
 		}
 		writeLoopStateFile(path, result.state);
 		emitEffects(pi, result.state, result.effects);
-		if (result.state.stage === "done" || result.state.stage === "classify") {
+		if (result.state.stage === "done" || result.state.stage === "blocked") {
 			pi.sendUserMessage(`LOOPS stage: ${result.state.stage}`, {
 				deliverAs: "followUp",
 				streamingBehavior: "followUp",
