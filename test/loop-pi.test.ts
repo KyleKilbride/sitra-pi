@@ -1086,4 +1086,64 @@ describe("Pi wiring", () => {
 		expect(result?.content[0]?.text).toContain("stale: test hashes");
 		expect(readFileSync(path, "utf8")).toBe(before);
 	});
+
+	test.each([
+		["committed test edit", "loop.test.ts", "expect('changed').toBe('changed')\n"],
+		["committed implementation edit", "impl.ts", "changed implementation\n"],
+	])("stale verify can resume to build and record fresh evidence after %s", async (_name, changedFile, contents) => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		approvedLoop(profile, cwd);
+		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
+		let redCommit = commitAll(cwd, "add tests");
+		writeFileSync(join(cwd, "impl.ts"), "green\n");
+		let greenCommit = commitAll(cwd, "implement");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		let hash = sha256sum(cwd, "loop.test.ts");
+		const redLog = join(profile, "red.log");
+		const greenLog = join(profile, "green.log");
+		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
+		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
+
+		writeFileSync(join(cwd, changedFile), contents);
+		commitAll(cwd, `change ${changedFile}`);
+		await handlers.get("message_end")?.(
+			subagentResult(
+				"verifier",
+				sessionFileWithHelperReport(
+					helperReport("verifier", {
+						checksRun: [],
+						rerunChecks: [],
+						acceptedLogs: [],
+						testHashesChecked: ["loop.test.ts"],
+						goalMatched: true,
+					}),
+				),
+			),
+			ctx(cwd),
+		);
+		let stale = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		expect(stale.stage).toBe("blocked");
+		expect(stale.block).toMatchObject({ kind: "stale", resumeStage: "build" });
+		await commands.get("loop")?.handler("answer rebuild", ctx(cwd));
+		let resumed = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		expect(resumed.stage).toBe("build");
+		expect(resumed.build.testHashes).toEqual([]);
+		expect(resumed.verifierRequest).toBeUndefined();
+
+		writeFileSync(join(cwd, "loop.test.ts"), `fresh red ${changedFile}\n`);
+		redCommit = commitAll(cwd, `fresh tests ${changedFile}`);
+		writeFileSync(join(cwd, "impl.ts"), `fresh green ${changedFile}\n`);
+		greenCommit = commitAll(cwd, `fresh implementation ${changedFile}`);
+		hash = sha256sum(cwd, "loop.test.ts");
+		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
+		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
+		resumed = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		expect(resumed.stage).toBe("verify");
+		expect(resumed.verifierRequest).toBeDefined();
+	});
 });
