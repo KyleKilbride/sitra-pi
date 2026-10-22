@@ -14,7 +14,6 @@ export interface RunMeta {
 	agent?: string;
 	sessionId?: string;
 	command?: string;
-	nonce?: string;
 	loop?: {
 		commit: string;
 		testHashes: { file: string; sha256: string }[];
@@ -57,7 +56,7 @@ export interface RunStatus {
 export function readRun(logText: string, tailLines = 40): RunStatus {
 	const lines = logText.replace(/\n$/, "").split("\n");
 	const header = readRunHeader(lines[0] ?? "");
-	const nonce = typeof header?.meta.nonce === "string" ? header.meta.nonce : undefined;
+	const nonce = header?.nonce;
 	const marker = lines.findLastIndex((l) =>
 		nonce ? l.startsWith(`${EXIT_MARKER}${nonce}=`) : l.startsWith(EXIT_MARKER),
 	);
@@ -71,7 +70,7 @@ export function readRun(logText: string, tailLines = 40): RunStatus {
 /** The pid and owner recorded on the log's first line, if the run was started by `paneCommand`. */
 export function readRunHeader(
 	firstLine: string,
-): { pid: number; pidStart?: string; pidStartKind?: "proc" | "ps-lstart"; meta: RunMeta } | undefined {
+): { pid: number; pidStart?: string; pidStartKind?: "proc" | "ps-lstart"; nonce?: string; meta: RunMeta } | undefined {
 	if (!firstLine.startsWith(HEADER_MARKER)) return undefined;
 	try {
 		const value: unknown = JSON.parse(firstLine.slice(HEADER_MARKER.length));
@@ -123,6 +122,7 @@ export function readRunHeader(
 			pid,
 			...(pidStartText ? { pidStart: pidStartText } : {}),
 			...(pidStartText && inferredKind ? { pidStartKind: inferredKind } : {}),
+			...(nonce ? { nonce } : {}),
 			meta: {
 				...(label ? { label } : {}),
 				...(project ? { project } : {}),
@@ -130,7 +130,6 @@ export function readRunHeader(
 				...(agent ? { agent } : {}),
 				...(sessionId ? { sessionId } : {}),
 				...(command ? { command } : {}),
-				...(nonce ? { nonce } : {}),
 				...(loop ? { loop } : {}),
 			},
 		};
