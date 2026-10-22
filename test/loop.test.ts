@@ -253,7 +253,7 @@ describe("advisor transition and ordering", () => {
 			"Yes, write red first.",
 		]);
 		expect(answered.effects[0]).toMatchObject({ type: "dispatch-advisors", roles: ["test-design"] });
-		const task = answered.effects[0]?.type === "dispatch-advisors" ? answered.effects[0].advisors[0]?.task : "";
+		const task = answered.effects[0]?.type === "dispatch-advisors" ? (answered.effects[0].advisors[0]?.task ?? "") : "";
 		expect(task).toContain("Yes, use /loop start.");
 		expect(task).toContain("Yes, write red first.");
 	});
@@ -293,6 +293,224 @@ describe("advisor transition and ordering", () => {
 		expect(state.questions[0]?.text).toContain("Should the runner ask before build?");
 		expect(state.questions[0]?.text).toContain("Which command starts the graph?");
 		expect(state.questions[0]?.text).toContain("Should state live in the profile?");
+	});
+
+	test("dedupes answered advisor questions by normalized text but not advisor-chosen id alone", () => {
+		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+		state = applyAdvisorReport(
+			state,
+			report("intent", {
+				details: {
+					questions: [
+						{
+							id: "q-existing",
+							text: "Should the CLI command be /loop start?",
+							recommended: "Yes.",
+							dependsOn: [],
+						},
+					],
+					doneCandidates: [],
+					ambiguities: [],
+				},
+			}),
+			{ outputTokens: 1, contextTokens: 0 },
+		).state;
+		state = applyAdvisorReport(state, report("codebase"), { outputTokens: 1, contextTokens: 0 }).state;
+		expect(state.questions[0]?.id).not.toBe("advisor-questions");
+		const firstQuestionId = state.questions[0]?.id;
+		state = answerLoopQuestion(state, { answer: "Yes, use /loop start.", current: context }).state;
+
+		state = applyAdvisorReport(
+			state,
+			report("intent", {
+				details: {
+					questions: [
+						{
+							id: "q-existing",
+							text: "Should deletes be soft or hard?",
+							recommended: "Use soft deletes.",
+							dependsOn: [],
+						},
+						{
+							id: "q-different-id",
+							text: " Should the CLI command be   /loop start? ",
+							recommended: "Already answered by exact normalized text.",
+							dependsOn: [],
+						},
+						{
+							id: "q-new",
+							text: "Should the runner keep state in the profile?",
+							recommended: "Yes.",
+							dependsOn: [],
+						},
+					],
+					doneCandidates: [],
+					ambiguities: [],
+				},
+				openQuestions: ["Should the runner keep state in the profile?"],
+			}),
+			{ outputTokens: 1, contextTokens: 0 },
+		).state;
+
+		expect(state.stage).toBe("needs-person");
+		expect(state.questions).toHaveLength(2);
+		expect(state.questions[1]?.id).not.toBe("advisor-questions");
+		expect(state.questions[1]?.id).not.toBe(firstQuestionId);
+		expect(state.questions[1]?.text).toContain("Should deletes be soft or hard?");
+		expect(state.questions[1]?.text).not.toContain("Should the CLI command be");
+		expect(state.questions[1]?.text.match(/Should the runner keep state in the profile/g)).toHaveLength(1);
+	});
+
+	test("asks a rerun advisor question that reuses q1 for new text", () => {
+		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+		state = applyAdvisorReport(
+			state,
+			report("intent", {
+				details: {
+					questions: [
+						{
+							id: "q1",
+							text: "Which database?",
+							recommended: "Postgres.",
+							dependsOn: [],
+						},
+					],
+					doneCandidates: [],
+					ambiguities: [],
+				},
+			}),
+			{ outputTokens: 1, contextTokens: 0 },
+		).state;
+		state = applyAdvisorReport(state, report("codebase"), { outputTokens: 1, contextTokens: 0 }).state;
+		state = answerLoopQuestion(state, { answer: "Postgres.", current: context }).state;
+
+		state = applyAdvisorReport(
+			state,
+			report("intent", {
+				details: {
+					questions: [
+						{
+							id: "q1",
+							text: "Should deletes be soft or hard?",
+							recommended: "Use soft deletes.",
+							dependsOn: [],
+						},
+					],
+					doneCandidates: [],
+					ambiguities: [],
+				},
+			}),
+			{ outputTokens: 1, contextTokens: 0 },
+		).state;
+
+		expect(state.stage).toBe("needs-person");
+		expect(state.questions.at(-1)?.text).toContain("Should deletes be soft or hard?");
+		expect(state.questions.at(-1)?.text).not.toContain("Which database?");
+	});
+
+	test("asks new text even when an advisor reuses a runner-looking id", () => {
+		for (const reusedId of ["intent-open-x", "advisor-questions-x"]) {
+			let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+			state = applyAdvisorReport(
+				state,
+				report("intent", {
+					details: {
+						questions: [
+							{
+								id: reusedId,
+								text: "Which database?",
+								recommended: "Postgres.",
+								dependsOn: [],
+							},
+						],
+						doneCandidates: [],
+						ambiguities: [],
+					},
+				}),
+				{ outputTokens: 1, contextTokens: 0 },
+			).state;
+			state = applyAdvisorReport(state, report("codebase"), { outputTokens: 1, contextTokens: 0 }).state;
+			state = answerLoopQuestion(state, { answer: "Postgres.", current: context }).state;
+
+			state = applyAdvisorReport(
+				state,
+				report("intent", {
+					details: {
+						questions: [
+							{
+								id: reusedId,
+								text: "Should deletes be soft or hard?",
+								recommended: "Use soft deletes.",
+								dependsOn: [],
+							},
+						],
+						doneCandidates: [],
+						ambiguities: [],
+					},
+				}),
+				{ outputTokens: 1, contextTokens: 0 },
+			).state;
+
+			expect(state.stage).toBe("needs-person");
+			expect(state.questions.at(-1)?.text).toContain("Should deletes be soft or hard?");
+		}
+	});
+
+	test("repeated blocked advisor summaries still block after an answer", () => {
+		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+		state = applyAdvisorReport(
+			state,
+			report("intent", {
+				status: "blocked",
+				summary: "Need access to schema docs.",
+				details: { questions: [], doneCandidates: [], ambiguities: [] },
+			}),
+			{ outputTokens: 1, contextTokens: 0 },
+		).state;
+		state = applyAdvisorReport(state, report("codebase"), { outputTokens: 1, contextTokens: 0 }).state;
+		state = answerLoopQuestion(state, { answer: "Schema docs are in docs/schema.md.", current: context }).state;
+
+		state = applyAdvisorReport(
+			state,
+			report("intent", {
+				status: "blocked",
+				summary: "Need access to schema docs.",
+				details: { questions: [], doneCandidates: [], ambiguities: [] },
+			}),
+			{ outputTokens: 1, contextTokens: 0 },
+		).state;
+
+		expect(state.stage).toBe("needs-person");
+		expect(state.questions.at(-1)?.text).toContain("Need access to schema docs.");
+	});
+
+	test("passes settled answers to advisor tasks without nesting previous answers blocks", () => {
+		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+		state = applyAdvisorReport(
+			state,
+			report("intent", {
+				details: {
+					questions: [
+						{
+							id: "q-command",
+							text: "Use /loop start?",
+							recommended: "Yes.",
+							dependsOn: [],
+						},
+					],
+					doneCandidates: [],
+					ambiguities: [],
+				},
+			}),
+			{ outputTokens: 1, contextTokens: 0 },
+		).state;
+		state = applyAdvisorReport(state, report("codebase"), { outputTokens: 1, contextTokens: 0 }).state;
+		const answered = answerLoopQuestion(state, { answer: "Yes, use /loop start.", current: context });
+		const task = answered.effects[0]?.type === "dispatch-advisors" ? (answered.effects[0].advisors[0]?.task ?? "") : "";
+
+		expect(task).toContain("- Use /loop start?\n  Answer: Yes, use /loop start.");
+		expect(task).not.toContain("- 1. Use /loop start?");
+		expect(task.match(/Answers so far:/g)).toHaveLength(1);
 	});
 
 	test("moves from completed advisors to lead plan, architecture review, and explicit brief approval", () => {

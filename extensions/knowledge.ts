@@ -35,9 +35,10 @@ import {
 	tally,
 } from "./learn.ts";
 import type { AdvisorRole, LoopState } from "./loop.ts";
-import { roleForAgent } from "./loop.ts";
+import { advisorTask, roleForAgent } from "./loop.ts";
 import { loopStatePath, readLoopStateFile } from "./loop-state.ts";
 import { mainCheckout, readLastLines } from "./sessions.ts";
+import { childAgent, objectRecord, subagentChildren } from "./subagent-tools.ts";
 import { actionFromPi, entriesForAction, parseTrigger, pauseMessage } from "./triggers.ts";
 
 interface Ctx {
@@ -113,24 +114,6 @@ function loopProfileDir(): string {
 	return dirname(g);
 }
 
-function objectRecord(value: unknown): Record<string, unknown> | undefined {
-	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
-}
-
-function subagentChildren(input: Record<string, unknown>): Record<string, unknown>[] | undefined {
-	if (Array.isArray(input.children)) {
-		const children = input.children.map(objectRecord);
-		return children.every((child): child is Record<string, unknown> => !!child) && children.length > 0
-			? children
-			: undefined;
-	}
-	return "agent" in input || "name" in input ? [input] : undefined;
-}
-
-function childAgent(child: Record<string, unknown>): string | undefined {
-	return typeof child.agent === "string" ? child.agent : typeof child.name === "string" ? child.name : undefined;
-}
-
 function dispatchIdFrom(value: unknown): string | undefined {
 	const record = objectRecord(value);
 	if (!record) return undefined;
@@ -177,6 +160,7 @@ function loopPendingSubagentDispatch(
 	for (const child of children) {
 		const role = roleForAgent(childAgent(child));
 		if (role && pendingAdvisors.has(role)) {
+			if (child.task !== advisorTask(loaded.state, role)) return { exempt: false };
 			pendingAdvisors.delete(role);
 			continue;
 		}

@@ -21,6 +21,16 @@ export const ReworkClass = Type.Union([
 	Type.Literal("check-gap"),
 ]);
 
+const QuestionSource = Type.Object(
+	{
+		id: Type.String({ minLength: 1 }),
+		text: Type.String({ minLength: 1 }),
+		recommended: Type.String({ minLength: 1 }),
+		dependsOn: Type.Array(Type.String()),
+	},
+	{ additionalProperties: false },
+);
+
 export const Question = Type.Object(
 	{
 		id: Type.String({ minLength: 1 }),
@@ -28,6 +38,7 @@ export const Question = Type.Object(
 		recommended: Type.String({ minLength: 1 }),
 		dependsOn: Type.Array(Type.String()),
 		answer: Type.Optional(Type.String()),
+		sourceQuestions: Type.Optional(Type.Array(QuestionSource)),
 	},
 	{ additionalProperties: false },
 );

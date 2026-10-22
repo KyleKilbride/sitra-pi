@@ -10,7 +10,9 @@ import { worktreeClean } from "./git-status.ts";
 import { grimoireDir, grimoireStoreStatus, writeProposal } from "./grimoire.ts";
 import { type HelperReport, validateHelperReport } from "./helper-report.ts";
 import {
+	ADVISOR_ROLES,
 	type AdvisorRole,
+	advisorTask,
 	answerLoopQuestion,
 	applyAdvisorReport,
 	applyLeadPlan,
@@ -28,6 +30,7 @@ import {
 	type LoopState,
 	type LoopTestHash,
 	loopMetricsLine,
+	recordAdvisorStarted,
 	recordBlockAnswer,
 	recordBuildEvidence,
 	recordReworkProposal,
@@ -58,6 +61,7 @@ import {
 	writeLoopStateFile,
 } from "./loop-state.ts";
 import { hashFiles, readRun, readRunHeader } from "./runs.ts";
+import { childAgent, objectRecord, subagentChildren } from "./subagent-tools.ts";
 
 interface Ctx {
 	cwd: string;
@@ -112,6 +116,11 @@ interface Pi {
 	): void;
 }
 
+interface ToolCall {
+	toolName?: unknown;
+	input?: unknown;
+}
+
 function profileDir(): string {
 	if (process.env.PI_CODING_AGENT_DIR?.trim()) return process.env.PI_CODING_AGENT_DIR.trim();
 	const dir = grimoireDir({ ...process.env, SITRA_GRIMOIRE: undefined });
@@ -126,6 +135,19 @@ function git(cwd: string, args: string[]): string {
 	} catch (error) {
 		throw new Error(`git ${args.join(" ")} failed in ${cwd}: ${String(error)}`);
 	}
+}
+
+function gitMaybe(cwd: string, args: string[]): string | undefined {
+	try {
+		const out = execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+		return out || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function isInsideWorkTree(cwd: string): boolean {
+	return gitMaybe(cwd, ["rev-parse", "--is-inside-work-tree"]) === "true";
 }
 
 function testHashes(cwd: string, files: string[]): LoopTestHash[] {
@@ -230,6 +252,14 @@ function checkoutGit(cwd: string): Omit<GitState, "baseRef" | "baseHead"> {
 	};
 }
 
+function checkoutGitForLoopLookup(cwd: string): Omit<GitState, "baseRef" | "baseHead"> | undefined {
+	if (!isInsideWorkTree(cwd)) return undefined;
+	const worktree = gitMaybe(cwd, ["rev-parse", "--show-toplevel"]);
+	const branch = gitMaybe(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+	if (!worktree || !branch) return undefined;
+	return { worktree, branch };
+}
+
 function currentGitForState(cwd: string, state: LoopState): GitState {
 	const checkout = checkoutGit(cwd);
 	return { ...checkout, baseRef: state.baseRef, baseHead: git(cwd, ["rev-parse", state.baseRef]) };
@@ -275,6 +305,14 @@ function loadExistingCurrentState(checkout: Omit<GitState, "baseRef" | "baseHead
 } {
 	const path = statePathFor({ ...checkout, baseRef: "", baseHead: "" });
 	if (!existsSync(path)) throw new Error(noLoopMessage(checkout));
+	return { path, state: readLoopStateFile(path) };
+}
+
+function loadCurrentLoopStateIfExists(cwd: string): { path: string; state: LoopState } | undefined {
+	const checkout = checkoutGitForLoopLookup(cwd);
+	if (!checkout) return undefined;
+	const path = statePathFor({ ...checkout, baseRef: "", baseHead: "" });
+	if (!existsSync(path)) return undefined;
 	return { path, state: readLoopStateFile(path) };
 }
 
@@ -340,6 +378,32 @@ function renderDispatch(state: LoopState, effect: Extract<LoopEffect, { type: "d
 	return [`LOOPS runner dispatch for stage ${state.stage}:`, `Goal: ${state.goal}`, ...bullets].join("\n");
 }
 
+function advisorWaitLines(state: LoopState): string[] {
+	const dispatchEffect = resumeLoop(state).effects.find(
+		(effect): effect is Extract<LoopEffect, { type: "dispatch-advisors" }> => effect.type === "dispatch-advisors",
+	);
+	const pendingTasks = new Map((dispatchEffect?.advisors ?? []).map((advisor) => [advisor.role, advisor.task]));
+	const started = new Set(state.startedAdvisors ?? []);
+	const roles = ADVISOR_ROLES.filter((role) => pendingTasks.has(role) || state.advisorRuns[advisorKeyForStatus(role)]);
+	if (roles.length === 0) return [];
+	return [
+		"awaited advisors:",
+		...roles.flatMap((role) => {
+			const task = pendingTasks.get(role);
+			if (!task) return [`- ${advisorName(role)}: reported through helper_report`];
+			return [
+				`- ${advisorName(role)}: ${started.has(role) ? "started, awaiting helper_report" : "not started"}`,
+				`${advisorName(role)} has not reported through helper_report. If the lead wrote a summary instead, that does not count; it must be started with this exact runner task:`,
+				task,
+			];
+		}),
+	];
+}
+
+function advisorKeyForStatus(role: AdvisorRole): keyof LoopState["advisorRuns"] {
+	return role === "test-design" ? "testDesign" : role;
+}
+
 function renderEffect(state: LoopState, effect: LoopEffect): string {
 	if (effect.type === "dispatch-advisors") return renderDispatch(state, effect);
 	if (effect.type === "ask-person")
@@ -349,7 +413,7 @@ function renderEffect(state: LoopState, effect: LoopEffect): string {
 			`Recommended: ${effect.question.recommended}`,
 		].join("\n\n");
 	if (effect.type === "write-lead-plan")
-		return "LOOPS advisors are complete. Write the high-level lead plan, then run `/loop plan <plan>`.";
+		return "LOOPS advisors are complete. Write the high-level lead plan, then call loop_submit_plan with the plan text. The equivalent human slash command is `/loop plan <plan>`.";
 	if (effect.type === "dispatch-verifier")
 		return [
 			"LOOPS runner dispatch for stage verify:",
@@ -392,6 +456,43 @@ function persistAndEmit(pi: Pi, path: string, result: { state: LoopState; effect
 	return materialized.state;
 }
 
+function nextExpectedAction(state: LoopState, effects: LoopEffect[]): string {
+	const dispatch = effects.find(
+		(effect): effect is Extract<LoopEffect, { type: "dispatch-advisors" }> => effect.type === "dispatch-advisors",
+	);
+	if (dispatch) {
+		return `start ${dispatch.advisors.map((advisor) => advisorName(advisor.role)).join(", ")} with the exact runner task and wait for helper_report`;
+	}
+	if (effects.some((effect) => effect.type === "write-lead-plan")) return "submit the lead plan with loop_submit_plan";
+	if (effects.some((effect) => effect.type === "dispatch-verifier")) {
+		return "start verifier with the exact runner task and wait for helper_report";
+	}
+	const askPerson = effects.find(
+		(effect): effect is Extract<LoopEffect, { type: "ask-person" }> => effect.type === "ask-person",
+	);
+	if (askPerson?.reason === "brief-approval") return "person types /loop approve <summary>";
+	if (askPerson) return "wait for the person's next /loop answer";
+	if (state.stage === "build") return "record red and green evidence with loop_record_build";
+	if (state.stage === "brief-approved") return "start implementation with /loop build";
+	if (state.stage === "architecture-review") return "wait for architecture-advisor helper_report or person approval";
+	if (state.stage === "plan") return "submit the lead plan with loop_submit_plan";
+	if (state.stage === "verify") return "wait for verifier helper_report";
+	if (state.stage === "done") return "loop is done";
+	throw new Error(`no next expected action for unhandled LOOPS stage ${state.stage}`);
+}
+
+function emitUnblockNotice(pi: Pi, before: LoopState, answer: string, after: LoopState, effects: LoopEffect[]): void {
+	if (!before.block || after.block) return;
+	pi.sendUserMessage(
+		[
+			`LOOPS stage: ${after.stage}`,
+			`person answered: ${answer}`,
+			`next expected action: ${nextExpectedAction(after, effects)}`,
+		].join("\n"),
+		{ deliverAs: "followUp", streamingBehavior: "followUp" },
+	);
+}
+
 function loopStatus(cwd: string, state: LoopState): ToolResult {
 	let gitState: GitState;
 	try {
@@ -428,6 +529,7 @@ function loopStatus(cwd: string, state: LoopState): ToolResult {
 					`stage: ${state.stage}`,
 					`goal: ${state.goal}`,
 					loopMetricsLine(metrics.states),
+					...advisorWaitLines(state),
 					...(metrics.badFiles.length ? [`loop metrics unreadable: ${metrics.badFiles.join(", ")}`] : []),
 					...(rejectedVerifierReports.length
 						? [
@@ -563,12 +665,14 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 				return;
 			}
 			const result = answerLoopQuestion(answered, { answer: rest, current: gitState });
-			persistAndEmit(pi, path, result);
+			const next = persistAndEmit(pi, path, result);
+			emitUnblockNotice(pi, rawState, rest, next, result.effects);
 			return;
 		}
 		const state = isStaleAnswer ? rawState : loadMutableState(gitState);
 		const result = answerLoopQuestion(state, { answer: rest, current: gitState });
-		persistAndEmit(pi, path, result);
+		const next = persistAndEmit(pi, path, result);
+		emitUnblockNotice(pi, state, rest, next, result.effects);
 		return;
 	}
 	if (verb === "plan") {
@@ -631,15 +735,9 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 
 async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<void> {
 	if (!event || typeof event !== "object") return;
-	let checkout: Omit<GitState, "baseRef" | "baseHead">;
-	try {
-		checkout = checkoutGit(ctx.cwd);
-	} catch {
-		return;
-	}
-	const path = statePathFor({ ...checkout, baseRef: "", baseHead: "" });
-	if (!existsSync(path)) return;
-	const state = readLoopStateFile(path);
+	const loaded = loadCurrentLoopStateIfExists(ctx.cwd);
+	if (!loaded) return;
+	const { path, state } = loaded;
 	const raw = event as Record<string, unknown>;
 	if (raw.agent === "verifier") {
 		if (state.stage !== "verify") return;
@@ -765,6 +863,24 @@ async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<v
 	persistAndEmit(pi, path, result);
 }
 
+function handleToolCall(event: ToolCall, ctx: Ctx): void {
+	if (event?.toolName !== "subagent") return;
+	const input = objectRecord(event.input);
+	if (!input) return;
+	const children = subagentChildren(input);
+	if (!children) return;
+	const loaded = loadCurrentLoopStateIfExists(ctx.cwd);
+	if (!loaded) return;
+	const { path, state } = loaded;
+	const started: AdvisorRole[] = [];
+	for (const child of children) {
+		const role = roleForAgent(childAgent(child));
+		if (!role || !state.dispatchedAdvisors.includes(role)) continue;
+		if (child.task === advisorTask(state, role)) started.push(role);
+	}
+	if (started.length > 0) writeLoopStateFile(path, recordAdvisorStarted(state, started));
+}
+
 function findHelperReport(input: unknown): unknown | undefined {
 	if (!input || typeof input !== "object") return undefined;
 	const record = input as Record<string, unknown>;
@@ -865,6 +981,42 @@ export default function sitraLoop(pi: Pi): void {
 	});
 
 	pi.registerTool({
+		name: "loop_submit_plan",
+		label: "Submit loop lead plan",
+		description:
+			"Submit the lead-authored LOOPS plan after advisors are complete. This advances the same state transition as /loop plan with the same validation.",
+		promptSnippet: "loop_submit_plan: submit the lead-authored /loop plan text when LOOPS asks for a plan",
+		parameters: Type.Object(
+			{
+				plan: Type.String({ minLength: 1 }),
+			},
+			{ additionalProperties: false },
+		),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = params as { plan?: unknown };
+			if (typeof p.plan !== "string" || !p.plan.trim()) throw new Error("loop_submit_plan requires plan text");
+			const plan = p.plan.trim();
+			const checkout = checkoutGit(ctx.cwd);
+			const { path, state } = loadExistingCurrentState(checkout);
+			let gitState: GitState;
+			try {
+				gitState = currentGitForState(ctx.cwd, state);
+			} catch (error) {
+				const blocked = blockForGitFailure(state, String(error));
+				writeLoopStateFile(path, blocked.state);
+				emitEffects(pi, blocked.state, blocked.effects);
+				return { content: [{ type: "text", text: `stage: ${blocked.state.stage}` }], details: blocked.state };
+			}
+			const result = applyLeadPlan(loadMutableState(gitState), plan);
+			const next = persistAndEmit(pi, path, result);
+			return {
+				content: [{ type: "text", text: `stage: ${next.stage}` }],
+				details: next,
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: "loop_status",
 		label: "Loop status",
 		description: "Read the current LOOPS runner state for this worktree and branch.",
@@ -882,5 +1034,6 @@ export default function sitraLoop(pi: Pi): void {
 		if (!result) return undefined;
 		return handleSubagentResult(pi, result, ctx);
 	};
+	pi.on("tool_call", handleToolCall as never);
 	pi.on("message_end", handlePossibleSubagentResult as never);
 }
