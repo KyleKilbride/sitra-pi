@@ -8,7 +8,6 @@ export default function (pi) {
 	const call = fauxAssistantMessage(fauxToolCall("read", { path: process.env.SITRA_TEST_FILE }), {
 		stopReason: "toolUse",
 	});
-	call.usage = { ...call.usage, input: 170_000, totalTokens: 170_000 };
 	const script = [
 		fauxAssistantMessage("Noted."),
 		call,

@@ -7,6 +7,8 @@ export interface Config {
 	name: string;
 	/** Skill folders to load. Empty means Pi's normal skill discovery. */
 	skills: string[];
+	/** Explicit handover threshold in tokens. Must fit inside the active model's context window. */
+	handoverTokens?: number;
 	/** Personal name given to the tower (the person's number 2) on its first launch. */
 	tower?: string;
 	/** Optional command prefix to launch the tower (e.g. a local connector wrapper) instead of plain `pi`. */
@@ -41,6 +43,7 @@ export function readConfig(sitra: string): Config {
 	const base: Config = {
 		name: raw.name ?? "",
 		skills: raw.skills ?? [],
+		...(raw.handoverTokens !== undefined ? { handoverTokens: raw.handoverTokens } : {}),
 		...(Array.isArray(raw.towerCommand) && raw.towerCommand.length > 0 ? { towerCommand: raw.towerCommand } : {}),
 		...(typeof raw.learn === "boolean" ? { learn: raw.learn } : {}),
 		...(typeof raw.learnModel === "string" && raw.learnModel.trim() ? { learnModel: raw.learnModel.trim() } : {}),

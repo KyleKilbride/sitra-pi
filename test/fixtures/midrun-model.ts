@@ -1,4 +1,4 @@
-// @ts-nocheck — a zero-cost scripted model for the mid-run handover e2e test: a huge first request that puts the context past the line, tool calls, a handover summary when asked, then a final reply that reports what it could see.
+// @ts-nocheck — a zero-cost scripted model for the mid-run handover e2e test: repeated tool calls, a handover summary when asked, then a final reply that reports what it could see.
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 export default function (pi) {
 	const faux = fauxProvider({

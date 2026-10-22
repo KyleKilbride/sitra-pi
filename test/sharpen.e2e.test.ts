@@ -30,6 +30,7 @@ test("a real pi session past the handover threshold still recovers from a retrya
 					...process.env,
 					PI_CODING_AGENT_DIR: dir,
 					PI_SUBAGENT_NAME: "",
+					SITRA_HANDOVER_TOKENS: "160000",
 					SITRA_TEST_FILE: join(dir, "small.txt"),
 				},
 				stdio: ["pipe", "pipe", "inherit"],

@@ -8,12 +8,14 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	HANDOVER_INSTRUCTIONS,
+	HandoverConfigError,
 	handoverPrompt,
 	handoverSummary,
 	handoverThreshold,
 	helperBrief,
 	type Msg,
 	stubToolResults,
+	validateHandoverTokens,
 } from "./sharpen.ts";
 
 interface Ctx {
@@ -44,6 +46,43 @@ interface Pi {
 const on = () => process.env.SITRA_SHARPEN !== "0";
 const isHelper = () => Boolean(process.env.PI_SUBAGENT_NAME);
 const BRIEF_MARK = "## Context from the lead's conversation";
+
+export function configuredHandoverTokens(): number | undefined {
+	const raw = process.env.SITRA_HANDOVER_TOKENS;
+	if (raw === undefined) return undefined;
+	return validateHandoverTokens(raw, "SITRA_HANDOVER_TOKENS");
+}
+
+function currentHandoverThreshold(contextWindow: number): number {
+	const raw = process.env.SITRA_HANDOVER_TOKENS;
+	return raw === undefined
+		? handoverThreshold(contextWindow)
+		: handoverThreshold(contextWindow, raw, "SITRA_HANDOVER_TOKENS");
+}
+
+function failLoudlyOnHandoverConfig(error: unknown, ctx: Ctx): void {
+	if (error instanceof HandoverConfigError) {
+		ctx.ui?.notify(error.message, "error");
+		throw error;
+	}
+}
+
+function modelContextWindow(model: unknown): number | undefined {
+	return model && typeof model === "object" && typeof (model as { contextWindow?: unknown }).contextWindow === "number"
+		? (model as { contextWindow: number }).contextWindow
+		: undefined;
+}
+
+function validateConfiguredThreshold(ctx: Ctx, model?: unknown): void {
+	const raw = process.env.SITRA_HANDOVER_TOKENS;
+	if (raw === undefined) return;
+	const window = modelContextWindow(model) ?? modelContextWindow(ctx.model);
+	if (window === undefined) {
+		configuredHandoverTokens();
+		return;
+	}
+	currentHandoverThreshold(window);
+}
 
 function branchMessages(ctx: Ctx): Msg[] {
 	return (ctx.sessionManager?.getBranch?.() ?? []).flatMap((e) =>
@@ -139,8 +178,21 @@ export default function sitraSharpen(pi: Pi): void {
 	 * handover that can't get under it (a small window, little to summarise) never repeats every turn.
 	 */
 	let armed = true;
-	pi.on("session_start", () => {
+	pi.on("session_start", (_event: unknown, ctx) => {
 		armed = true;
+		try {
+			validateConfiguredThreshold(ctx);
+		} catch (error) {
+			failLoudlyOnHandoverConfig(error, ctx);
+		}
+	});
+
+	pi.on("model_select", (event: { model?: unknown }, ctx) => {
+		try {
+			validateConfiguredThreshold(ctx, event?.model);
+		} catch (error) {
+			failLoudlyOnHandoverConfig(error, ctx);
+		}
 	});
 
 	// After Pi has finished its own retries, recovery and follow-ups: compacting earlier (at agent_end) would abort them.
@@ -152,13 +204,14 @@ export default function sitraSharpen(pi: Pi): void {
 			if (!usage?.tokens || !usage.contextWindow) return;
 			// A single huge turn has nothing earlier to summarise; Pi would only report "nothing to compact".
 			const turns = branchMessages(ctx).filter((m) => m.role === "user").length;
-			const over = usage.tokens >= handoverThreshold(usage.contextWindow);
+			const over = usage.tokens >= currentHandoverThreshold(usage.contextWindow);
 			if (!over) armed = true;
 			if (over && armed && turns >= 2) {
 				armed = false;
 				handOver(ctx, `The conversation reached ${Math.round(usage.tokens / 1000)}k tokens.`);
 			}
-		} catch {
+		} catch (error) {
+			failLoudlyOnHandoverConfig(error, ctx);
 			// The session carries on; Pi's own compaction still applies near the limit.
 		}
 	});
@@ -182,7 +235,7 @@ export default function sitraSharpen(pi: Pi): void {
 			if (!working) return undefined;
 			const usage = ctx.getContextUsage?.();
 			if (!usage?.tokens || !usage.contextWindow) return undefined;
-			const over = usage.tokens >= handoverThreshold(usage.contextWindow);
+			const over = usage.tokens >= currentHandoverThreshold(usage.contextWindow);
 			if (!over) armed = true;
 			if (!over || !armed || !ctx.model || !ctx.modelRegistry) return undefined;
 			const messages = event.context?.contextMessages ?? [];
@@ -203,7 +256,8 @@ export default function sitraSharpen(pi: Pi): void {
 			}
 			saveHandover(summary, ctx);
 			return { entries: [{ type: "compaction", summary, firstKeptEntryId: event.messageEntryId }] };
-		} catch {
+		} catch (error) {
+			failLoudlyOnHandoverConfig(error, ctx);
 			return undefined;
 		}
 	});

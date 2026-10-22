@@ -149,12 +149,46 @@ export function helperBrief(messages: readonly Msg[]): string | undefined {
 	return clip(out.join("\n"), 2_000);
 }
 
+export class HandoverConfigError extends Error {
+	override name = "HandoverConfigError";
+}
+
+function valueType(value: unknown): string {
+	if (value === null) return "null";
+	if (Array.isArray(value)) return "array";
+	return typeof value;
+}
+
+function showValue(value: unknown): string {
+	return typeof value === "string" ? JSON.stringify(value) : String(value);
+}
+
+export function validateHandoverTokens(value: unknown, source = "handoverTokens"): number {
+	const parsed = typeof value === "string" ? Number(value) : value;
+	if (!Number.isInteger(parsed) || (parsed as number) <= 0) {
+		throw new HandoverConfigError(
+			`${source} must be a positive integer; received ${showValue(value)} (type ${valueType(value)}).`,
+		);
+	}
+	return parsed as number;
+}
+
 /**
- * Context size at which to hand over: 40% of the window, at most 160k tokens. Models lose accuracy long before their
- * window is full, so waiting for Pi's own compaction near the limit is too late.
+ * Context size at which to hand over: by default, 40% of the window, with the existing small-window floor (half the
+ * window up to 32k, then at least 16k). `handoverTokens` in config.json may set an explicit positive-integer
+ * threshold, but it may not be larger than the active model's context window; sitra must never hand over past it.
  */
-export function handoverThreshold(contextWindow: number): number {
-	return Math.min(160_000, Math.max(Math.floor(contextWindow * 0.4), Math.min(16_000, Math.floor(contextWindow / 2))));
+export function handoverThreshold(contextWindow: number, handoverTokens?: unknown, source = "handoverTokens"): number {
+	if (handoverTokens !== undefined) {
+		const tokens = validateHandoverTokens(handoverTokens, source);
+		if (tokens > contextWindow) {
+			throw new HandoverConfigError(
+				`${source} (${showValue(handoverTokens)}, type ${valueType(handoverTokens)}) is larger than the active model's context window (${contextWindow}).`,
+			);
+		}
+		return tokens;
+	}
+	return Math.max(Math.floor(contextWindow * 0.4), Math.min(16_000, Math.floor(contextWindow / 2)));
 }
 
 /** What the handover summary must hold; passed to Pi's compaction as its instructions. */

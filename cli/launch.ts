@@ -2,6 +2,26 @@
 import { join } from "node:path";
 import { type Config, learnEnv, profileDir, writeConfig } from "./config.ts";
 
+function valueType(value: unknown): string {
+	if (value === null) return "null";
+	if (Array.isArray(value)) return "array";
+	return typeof value;
+}
+
+function showValue(value: unknown): string {
+	return typeof value === "string" ? JSON.stringify(value) : String(value);
+}
+
+function handoverTokensEnv(value: unknown): string | undefined {
+	if (value === undefined) return undefined;
+	if (!Number.isInteger(value) || (value as number) <= 0) {
+		throw new Error(
+			`config.json handoverTokens must be a positive integer; received ${showValue(value)} (type ${valueType(value)}).`,
+		);
+	}
+	return String(value);
+}
+
 export function piArgs(config: Config, args: readonly string[]): string[] {
 	if (config.skills.length === 0) return [...args];
 	return ["--no-skills", ...config.skills.flatMap((s) => ["--skill", s]), ...args];
@@ -27,6 +47,7 @@ export function piEnv(
 	role: "lead" | "tower" = "lead",
 ): Record<string, string | undefined> {
 	const profile = profileDir(sitra);
+	const handoverTokens = handoverTokensEnv(config.handoverTokens);
 	const base: Record<string, string | undefined> = {
 		...env,
 		PI_CODING_AGENT_DIR: profile,
@@ -34,6 +55,8 @@ export function piEnv(
 		SITRA_USER_NAME: config.name,
 		...learnEnv(config),
 	};
+	if (handoverTokens === undefined) delete base.SITRA_HANDOVER_TOKENS;
+	else base.SITRA_HANDOVER_TOKENS = handoverTokens;
 	if (role === "tower") {
 		base.SITRA_ROLE = "tower";
 		base.SITRA_TOWER_NAME = config.tower?.trim() || "Tower";

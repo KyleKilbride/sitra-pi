@@ -157,9 +157,10 @@ context with a structured summary (`/handover` on demand).
 **A lean prompt.** Context files from folders above the repo are dropped. To load only some skills, list them in
 `~/.sitra/config.json`:
 
-    { "name": "Sam", "skills": ["/path/to/skills", "/path/to/one-skill"] }
+    { "name": "Sam", "skills": ["/path/to/skills", "/path/to/one-skill"], "handoverTokens": 400000 }
 
-An empty list means Pi's normal skill discovery.
+An empty `skills` list means Pi's normal skill discovery. `handoverTokens` is optional; when set, it must be a
+positive integer no larger than the active model's context window.
 
 ## Grimoire: one approved brain for every agent
 
