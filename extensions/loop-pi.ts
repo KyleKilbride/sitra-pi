@@ -29,6 +29,7 @@ import {
 	recordBuildEvidence,
 	recordReworkProposal,
 	replaceBlockWithStale,
+	resumeLoop,
 	roleForAgent,
 	staleReason,
 	staleReasonText,
@@ -56,8 +57,8 @@ interface ToolResult {
 }
 
 const LOOP_USAGE =
-	"usage: /loop start [--base <ref>] <task> | /loop answer <answer> | /loop plan <plan> | /loop approve <summary> | /loop build | /loop record-build <json> | /loop status";
-const LOOP_VERBS = ["start", "answer", "plan", "approve", "build", "record-build", "status"] as const;
+	"usage: /loop start [--base <ref>] <task> | /loop answer <answer> | /loop plan <plan> | /loop approve <summary> | /loop build | /loop record-build <json> | /loop resume | /loop status";
+const LOOP_VERBS = ["start", "answer", "plan", "approve", "build", "record-build", "resume", "status"] as const;
 type LoopVerb = (typeof LOOP_VERBS)[number];
 
 interface Pi {
@@ -490,6 +491,16 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 		const blocked = blockForGitFailure(currentState, String(error));
 		writeLoopStateFile(path, blocked.state);
 		emitEffects(pi, blocked.state, blocked.effects);
+		return;
+	}
+	if (verb === "resume") {
+		if (rest) throw new Error(LOOP_USAGE);
+		const stale = blockIfBuildOrVerifyStale(ctx.cwd, path, currentState, gitState);
+		if (stale) {
+			emitEffects(pi, stale.state, stale.effects);
+			return;
+		}
+		persistAndEmit(pi, path, resumeLoop(currentState));
 		return;
 	}
 	if (verb === "answer") {

@@ -653,6 +653,23 @@ export function nextLoopEffects(state: LoopState): LoopEffect[] {
 	return [];
 }
 
+export function resumeLoop(state: LoopState): { state: LoopState; effects: LoopEffect[] } {
+	if (state.stage === "blocked" && state.block) {
+		const question = state.questions.find((item) => item.id === state.block?.questionId);
+		return {
+			state,
+			effects: question ? [{ type: "ask-person", reason: state.block.kind, question }] : [],
+		};
+	}
+	if (state.stage === "advise" && state.dispatchedAdvisors.length > 0) {
+		return dispatch(state, state.dispatchedAdvisors);
+	}
+	if (state.stage === "architecture-review" && state.dispatchedAdvisors.includes("architecture")) {
+		return dispatch(state, ["architecture"]);
+	}
+	return { state, effects: nextLoopEffects(state) };
+}
+
 export function applyAdvisorReport(
 	state: LoopState,
 	report: HelperReport,
