@@ -1,5 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -309,7 +318,7 @@ describe("loop state files", () => {
 
 describe("Pi wiring", () => {
 	const usage =
-		/usage: \/loop start \[--base <ref>\] <task> \| \/loop answer <answer> \| \/loop plan <plan> \| \/loop approve <summary> \| \/loop build \| \/loop record-build <json> \| \/loop resume \| \/loop status/;
+		/usage: \/loop start \[--base <ref>\] <task> \| \/loop answer <answer> \| \/loop plan <plan> \| \/loop approve <summary> \| \/loop build \| \/loop record-build <json> \| \/loop resume \| \/loop abandon \[reason\] \| \/loop status/;
 
 	test("/loop start is explicit, writes state, and asks for the first advisors", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
@@ -688,9 +697,7 @@ describe("Pi wiring", () => {
 			abandonReason: "superseded by manual fix",
 		});
 		expect(abandoned.abandonedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-		expect(notifications).toEqual([
-			{ message: "Abandoned loop on feature in " + cwd + ".", type: "info" },
-		]);
+		expect(notifications).toEqual([{ message: `Abandoned loop on feature in ${cwd}.`, type: "info" }]);
 		await expect(tools.get("loop_status")?.execute("1", {}, undefined, undefined, loopCtx)).rejects.toThrow(
 			`no loop on feature in ${cwd}; start one with /loop start <task>`,
 		);

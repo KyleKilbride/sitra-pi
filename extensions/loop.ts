@@ -228,6 +228,11 @@ export interface LoopProposal {
 	date: string;
 }
 
+export type AbandonedLoopState = LoopState & {
+	abandonedAt: string;
+	abandonReason: string;
+};
+
 export interface AdvisorDispatch {
 	role: AdvisorRole;
 	task: string;
@@ -393,14 +398,22 @@ function tokenText(tokens: number): string {
 	return tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : String(tokens);
 }
 
-export function loopMetricsLine(state: LoopState): string {
-	const firstPass = state.stage === "done" && state.rework.length === 0 ? 1 : 0;
+export function loopMetricsLine(state: LoopState | AbandonedLoopState): string {
+	const abandoned = "abandonedAt" in state;
+	const firstPass = !abandoned && state.stage === "done" && state.rework.length === 0 ? 1 : 0;
 	const context = state.rework.filter(
 		(entry) => entry.class === "context-missed" || entry.class === "context-missing",
 	).length;
 	const intent = state.rework.filter((entry) => entry.class === "wrong-intent").length;
 	const check = state.rework.filter((entry) => entry.class === "check-gap").length;
 	return `loops: first-pass ${firstPass}/1 · rounds ${state.rework.length + 1} · avoidable rework context ${context} intent ${intent} check ${check} · tokens ${tokenText(recordedTokens(state))}`;
+}
+
+export function abandonLoop(
+	state: LoopState,
+	input: { abandonedAt: string; abandonReason: string },
+): AbandonedLoopState {
+	return { ...state, abandonedAt: input.abandonedAt, abandonReason: input.abandonReason };
 }
 
 function groupedQuestion(id: string, reason: string, questions: LoopQuestion[]): LoopQuestion {

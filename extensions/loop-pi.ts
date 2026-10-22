@@ -38,9 +38,9 @@ import {
 	tokensFromSubagentResult,
 } from "./loop.ts";
 
-export { loopStatePath, readLoopStateFile, writeLoopStateFile } from "./loop-state.ts";
+export { abandonLoopStateFile, loopStatePath, readLoopStateFile, writeLoopStateFile } from "./loop-state.ts";
 
-import { loopStatePath, readLoopStateFile, writeLoopStateFile } from "./loop-state.ts";
+import { abandonLoopStateFile, loopStatePath, readLoopStateFile, writeLoopStateFile } from "./loop-state.ts";
 import { hashFiles, readRun, readRunHeader } from "./runs.ts";
 
 interface Ctx {
@@ -57,8 +57,18 @@ interface ToolResult {
 }
 
 const LOOP_USAGE =
-	"usage: /loop start [--base <ref>] <task> | /loop answer <answer> | /loop plan <plan> | /loop approve <summary> | /loop build | /loop record-build <json> | /loop resume | /loop status";
-const LOOP_VERBS = ["start", "answer", "plan", "approve", "build", "record-build", "resume", "status"] as const;
+	"usage: /loop start [--base <ref>] <task> | /loop answer <answer> | /loop plan <plan> | /loop approve <summary> | /loop build | /loop record-build <json> | /loop resume | /loop abandon [reason] | /loop status";
+const LOOP_VERBS = [
+	"start",
+	"answer",
+	"plan",
+	"approve",
+	"build",
+	"record-build",
+	"resume",
+	"abandon",
+	"status",
+] as const;
 type LoopVerb = (typeof LOOP_VERBS)[number];
 
 interface Pi {
@@ -479,6 +489,13 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 	}
 	const checkout = checkoutGit(ctx.cwd);
 	const { path, state: currentState } = loadExistingCurrentState(checkout);
+	if (verb === "abandon") {
+		abandonLoopStateFile(path, currentState, rest);
+		const message = `Abandoned loop on ${currentState.branch} in ${currentState.worktree}.`;
+		if (ctx.ui?.notify) ctx.ui.notify(message, "info");
+		else pi.sendUserMessage(message, { deliverAs: "followUp", streamingBehavior: "followUp" });
+		return;
+	}
 	if (verb === "status") {
 		if (!ctx.ui?.notify) throw new Error("/loop status requires an interactive UI");
 		ctx.ui.notify(loopStatus(ctx.cwd, currentState).content[0]?.text ?? "", "info");
