@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { EXIT_MARKER, HEADER_MARKER, paneCommand, readRun } from "../extensions/runs.ts";
+import { EXIT_MARKER, HEADER_MARKER, paneCommand, readRun, readRunHeader } from "../extensions/runs.ts";
 
 describe("runs in panes", () => {
 	test("the pane command runs the command, logs everything, and records the exit code", () => {
