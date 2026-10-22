@@ -234,17 +234,12 @@ function buildEvidenceProblem(reason: string, satisfy: string): { reason: string
 function answerBuildEvidenceQuestions(state: LoopState): LoopState {
 	return {
 		...state,
-		questions: state.questions.map((question) =>
-			question.id === "build-evidence" && !question.answer
-				? { ...question, answer: "superseded by successful build evidence retry" }
-				: question,
-		),
+		questions: state.questions.filter((question) => question.id !== "build-evidence"),
 	};
 }
 
 function testsOnlyAncestorProblem(
 	cwd: string,
-	baseRef: string,
 	testFiles: string[],
 	testHashes: LoopTestHash[],
 	redCommit: string,
@@ -262,7 +257,8 @@ function testsOnlyAncestorProblem(
 		);
 	let changed: string[];
 	try {
-		changed = execFileSync("git", ["diff", "--name-only", `${baseRef}...${redCommit}`], {
+		const parent = git(cwd, ["rev-parse", `${redCommit}^`]);
+		changed = execFileSync("git", ["diff", "--name-only", parent, redCommit], {
 			cwd,
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "pipe"],
@@ -271,7 +267,7 @@ function testsOnlyAncestorProblem(
 			.map((line) => line.trim())
 			.filter(Boolean);
 	} catch (error) {
-		return buildEvidenceProblem(`red commit diff from ${baseRef} could not be checked: ${String(error)}`, satisfy);
+		return buildEvidenceProblem(`red commit diff from its parent could not be checked: ${String(error)}`, satisfy);
 	}
 	const allowed = new Set(testFiles);
 	const extra = changed.filter((file) => !allowed.has(file));
@@ -334,7 +330,7 @@ function evidenceCommand(command: string, log: string, meta: RunMeta): string {
 	const header = shellQuote(HEADER_MARKER);
 	const exitPrefix = `${EXIT_MARKER}${nonce}=`;
 	const script = `printf '%s{"pid":%s,"meta":%s}\\n' ${header} "$$" ${metaJson} > ${q}; { ${command} ; } 2>&1 | tee -a ${q}; code=\${PIPESTATUS[0]}; echo "${exitPrefix}\${code}" >> ${q}; exit "\${code}"`;
-	return `bash -c ${shellQuote(script)}`;
+	return script;
 }
 
 function spawnEvidenceCommand(input: {
@@ -344,34 +340,39 @@ function spawnEvidenceCommand(input: {
 	signal?: AbortSignal;
 }): Promise<{ code: number | undefined; signal: NodeJS.Signals | null }> {
 	return new Promise((resolve, reject) => {
+		if (input.signal?.aborted) {
+			reject(new Error("loop evidence command aborted"));
+			return;
+		}
 		const child = spawn("bash", ["-c", input.commandLine], { cwd: input.cwd, detached: true, stdio: "ignore" });
 		let settled = false;
 		let timedOut = false;
 		let aborted = false;
+		let killError: Error | undefined;
 		let forceTimer: NodeJS.Timeout | undefined;
+		let rejectTimer: NodeJS.Timeout | undefined;
 		const finish = (fn: () => void) => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
 			if (forceTimer) clearTimeout(forceTimer);
+			if (rejectTimer) clearTimeout(rejectTimer);
 			input.signal?.removeEventListener("abort", abort);
 			fn();
 		};
-		const kill = () => {
+		const signalGroup = (signal: NodeJS.Signals) => {
 			if (!child.pid) return;
 			try {
-				process.kill(-child.pid, "SIGTERM");
-			} catch {
-				if (!child.killed) child.kill("SIGTERM");
+				process.kill(-child.pid, signal);
+			} catch (error) {
+				killError = new Error(`could not send ${signal} to loop evidence process group ${child.pid}: ${String(error)}`);
 			}
+		};
+		const kill = () => {
+			signalGroup("SIGTERM");
 			forceTimer = setTimeout(() => {
-				if (!child.pid) return;
-				try {
-					process.kill(-child.pid, "SIGKILL");
-				} catch {
-					if (!child.killed) child.kill("SIGKILL");
-				}
-			}, 1_000);
+				signalGroup("SIGKILL");
+			}, 100);
 		};
 		const timer = setTimeout(() => {
 			timedOut = true;
@@ -381,25 +382,28 @@ function spawnEvidenceCommand(input: {
 			aborted = true;
 			kill();
 		};
-		if (input.signal?.aborted) {
-			abort();
-			return;
-		}
 		input.signal?.addEventListener("abort", abort, { once: true });
 		child.on("error", (error) => finish(() => reject(error)));
-		child.on("exit", (code, signal) =>
-			finish(() => {
-				if (timedOut) {
-					reject(new Error(`loop evidence command timed out after ${input.timeoutMs}ms`));
-					return;
-				}
-				if (aborted) {
-					reject(new Error("loop evidence command aborted"));
-					return;
-				}
-				resolve({ code: code ?? undefined, signal });
-			}),
-		);
+		child.on("exit", (code, signal) => {
+			if (killError) {
+				finish(() => reject(killError));
+				return;
+			}
+			if (timedOut) {
+				signalGroup("SIGKILL");
+				rejectTimer = setTimeout(
+					() => finish(() => reject(new Error(`loop evidence command timed out after ${input.timeoutMs}ms`))),
+					100,
+				);
+				return;
+			}
+			if (aborted) {
+				signalGroup("SIGKILL");
+				rejectTimer = setTimeout(() => finish(() => reject(new Error("loop evidence command aborted"))), 100);
+				return;
+			}
+			finish(() => resolve({ code: code ?? undefined, signal }));
+		});
 	});
 }
 
@@ -911,13 +915,7 @@ function recordBuildFromParams(
 	const redRun = parseLoopRunLog(runLogForId(params.redRunId));
 	const greenRun = parseLoopRunLog(runLogForId(params.greenRunId));
 	if (redRun.loop?.commit) {
-		const ancestorProblem = testsOnlyAncestorProblem(
-			ctx.cwd,
-			recordingState.baseRef,
-			testFiles,
-			hashes,
-			redRun.loop.commit,
-		);
+		const ancestorProblem = testsOnlyAncestorProblem(ctx.cwd, testFiles, hashes, redRun.loop.commit);
 		if (ancestorProblem) {
 			const blocked = blockForBuildEvidenceFailure(recordingState, ancestorProblem);
 			writeLoopStateFile(path, blocked.state);
@@ -1338,12 +1336,13 @@ export default function sitraLoop(pi: Pi): void {
 				timeoutMs: p.timeoutMs ?? 120_000,
 				...(signal ? { signal } : {}),
 			});
+			const latest = readLoopStateFile(path);
 			writeLoopStateFile(path, {
-				...recordingState,
+				...latest,
 				build: {
-					...recordingState.build,
+					...latest.build,
 					evidence: [
-						...(recordingState.build.evidence ?? []),
+						...(latest.build.evidence ?? []),
 						{
 							runId: result.runId,
 							sha256: result.sha256,

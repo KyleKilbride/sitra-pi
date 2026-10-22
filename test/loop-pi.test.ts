@@ -1494,6 +1494,47 @@ describe("Pi wiring", () => {
 		);
 	});
 
+	test("concurrent loop_run_evidence calls both append evidence rows", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		approvedLoop(profile, cwd, "test -f loop.test.ts");
+		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
+		const redCommit = commitAll(cwd, "add tests alone");
+		writeFileSync(join(cwd, "impl.ts"), "green\n");
+		const greenCommit = commitAll(cwd, "implement");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+
+		const [red, green] = await Promise.all([
+			tools
+				.get("loop_run_evidence")
+				?.execute(
+					"red",
+					{ phase: "red", commit: redCommit, command: "test -f loop.test.ts" },
+					undefined,
+					undefined,
+					ctx(cwd),
+				),
+			tools
+				.get("loop_run_evidence")
+				?.execute(
+					"green",
+					{ phase: "green", commit: greenCommit, command: "test -f loop.test.ts" },
+					undefined,
+					undefined,
+					ctx(cwd),
+				),
+		]);
+
+		const state = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		const redDetails = red?.details as { runId: string };
+		const greenDetails = green?.details as { runId: string };
+		expect(state.build.evidence?.map((item) => item.runId).sort()).toEqual(
+			[redDetails.runId, greenDetails.runId].sort(),
+		);
+	});
+
 	test("loop_run_evidence does not block the event loop and cleans up the worktree on timeout", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
@@ -1526,7 +1567,7 @@ describe("Pi wiring", () => {
 		await run;
 
 		const timeoutPidFile = join(profile, "timeout-sleep.pid");
-		const timeoutCommand = `sh -c 'sleep 5 & echo $! > ${JSON.stringify(timeoutPidFile)}; wait'`;
+		const timeoutCommand = `sh -c 'node -e '"'"'process.on("SIGTERM",()=>{}); setInterval(()=>{},1000)'"'"' & echo $! > ${JSON.stringify(timeoutPidFile)}; wait'`;
 		approvedLoop(profile, cwd, timeoutCommand);
 		await commands.get("loop")?.handler("build", ctx(cwd));
 		await expect(
@@ -1564,6 +1605,24 @@ describe("Pi wiring", () => {
 		expect(execFileSync("git", ["worktree", "list", "--porcelain"], { cwd, encoding: "utf8" })).toBe(before);
 		const abortSleepPid = Number(readFileSync(abortPidFile, "utf8"));
 		expect(() => process.kill(abortSleepPid, 0)).toThrow();
+
+		const alreadyAborted = new AbortController();
+		alreadyAborted.abort();
+		const beforeAlreadyAborted = execFileSync("git", ["worktree", "list", "--porcelain"], { cwd, encoding: "utf8" });
+		await expect(
+			tools
+				.get("loop_run_evidence")
+				?.execute(
+					"already-aborted",
+					{ phase: "red", commit: redCommit, command: abortCommand, timeoutMs: 10_000 },
+					alreadyAborted.signal,
+					undefined,
+					ctx(cwd),
+				),
+		).rejects.toThrow(/aborted/);
+		expect(execFileSync("git", ["worktree", "list", "--porcelain"], { cwd, encoding: "utf8" })).toBe(
+			beforeAlreadyAborted,
+		);
 	});
 
 	test("loop_record_build trusts only first-line run headers and rejects hand-written loop markers", async () => {
@@ -1878,6 +1937,38 @@ describe("Pi wiring", () => {
 		expect(blocked?.content[0]?.text).toContain(
 			"satisfy: Split the red commit so its diff from base touches only: loop.test.ts.",
 		);
+	});
+
+	test("red tests-only check allows earlier non-test commits and checks only the red commit parent diff", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		approvedLoop(profile, cwd);
+		writeFileSync(join(cwd, "impl.ts"), "earlier implementation\n");
+		commitAll(cwd, "earlier implementation");
+		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
+		const redCommit = commitAll(cwd, "add tests only");
+		writeFileSync(join(cwd, "impl.ts"), "green\n");
+		const greenCommit = commitAll(cwd, "finish implementation");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		const hash = sha256sum(cwd, "loop.test.ts");
+		const redLog = join(profile, "red-parent.log");
+		const greenLog = join(profile, "green-parent.log");
+		writeHeaderLoopLog(redLog, {
+			commit: redCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 1,
+		});
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 0,
+		});
+
+		const recorded = await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
+
+		expect(recorded?.content[0]?.text).toContain("stage: verify");
 	});
 
 	test("/loop answer emits an unblock notice with the stage, answer, and next action", async () => {
