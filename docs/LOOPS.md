@@ -1,8 +1,8 @@
 # Advisor-first agent graph
 
 The first loop in sitra should be an advisor-first graph, not a blind build -> review -> fix retry loop.
-The graph starts only when the person explicitly asks for it with a command or tool. It gathers advice, asks every
-ready question in one round, freezes a brief, builds once, verifies independently, and turns misses into Grimoire
+The graph starts only when the person explicitly asks for it with a command or tool. It gathers advice, asks the
+most important person-level questions in capped rounds, freezes a brief, builds once, verifies independently, and turns misses into Grimoire
 proposals the person can approve.
 
 ```
@@ -28,9 +28,12 @@ they list every awaited advisor, whether it has been dispatched or is not starte
 must be used. A lead-written summary does not count as an advisor report: the advisor has to report through
 `helper_report`.
 
-Questions from advisors are grouped into one `/loop answer <answer>` round. The runner records stable question ids and
-the exact normalized text that was answered, so repeated questions by id or exact text are not asked again. The recorded
-answers are included in later advisor tasks and in the frozen brief.
+Questions from advisors are grouped into `/loop answer <answer>` rounds of at most three questions. The runner records
+stable question ids and the exact normalized text that was answered, so repeated questions by id or exact text are not
+asked again. Unasked questions stay open for the next advisor rerun. Advise has a rerun cap: when it is reached, the
+runner keeps asking open intent-advisor decision questions at most three at a time. Only engineering leftovers from
+advisor `openQuestions` become assumptions; those assumptions show in `/loop status` and `loop_status`. The runner moves
+on only after no person decision is open.
 
 When advisors are complete, the lead submits the plan with `loop_submit_plan` (the same transition and validation as
 `/loop plan <plan>`). Approval is the human gate: `/loop approve <summary>` is accepted only as the person's typed slash
@@ -62,9 +65,10 @@ Other useful verbs:
 
 - The person starts the graph explicitly; the lead does not infer it from a normal request.
 - Four read-only advisors run before implementation: intent, codebase, test-design, and architecture.
-- The intake works like a grill-with-docs pattern, but with sitra structure: every ready question is asked in one round,
-  each question includes a recommended answer, agents find facts, the person makes decisions, and intake stops only
-  when nothing is open.
+- The intake works like a grill-with-docs pattern, but with sitra structure: only person-level product, priority, and
+  scope decisions are asked, at most three at a time, each question includes a recommended answer, agents find facts,
+  the lead decides engineering details, and intake converges when no person decision is open and the advise rerun cap
+  has recorded any remaining engineering leftovers as assumptions.
 - One builder, normally the lead, works from a frozen brief.
 - One independent verifier checks the frozen brief, diff, test hashes, and run logs from a fresh context.
 - Misses become classified rework entries and Grimoire proposals. A retry is allowed only for real new information or a

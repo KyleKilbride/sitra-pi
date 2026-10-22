@@ -188,6 +188,14 @@ describe("lead rules", () => {
 		);
 	});
 
+	test("tell the lead to check first and ask at most three plain questions", () => {
+		const rules = leadRules("Sam");
+		expect(rules).toContain(
+			"Before you ask Sam anything, check Grimoire, related sessions and peer agents' reports, and say in one line what you checked. Decide engineering points yourself. Ask at most 3 at a time, in plain words with the context in the question.",
+		);
+		expect(rules).not.toContain("Kyle");
+	});
+
 	test('fall back to "the user" without a name', () => {
 		const rules = leadRules(undefined);
 		expect(rules).toContain("the agent the user talks to");

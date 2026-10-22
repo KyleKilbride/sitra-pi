@@ -11,6 +11,7 @@ import { worktreeClean } from "./git-status.ts";
 import { grimoireDir, grimoireStoreStatus, writeProposal } from "./grimoire.ts";
 import { type HelperReport, validateHelperReport } from "./helper-report.ts";
 import {
+	ADVISE_CAP_ASSUMPTION_PREFIX,
 	ADVISOR_ROLES,
 	type AdvisorRole,
 	advisorTask,
@@ -708,6 +709,14 @@ function advisorKeyForStatus(role: AdvisorRole): keyof LoopState["advisorRuns"] 
 	return role === "test-design" ? "testDesign" : role;
 }
 
+function adviseAssumptionLines(state: LoopState): string[] {
+	const assumptions = Object.values(state.advisorRuns)
+		.flatMap((run) => run?.assumptions ?? [])
+		.filter((assumption) => assumption.startsWith(ADVISE_CAP_ASSUMPTION_PREFIX));
+	if (assumptions.length === 0) return [];
+	return ["advise assumptions:", ...assumptions.map((assumption) => `- ${assumption}`)];
+}
+
 function renderEffect(state: LoopState, effect: LoopEffect): string {
 	if (effect.type === "dispatch-advisors") return renderDispatch(state, effect);
 	if (effect.type === "ask-person")
@@ -834,6 +843,7 @@ function loopStatus(cwd: string, state: LoopState): ToolResult {
 					`goal: ${state.goal}`,
 					loopMetricsLine(metrics.states),
 					...advisorWaitLines(state),
+					...adviseAssumptionLines(state),
 					...(metrics.badFiles.length ? [`loop metrics unreadable: ${metrics.badFiles.join(", ")}`] : []),
 					...(rejectedVerifierReports.length
 						? [

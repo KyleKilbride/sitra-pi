@@ -97,6 +97,14 @@ describe("advisor and verifier profiles", () => {
 		expect(body).toContain("Report every issue you find");
 		expect(body).toContain("low-severity or uncertain");
 	});
+
+	test("intent advisor asks only person-level decisions and caps questions at three", () => {
+		const body = agent("intent-advisor").body;
+		expect(body).not.toContain("list every question");
+		expect(body).toContain("Ask at most 3");
+		expect(body).toContain("only the person can decide");
+		expect(body).toContain("Record everything else");
+	});
 });
 
 test("reviewer has an explicit read-only tools list", () => {

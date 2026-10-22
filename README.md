@@ -144,8 +144,9 @@ the lead gets the result as a message and picks up from there. No sleep or poll 
 
 `/loop` runs an explicit advisor-first graph for work that needs intake, a frozen brief and independent verification.
 Start from a feature branch with `/loop start [--base <ref>] <goal>`. The runner dispatches advisors, groups their
-questions into one `/loop answer <answer>` round, and shows pending advisor roles plus the exact task text in
-`/loop status` and `loop_status`.
+questions into `/loop answer <answer>` rounds of at most three, and shows pending advisor roles plus the exact task text
+in `/loop status` and `loop_status`. Repeated settled questions are ignored. If advise hits its rerun cap, the runner
+moves on with the remaining advisor questions recorded as visible assumptions in `/loop status` and `loop_status`.
 
 When advisors are done, the lead submits its plan with `loop_submit_plan`. Approval stays human-only: type
 `/loop approve <summary>` yourself when the plan and architecture review are acceptable. Then use `/loop build` and

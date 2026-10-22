@@ -249,6 +249,14 @@ describe("tower rules", () => {
 		);
 	});
 
+	test("tell the tower to check first and ask at most three plain questions", () => {
+		const rules = towerRules("Sam", "Radar");
+		expect(rules).toContain(
+			"Before you ask Sam anything, check Grimoire, related sessions and peer agents' reports, and say in one line what you checked. Decide engineering points yourself. Ask at most 3 at a time, in plain words with the context in the question.",
+		);
+		expect(rules).not.toContain("Kyle");
+	});
+
 	test("records a worker lifecycle and lets the tower inspect it through list_sessions and read_session", async () => {
 		const profile = tmp();
 		const prevDir = process.env.PI_CODING_AGENT_DIR;

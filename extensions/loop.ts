@@ -40,6 +40,9 @@ export const LOOP_STAGES = [
 	"done",
 ] as const;
 export type LoopStage = (typeof LOOP_STAGES)[number];
+const MAX_QUESTIONS_PER_ASK = 3;
+const MAX_ADVISE_RERUNS = 3;
+export const ADVISE_CAP_ASSUMPTION_PREFIX = "Advise rerun cap reached";
 const LoopStageSchema = Type.Union([
 	Type.Literal("advise"),
 	Type.Literal("needs-person"),
@@ -225,6 +228,7 @@ export const LOOP_STATE_SCHEMA = Type.Object(
 		limits: Type.Array(Type.String()),
 		done: Type.Array(Type.String()),
 		questions: Type.Array(Question),
+		adviseReruns: Type.Optional(Type.Number()),
 		dispatchedAdvisors: Type.Array(AdvisorRoleSchema),
 		startedAdvisors: Type.Optional(Type.Array(AdvisorRoleSchema)),
 		advisorRuns: AdvisorRuns,
@@ -343,6 +347,7 @@ export function createLoopState(input: {
 		limits: input.limits,
 		done: input.done,
 		questions: [],
+		adviseReruns: 0,
 		dispatchedAdvisors: ["intent", "codebase"],
 		startedAdvisors: [],
 		advisorRuns: {},
@@ -387,9 +392,15 @@ function normalizeQuestionText(text: string): string {
 	return text.trim().replace(/\s+/g, " ");
 }
 
+function stableQuestionId(role: HelperReportRole, text: string): string {
+	return `${role}-question-${sha256Text(normalizeQuestionText(text)).slice(0, 12)}`;
+}
+
 function questionSource(question: LoopQuestion): Omit<LoopQuestion, "answer" | "sourceQuestions"> {
 	return {
 		id: question.id,
+		...(question.sourceId ? { sourceId: question.sourceId } : {}),
+		...(question.decision ? { decision: question.decision } : {}),
 		text: question.text,
 		recommended: question.recommended,
 		dependsOn: question.dependsOn,
@@ -535,13 +546,32 @@ function answeredQuestionTexts(state: LoopState): Set<string> {
 	return texts;
 }
 
+function answeredQuestionIds(state: LoopState): Set<string> {
+	const ids = new Set<string>();
+	for (const question of state.questions) {
+		if (!question.answer) continue;
+		ids.add(question.id);
+		if (question.sourceId) ids.add(question.sourceId);
+		for (const source of questionSources(question)) {
+			ids.add(source.id);
+			if (source.sourceId) ids.add(source.sourceId);
+		}
+	}
+	return ids;
+}
+
 function uniqueQuestions(questions: LoopQuestion[]): LoopQuestion[] {
 	const texts = new Set<string>();
+	const ids = new Set<string>();
+	const sourceIds = new Set<string>();
 	const out: LoopQuestion[] = [];
 	for (const question of questions) {
 		const text = normalizeQuestionText(question.text);
-		if (texts.has(text)) continue;
+		if (!text || texts.has(text) || ids.has(question.id) || (question.sourceId && sourceIds.has(question.sourceId)))
+			continue;
 		texts.add(text);
+		ids.add(question.id);
+		if (question.sourceId) sourceIds.add(question.sourceId);
 		out.push(question);
 	}
 	return out;
@@ -549,7 +579,16 @@ function uniqueQuestions(questions: LoopQuestion[]): LoopQuestion[] {
 
 function unansweredQuestions(state: LoopState, questions: LoopQuestion[]): LoopQuestion[] {
 	const answered = answeredQuestionTexts(state);
-	return uniqueQuestions(questions.filter((question) => !answered.has(normalizeQuestionText(question.text))));
+	const answeredIds = answeredQuestionIds(state);
+	return uniqueQuestions(
+		questions.filter(
+			(question) =>
+				!answered.has(normalizeQuestionText(question.text)) &&
+				!answeredIds.has(question.id) &&
+				!(question.sourceId && answeredIds.has(question.sourceId)) &&
+				question.dependsOn.every((dependency) => answeredIds.has(dependency)),
+		),
+	);
 }
 
 function runQuestions(state: LoopState, run: AdvisorRun): LoopQuestion[] {
@@ -557,18 +596,19 @@ function runQuestions(state: LoopState, run: AdvisorRun): LoopQuestion[] {
 }
 
 function groupedQuestion(prefix: string, reason: string, questions: LoopQuestion[]): LoopQuestion {
-	const body = questions
+	const askedQuestions = questions.slice(0, MAX_QUESTIONS_PER_ASK);
+	const body = askedQuestions
 		.map((question, index) => `${index + 1}. ${question.text}\nRecommended: ${question.recommended}`)
 		.join("\n\n");
 	const fingerprint = sha256Text(
-		JSON.stringify(questions.map((question) => [question.id, normalizeQuestionText(question.text)])),
+		JSON.stringify(askedQuestions.map((question) => [question.id, normalizeQuestionText(question.text)])),
 	).slice(0, 12);
 	return {
 		id: `${prefix}-${fingerprint}`,
 		text: body || reason,
-		recommended: "Answer every item in one reply so the runner can continue.",
-		dependsOn: questions.map((question) => question.id),
-		sourceQuestions: questions.map(questionSource),
+		recommended: "Answer these items in one reply so the runner can continue.",
+		dependsOn: askedQuestions.map((question) => question.id),
+		sourceQuestions: askedQuestions.map(questionSource),
 	};
 }
 
@@ -715,12 +755,26 @@ function reportQuestions(role: HelperReportRole, report: HelperReport): LoopQues
 	const out: LoopQuestion[] = [];
 	if (role === "intent") {
 		const details = report.details as { questions: LoopQuestion[] };
-		for (const question of details.questions) out.push(question);
+		for (const question of details.questions) {
+			const text = normalizeQuestionText(question.text);
+			if (!text) continue;
+			out.push({
+				id: stableQuestionId(role, text),
+				sourceId: question.id,
+				decision: "person",
+				text,
+				recommended: question.recommended.trim(),
+				dependsOn: question.dependsOn,
+			});
+		}
 	}
 	for (const text of report.openQuestions) {
+		const normalized = normalizeQuestionText(text);
+		if (!normalized) continue;
 		out.push({
-			id: `${role}-open-${sha256Text(normalizeQuestionText(text)).slice(0, 12)}`,
-			text,
+			id: stableQuestionId(role, normalized),
+			decision: "engineering",
+			text: normalized,
 			recommended: "Use the report's recommended answer if one was supplied; otherwise answer directly.",
 			dependsOn: [],
 		});
@@ -768,13 +822,62 @@ function toAdvisorRun(
 	return run;
 }
 
+function capAssumption(questions: LoopQuestion[]): string {
+	return [
+		`${ADVISE_CAP_ASSUMPTION_PREFIX}; moving on with remaining advisor questions as assumptions:`,
+		...questions.map((question) => `- ${question.text}`),
+	].join("\n");
+}
+
+function appendAssumptionOnce(run: AdvisorRun, assumption: string): AdvisorRun {
+	return run.assumptions.includes(assumption) ? run : { ...run, assumptions: [...run.assumptions, assumption] };
+}
+
+function stateWithAdviseCapAssumptions(state: LoopState, entries: [AdvisorKey, LoopQuestion[]][]): LoopState {
+	let advisorRuns = state.advisorRuns;
+	for (const [key, questions] of entries) {
+		const run = advisorRuns[key];
+		if (!run || questions.length === 0) continue;
+		advisorRuns = { ...advisorRuns, [key]: appendAssumptionOnce(run, capAssumption(questions)) };
+	}
+	return { ...state, advisorRuns };
+}
+
+function personDecisionQuestions(questions: LoopQuestion[]): LoopQuestion[] {
+	return questions.filter((question) => question.decision === "person");
+}
+
+function engineeringQuestions(questions: LoopQuestion[]): LoopQuestion[] {
+	return questions.filter((question) => question.decision !== "person");
+}
+
 function adviseEffects(state: LoopState): { state: LoopState; effects: LoopEffect[] } {
 	const { intent, codebase, testDesign } = state.advisorRuns;
 	if (intent && codebase) {
 		if (state.dispatchedAdvisors.some((role) => role === "intent" || role === "codebase"))
 			return { state, effects: [] };
-		const earlyQuestions = [...runQuestions(state, intent), ...runQuestions(state, codebase)];
+		const intentQuestions = runQuestions(state, intent);
+		const codebaseQuestions = runQuestions(state, codebase);
+		const earlyQuestions = [...intentQuestions, ...codebaseQuestions];
 		if (earlyQuestions.length > 0) {
+			if ((state.adviseReruns ?? 0) >= MAX_ADVISE_RERUNS) {
+				const openIntentDecisions = personDecisionQuestions(intentQuestions);
+				const capped = stateWithAdviseCapAssumptions(state, [
+					["intent", engineeringQuestions(intentQuestions)],
+					["codebase", codebaseQuestions],
+				]);
+				if (openIntentDecisions.length > 0) {
+					const question = groupedQuestion(
+						"advisor-questions",
+						"Advisor questions need an answer.",
+						openIntentDecisions,
+					);
+					return withBlock(capped, { kind: "questions", question, pendingAdvisors: affectedAdvisors(capped) });
+				}
+				if (!testDesign) return dispatch(capped, ["test-design"]);
+				const next = { ...capped, stage: "plan" as const, dispatchedAdvisors: [] };
+				return { state: next, effects: [{ type: "write-lead-plan", brief: buildBrief(next) }] };
+			}
 			const question = groupedQuestion("advisor-questions", "Advisor questions need an answer.", earlyQuestions);
 			return withBlock(state, { kind: "questions", question, pendingAdvisors: affectedAdvisors(state) });
 		}
@@ -782,6 +885,11 @@ function adviseEffects(state: LoopState): { state: LoopState; effects: LoopEffec
 		if (state.dispatchedAdvisors.includes("test-design")) return { state, effects: [] };
 		const allQuestions = runQuestions(state, testDesign);
 		if (allQuestions.length > 0) {
+			if ((state.adviseReruns ?? 0) >= MAX_ADVISE_RERUNS) {
+				const capped = stateWithAdviseCapAssumptions(state, [["testDesign", allQuestions]]);
+				const next = { ...capped, stage: "plan" as const, dispatchedAdvisors: [] };
+				return { state: next, effects: [{ type: "write-lead-plan", brief: buildBrief(next) }] };
+			}
 			const question = groupedQuestion("advisor-questions", "Advisor questions need an answer.", allQuestions);
 			return withBlock(state, { kind: "questions", question, pendingAdvisors: affectedAdvisors(state) });
 		}
@@ -1114,11 +1222,16 @@ export function answerLoopQuestion(
 	const advisorRuns = { ...state.advisorRuns };
 	for (const role of roles) delete advisorRuns[advisorKey(role)];
 	const architectureAffected = roles.includes("architecture");
+	const adviseReruns =
+		state.block.kind === "questions" && state.block.resumeStage === "advise"
+			? (state.adviseReruns ?? 0) + 1
+			: state.adviseReruns;
 	const next: LoopState = {
 		...state,
 		stage: architectureAffected ? "architecture-review" : state.block.resumeStage,
 		block: undefined,
 		questions: answered,
+		...(adviseReruns === undefined ? {} : { adviseReruns }),
 		advisorRuns,
 		dispatchedAdvisors: [],
 	};
