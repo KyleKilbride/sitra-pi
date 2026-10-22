@@ -65,6 +65,7 @@ export interface RunStatus {
 export function readRun(logText: string, tailLines = 40): RunStatus {
 	const lines = logText.replace(/\n$/, "").split("\n");
 	const header = readRunHeader(lines[0] ?? "");
+	if ((lines[0] ?? "").startsWith(HEADER_MARKER) && !header) throw new Error("invalid run header");
 	const nonce = header?.nonce;
 	const marker = lines.findLastIndex((l) =>
 		nonce ? l.startsWith(`${EXIT_MARKER}${nonce}=`) : l.startsWith(EXIT_MARKER),

@@ -34,9 +34,11 @@ function addVerifierTask(details, task) {
 	if (details?.agent !== "verifier" || typeof details.sessionFile !== "string") return details;
 	const raw = readFileSync(details.sessionFile, "utf8");
 	if (raw.includes('"role":"user"')) return details;
+	const taskStart = task.indexOf("You are the independent LOOPS verifier.");
+	const exactTask = taskStart >= 0 ? task.slice(taskStart) : task;
 	writeFileSync(
 		details.sessionFile,
-		`${JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: task }] } })}\n${raw}`,
+		`${JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: exactTask }] } })}\n${raw}`,
 	);
 	return details;
 }
