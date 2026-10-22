@@ -221,10 +221,14 @@ describe("run_in_pane loop metadata", () => {
 		const linked = addLinkedWorktree(cwd);
 		writeFileSync(join(linked, "loop.test.ts"), "expect('linked').toBe('linked')\n");
 		execFileSync("git", ["add", "loop.test.ts"], { cwd: linked, stdio: "ignore" });
-		execFileSync("git", ["-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", "linked test"], {
-			cwd: linked,
-			stdio: "ignore",
-		});
+		execFileSync(
+			"git",
+			["-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", "linked test"],
+			{
+				cwd: linked,
+				stdio: "ignore",
+			},
+		);
 		const linkedHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: linked, encoding: "utf8" }).trim();
 		const state: LoopState = {
 			...createLoopState({

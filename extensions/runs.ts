@@ -58,7 +58,9 @@ export function readRun(logText: string, tailLines = 40): RunStatus {
 	const lines = logText.replace(/\n$/, "").split("\n");
 	const header = readRunHeader(lines[0] ?? "");
 	const nonce = typeof header?.meta.nonce === "string" ? header.meta.nonce : undefined;
-	const marker = lines.findLastIndex((l) => (nonce ? l.startsWith(`${EXIT_MARKER}${nonce}=`) : l.startsWith(EXIT_MARKER)));
+	const marker = lines.findLastIndex((l) =>
+		nonce ? l.startsWith(`${EXIT_MARKER}${nonce}=`) : l.startsWith(EXIT_MARKER),
+	);
 	const body = (marker === -1 ? lines : lines.slice(0, marker)).filter((l) => !l.startsWith(HEADER_MARKER));
 	const tail = body.slice(-tailLines).join("\n");
 	if (marker === -1) return { done: false, tail };
