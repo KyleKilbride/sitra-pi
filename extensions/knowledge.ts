@@ -379,6 +379,14 @@ export default function sitraKnowledge(pi: Pi): void {
 
 	pi.on("before_agent_start", (event, ctx) => {
 		// Nothing here may stop a turn: each step fails on its own.
+		if (!process.env.PI_SUBAGENT_NAME && ctx?.ui) {
+			// Background learning and other sessions write proposals; keep the review count current.
+			try {
+				status(ctx);
+			} catch {
+				// A status line is never worth a failed turn.
+			}
+		}
 		// A resumed conversation restores the tool list it was saved with, so one saved before Grimoire never sees
 		// these tools. Helpers keep the list their agent definition chose.
 		try {
