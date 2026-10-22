@@ -43,9 +43,8 @@ export function paneCommand(command: string, log: string, meta: RunMeta = {}): s
 	const pidStart = shellQuote(`,"pidStart":"`);
 	const pidStartKind = shellQuote(`","pidStartKind":"`);
 	const tail = shellQuote(`","meta":${JSON.stringify(metaWithNonce)}}`);
-	const exit = shellQuote(`${EXIT_MARKER}${nonce}=`);
 	// Always bash, whatever shell the pane runs (herdr panes run the user's zsh).
-	const script = `pid_start=""; pid_start_kind=""; if [ -r "/proc/$$/stat" ]; then pid_start=$(awk '{print $22}' "/proc/$$/stat" 2>/dev/null || true); if [ -n "$pid_start" ]; then pid_start_kind="proc"; fi; fi; if [ -z "$pid_start" ]; then pid_start=$(ps -o lstart= -p "$$" 2>/dev/null | awk '{$1=$1; print}' || true); if [ -n "$pid_start" ]; then pid_start_kind="ps-lstart"; fi; fi; printf '%s%s%s%s%s%s%s\\n' ${head} "$$" ${pidStart} "$pid_start" ${pidStartKind} "$pid_start_kind" ${tail} > ${q}; { ${command} ; } 2>&1 | tee -a ${q}; echo "${exit}\${PIPESTATUS[0]}" >> ${q}`;
+	const script = `pid_start=""; pid_start_kind=""; if [ -r "/proc/$$/stat" ]; then pid_start=$(awk '{print $22}' "/proc/$$/stat" 2>/dev/null || true); if [ -n "$pid_start" ]; then pid_start_kind="proc"; fi; fi; if [ -z "$pid_start" ]; then pid_start=$(ps -o lstart= -p "$$" 2>/dev/null | awk '{$1=$1; print}' || true); if [ -n "$pid_start" ]; then pid_start_kind="ps-lstart"; fi; fi; printf '%s%s%s%s%s%s%s\\n' ${head} "$$" ${pidStart} "$pid_start" ${pidStartKind} "$pid_start_kind" ${tail} > ${q}; { ${command} ; } 2>&1 | tee -a ${q}; echo "${EXIT_MARKER}${nonce}=\${PIPESTATUS[0]}" >> ${q}`;
 	return `bash -c ${shellQuote(script)}`;
 }
 

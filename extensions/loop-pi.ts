@@ -2,6 +2,7 @@
  * Thin Pi wiring for the LOOPS runner. State transitions stay in loop.ts.
  */
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Type } from "typebox";

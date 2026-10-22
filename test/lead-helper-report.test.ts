@@ -173,6 +173,23 @@ describe("run_in_pane loop metadata", () => {
 					acceptanceTestFiles: ["loop.test.ts"],
 				},
 			},
+			frozenBrief: {
+				version: 1,
+				goal: "Add the runner",
+				limits: [],
+				done: [],
+				questions: [],
+				advisorRuns: {
+					testDesign: {
+						status: "done",
+						summary: "tests",
+						evidence: [],
+						openQuestions: [],
+						assumptions: [],
+						acceptanceTestFiles: ["loop.test.ts"],
+					},
+				},
+			},
 		};
 		writeLoopStateFile(loopStatePath(profile, cwd, "feature"), state);
 
