@@ -678,6 +678,292 @@ describe("Pi wiring", () => {
 		);
 	});
 
+	test("loop_status lists awaited advisors, report state, and the exact dispatch task", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		await commands.get("loop")?.handler("start Add the runner", ctx(cwd));
+
+		const result = await tools.get("loop_status")?.execute("1", {}, undefined, undefined, ctx(cwd));
+
+		expect(result?.content[0]?.text).toContain("awaited advisors:");
+		expect(result?.content[0]?.text).toContain("intent-advisor: not started");
+		expect(result?.content[0]?.text).toContain("codebase-advisor: not started");
+		expect(result?.content[0]?.text).toContain("must be started with this exact runner task");
+		expect(result?.content[0]?.text).toContain("Goal: Add the runner");
+		expect(result?.content[0]?.text).toContain("Find repository facts, files, tests, boundaries and owners.");
+	});
+
+	test("loop_status tracks advisor start, report, and redispatch from structured state", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		await commands.get("loop")?.handler("start Add the runner", ctx(cwd));
+		let status = await tools.get("loop_status")?.execute("0", {}, undefined, undefined, ctx(cwd));
+		const initialStatus = status?.content[0]?.text ?? "";
+		const intentTask = initialStatus
+			.split(
+				"intent-advisor has not reported through helper_report. If the lead wrote a summary instead, that does not count; it must be started with this exact runner task:\n",
+			)[1]
+			?.split("\n- codebase-advisor:")[0];
+		const codebaseTask = initialStatus.split(
+			"codebase-advisor has not reported through helper_report. If the lead wrote a summary instead, that does not count; it must be started with this exact runner task:\n",
+		)[1];
+		expect(intentTask).toBeTruthy();
+		expect(codebaseTask).toBeTruthy();
+
+		await handlers.get("tool_call")?.(
+			{ toolName: "subagent", input: { agent: "intent-advisor", task: "summary" } },
+			ctx(cwd),
+		);
+		status = await tools.get("loop_status")?.execute("1", {}, undefined, undefined, ctx(cwd));
+		expect(status?.content[0]?.text).toContain("intent-advisor: not started");
+
+		await handlers.get("tool_call")?.(
+			{ toolName: "subagent", input: { agent: "intent-advisor", task: intentTask } },
+			ctx(cwd),
+		);
+		status = await tools.get("loop_status")?.execute("2", {}, undefined, undefined, ctx(cwd));
+		expect(status?.content[0]?.text).toContain("intent-advisor: started, awaiting helper_report");
+
+		await handlers.get("message_end")?.(
+			subagentResult(
+				"intent-advisor",
+				sessionFileWithHelperReport(
+					helperReport("intent", {
+						questions: [{ id: "q1", text: "Keep state under profile?", recommended: "Yes.", dependsOn: [] }],
+						doneCandidates: [],
+						ambiguities: [],
+					}),
+				),
+			),
+			ctx(cwd),
+		);
+		status = await tools.get("loop_status")?.execute("3", {}, undefined, undefined, ctx(cwd));
+		expect(status?.content[0]?.text).toContain("intent-advisor: reported through helper_report");
+
+		await handlers.get("tool_call")?.(
+			{ toolName: "subagent", input: { agent: "codebase-advisor", task: codebaseTask } },
+			ctx(cwd),
+		);
+		await handlers.get("message_end")?.(
+			subagentResult(
+				"codebase-advisor",
+				sessionFileWithHelperReport(
+					helperReport("codebase", { files: [], existingTests: [], facts: [], boundaries: [], owners: [] }),
+				),
+			),
+			ctx(cwd),
+		);
+		await commands.get("loop")?.handler("answer yes, profile state", ctx(cwd));
+		status = await tools.get("loop_status")?.execute("4", {}, undefined, undefined, ctx(cwd));
+		expect(status?.content[0]?.text).toContain("intent-advisor: not started");
+	});
+
+	test("advisor intake failure clears started state before redispatch", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		await commands.get("loop")?.handler("start Add the runner", ctx(cwd));
+		const intentTask = [
+			"Goal: Add the runner",
+			"Limits:",
+			"- (none)",
+			"Done lines:",
+			"- (none)",
+			"Answers so far:",
+			"- (none)",
+			"Current questions:",
+			"- (none)",
+		].join("\n");
+		const codebaseTask = [
+			"Goal: Add the runner",
+			"Limits:",
+			"- (none)",
+			"Done lines:",
+			"- (none)",
+			"Answers so far:",
+			"- (none)",
+			"Find repository facts, files, tests, boundaries and owners.",
+		].join("\n");
+		await handlers.get("tool_call")?.(
+			{
+				toolName: "subagent",
+				input: {
+					children: [
+						{ agent: "intent-advisor", task: intentTask },
+						{ agent: "codebase-advisor", task: codebaseTask },
+					],
+				},
+			},
+			ctx(cwd),
+		);
+		await handlers.get("message_end")?.(
+			subagentResult(
+				"codebase-advisor",
+				sessionFileWithHelperReport(
+					helperReport("codebase", { files: [], existingTests: [], facts: [], boundaries: [], owners: [] }),
+				),
+			),
+			ctx(cwd),
+		);
+		await handlers.get("message_end")?.(subagentResult("intent-advisor", join(profile, "missing.jsonl")), ctx(cwd));
+		expect(readLoopStateFile(loopStatePath(profile, cwd, "feature")).stage).toBe("blocked");
+
+		await commands.get("loop")?.handler("answer retry intent", ctx(cwd));
+
+		const status = await tools.get("loop_status")?.execute("1", {}, undefined, undefined, ctx(cwd));
+		expect(status?.content[0]?.text).toContain("intent-advisor: not started");
+	});
+
+	test("subagent tool calls outside git proceed without loop lookup errors", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { handlers } = fakePi();
+		const cwd = realpathSync(mkdtempSync(join(tmpdir(), "sitra-not-git-")));
+
+		expect(() =>
+			handlers.get("tool_call")?.({ toolName: "subagent", input: { agent: "scout", task: "inspect files" } }, ctx(cwd)),
+		).not.toThrow();
+	});
+
+	test("subagent tool calls in a fresh git repo with no loop proceed without HEAD lookup errors", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { handlers } = fakePi();
+		const cwd = realpathSync(mkdtempSync(join(tmpdir(), "sitra-unborn-git-")));
+		execFileSync("git", ["init"], { cwd, stdio: "ignore" });
+
+		expect(() =>
+			handlers.get("tool_call")?.({ toolName: "subagent", input: { agent: "scout", task: "inspect files" } }, ctx(cwd)),
+		).not.toThrow();
+	});
+
+	test("subagent results surface git errors once a loop exists", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers } = fakePi();
+		const { cwd } = gitWorktree({ originHead: false });
+		await commands.get("loop")?.handler("start --base origin/main Add the runner", ctx(cwd));
+		execFileSync("git", ["update-ref", "-d", "refs/remotes/origin/main"], { cwd, stdio: "ignore" });
+
+		await handlers.get("message_end")?.(
+			subagentResult(
+				"intent-advisor",
+				sessionFileWithHelperReport(helperReport("intent", { questions: [], doneCandidates: [], ambiguities: [] })),
+			),
+			ctx(cwd),
+		);
+
+		const state = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		expect(state.stage).toBe("blocked");
+		expect(state.block).toMatchObject({ kind: "git" });
+		expect(state.questions.at(-1)?.text).toContain("origin/main");
+	});
+
+	test("loop_submit_plan lets the lead submit the plan with the same validation as /loop plan", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { tools } = fakePi();
+		const { cwd } = gitWorktree();
+		const state: LoopState = {
+			...createLoopState({
+				worktree: cwd,
+				branch: "feature",
+				baseRef: "origin/main",
+				baseHead: execFileSync("git", ["rev-parse", "origin/main"], { cwd, encoding: "utf8" }).trim(),
+				goal: "Let the lead submit plans",
+				limits: ["No new guardrails."],
+				done: [],
+			}),
+			stage: "plan" as const,
+			dispatchedAdvisors: [],
+			advisorRuns: {
+				intent: { status: "done", summary: "intent", evidence: [], openQuestions: [], assumptions: [] },
+				codebase: { status: "done", summary: "codebase", evidence: [], openQuestions: [], assumptions: [] },
+				testDesign: { status: "done", summary: "tests", evidence: [], openQuestions: [], assumptions: [] },
+			},
+		};
+		writeLoopStateFile(loopStatePath(profile, cwd, "feature"), state);
+
+		const result = await tools
+			.get("loop_submit_plan")
+			?.execute("1", { plan: "  Keep the runner state pure and Pi wiring thin.  " }, undefined, undefined, ctx(cwd));
+
+		const planned = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		expect(result?.content[0]?.text).toContain("stage: architecture-review");
+		expect(planned.stage).toBe("architecture-review");
+		expect(planned.plan).toEqual({ author: "lead", text: "Keep the runner state pure and Pi wiring thin." });
+		expect(planned.dispatchedAdvisors).toEqual(["architecture"]);
+
+		await expect(
+			tools.get("loop_submit_plan")?.execute("2", { plan: "Second plan should fail." }, undefined, undefined, ctx(cwd)),
+		).rejects.toThrow(/cannot apply a lead plan while stage is architecture-review/);
+	});
+
+	test("no registered tool or agent-message path can approve a loop brief", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { handlers, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		const state: LoopState = {
+			...createLoopState({
+				worktree: cwd,
+				branch: "feature",
+				baseRef: "origin/main",
+				baseHead: execFileSync("git", ["rev-parse", "origin/main"], { cwd, encoding: "utf8" }).trim(),
+				goal: "Keep approve human only",
+				limits: [],
+				done: [],
+			}),
+			stage: "architecture-review",
+			dispatchedAdvisors: [],
+			advisorRuns: {
+				intent: { status: "done", summary: "intent", evidence: [], openQuestions: [], assumptions: [] },
+				codebase: { status: "done", summary: "codebase", evidence: [], openQuestions: [], assumptions: [] },
+				testDesign: { status: "done", summary: "tests", evidence: [], openQuestions: [], assumptions: [] },
+				architecture: { status: "done", summary: "architecture", evidence: [], openQuestions: [], assumptions: [] },
+			},
+			plan: { author: "lead", text: "Plan" },
+		};
+		const path = loopStatePath(profile, cwd, "feature");
+
+		for (const [name, tool] of tools) {
+			writeLoopStateFile(path, state);
+			try {
+				await tool.execute(
+					"tool-call",
+					name === "loop_record_build"
+						? { redRunId: "missing-red", greenRunId: "missing-green" }
+						: name === "loop_submit_plan"
+							? { plan: "Try to approve by tool." }
+							: {},
+					undefined,
+					undefined,
+					ctx(cwd),
+				);
+			} catch {
+				// Tool failures are fine; the approval gate is the invariant.
+			}
+			const afterTool = readLoopStateFile(path);
+			expect(afterTool.stage, name).toBe("architecture-review");
+			expect(afterTool.approval, name).toBeUndefined();
+		}
+
+		writeLoopStateFile(path, state);
+		await handlers.get("message_end")?.(
+			{ message: { role: "assistant", content: "/loop approve Approved." } },
+			ctx(cwd),
+		);
+
+		const after = readLoopStateFile(path);
+		expect(after.stage).toBe("architecture-review");
+		expect(after.approval).toBeUndefined();
+	});
+
 	test("ordinary teammate results are ignored when no state or advisor dispatch matches", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
@@ -892,12 +1178,12 @@ describe("Pi wiring", () => {
 		const stale = readLoopStateFile(path);
 		expect(stale.stage).toBe("blocked");
 		expect(stale.block).toMatchObject({ kind: "stale", pendingAdvisors: ["intent"] });
-		expect(stale.questions.find((question) => question.id === "advisor-questions")?.answer).toBe("A1");
+		expect(stale.questions.find((question) => question.answer === "A1")?.id).toMatch(/^advisor-questions-/);
 		await commands.get("loop")?.handler("answer refresh stale", ctx(cwd));
 		const resumed = readLoopStateFile(path);
 		expect(resumed.stage).toBe("advise");
 		expect(resumed.block).toBeUndefined();
-		expect(resumed.questions.find((question) => question.id === "advisor-questions")?.answer).toBe("A1");
+		expect(resumed.questions.find((question) => question.answer === "A1")?.id).toMatch(/^advisor-questions-/);
 		expect(resumed.dispatchedAdvisors).toEqual(["intent"]);
 	});
 
@@ -1084,6 +1370,91 @@ describe("Pi wiring", () => {
 		expect(blocked.stage).toBe("blocked");
 		expect(blocked.questions.at(-1)?.text).toContain("tests-only");
 		expect(status(cwd)).toBe("");
+	});
+
+	test("/loop answer emits an unblock notice with the stage, answer, and next action", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, tools, userMessages } = fakePi();
+		const { cwd } = gitWorktree();
+		approvedLoop(profile, cwd);
+		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
+		const redCommit = commitAll(cwd, "add tests");
+		writeFileSync(join(cwd, "impl.ts"), "green\n");
+		const greenCommit = commitAll(cwd, "implement");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		const hash = sha256sum(cwd, "loop.test.ts");
+		const redLog = join(profile, "red.log");
+		const greenLog = join(profile, "green.log");
+		writeHeaderLoopLog(redLog, {
+			commit: redCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 0,
+		});
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 0,
+		});
+		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
+		expect(readLoopStateFile(loopStatePath(profile, cwd, "feature")).stage).toBe("blocked");
+		userMessages.length = 0;
+
+		await commands.get("loop")?.handler("answer rerun red with a failing tests-only commit", ctx(cwd));
+
+		const message = userMessages.join("\n");
+		expect(readLoopStateFile(loopStatePath(profile, cwd, "feature")).stage).toBe("build");
+		expect(message).toContain("LOOPS stage: build");
+		expect(message).toContain("person answered: rerun red with a failing tests-only commit");
+		expect(message).toContain("next expected action: record red and green evidence with loop_record_build");
+	});
+
+	test("/loop answer unblock notice points to /loop approve when brief approval is next", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, userMessages } = fakePi();
+		const { cwd } = gitWorktree();
+		const state: LoopState = {
+			...createLoopState({
+				worktree: cwd,
+				branch: "feature",
+				baseRef: "origin/main",
+				baseHead: execFileSync("git", ["rev-parse", "origin/main"], { cwd, encoding: "utf8" }).trim(),
+				goal: "Approve after architecture",
+				limits: [],
+				done: [],
+			}),
+			stage: "blocked",
+			block: {
+				kind: "questions",
+				questionId: "architecture-q",
+				resumeStage: "architecture-review",
+				pendingAdvisors: [],
+			},
+			questions: [
+				{
+					id: "architecture-q",
+					text: "Architecture blocker?",
+					recommended: "Answer it.",
+					dependsOn: [],
+				},
+			],
+			dispatchedAdvisors: [],
+			advisorRuns: {
+				intent: { status: "done", summary: "intent", evidence: [], openQuestions: [], assumptions: [] },
+				codebase: { status: "done", summary: "codebase", evidence: [], openQuestions: [], assumptions: [] },
+				testDesign: { status: "done", summary: "tests", evidence: [], openQuestions: [], assumptions: [] },
+				architecture: { status: "done", summary: "architecture", evidence: [], openQuestions: [], assumptions: [] },
+			},
+			plan: { author: "lead", text: "Plan" },
+		};
+		writeLoopStateFile(loopStatePath(profile, cwd, "feature"), state);
+
+		await commands.get("loop")?.handler("answer checklist is fine", ctx(cwd));
+
+		const message = userMessages.join("\n");
+		expect(message).toContain("next expected action: person types /loop approve");
+		expect(message).not.toContain("next expected action: wait for the person's next /loop answer");
 	});
 
 	test("recording build evidence blocks loudly when a recorded hash no longer matches the test file", async () => {

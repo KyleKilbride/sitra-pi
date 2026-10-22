@@ -13,6 +13,44 @@ explicit start -> advisors + questions -> lead plan -> architecture review -> pe
 One check stays because every self-improving system in the research needed an outside signal: tests, an environment, or
 an evaluator. The check is measurement and learning, not an automatic fix loop.
 
+## Running a loop today
+
+The Pi runner is explicit. Start it from a feature branch with:
+
+```
+/loop start [--base <ref>] <goal>
+```
+
+If `origin/HEAD` is not available, pass `--base origin/main` or another base ref. The runner dispatches
+`intent-advisor` and `codebase-advisor` first, then `test-design-advisor`, and later `architecture-advisor` after the
+lead submits a plan. `/loop status` and the `loop_status` tool are read-only; when the runner is waiting on advisors,
+they list every awaited advisor, whether it has been dispatched or is not started yet, and the exact task text that
+must be used. A lead-written summary does not count as an advisor report: the advisor has to report through
+`helper_report`.
+
+Questions from advisors are grouped into one `/loop answer <answer>` round. The runner records stable question ids and
+the exact normalized text that was answered, so repeated questions by id or exact text are not asked again. The recorded
+answers are included in later advisor tasks and in the frozen brief.
+
+When advisors are complete, the lead submits the plan with `loop_submit_plan` (the same transition and validation as
+`/loop plan <plan>`). Approval is the human gate: `/loop approve <summary>` is accepted only as the person's typed slash
+command, not through a tool or agent message. After approval, use `/loop build`, run the agreed red and green checks
+with `run_in_pane`, then record their run ids with `loop_record_build` or `/loop record-build <json>`. When a
+`/loop answer` unblocks a stage, the runner tells the lead the resumed stage, the answer it recorded, and the next
+expected action.
+
+Other useful verbs:
+
+| Verb/tool | Who uses it | What it does |
+|---|---|---|
+| `/loop answer <answer>` | person | Records the answer to the current runner question and resumes the blocked stage. |
+| `loop_submit_plan` | lead | Submits the lead plan after advisor intake, using `/loop plan` validation. |
+| `/loop approve <summary>` | person only | Freezes the brief after architecture review. No tool or agent-message path approves. |
+| `/loop build` | person only after approval | Enters build so run metadata can be stamped for red/green checks. |
+| `loop_record_build` | lead | Records red and green `run_in_pane` ids and dispatches the verifier when evidence is valid. |
+| `/loop resume` | person | Re-emits the current runner effect; it can write a stale block if the saved state no longer matches the checkout. |
+| `/loop abandon [reason]` | person | Archives the active loop state for this worktree and branch. |
+
 ## What success looks like
 
 - The person starts the graph explicitly; the lead does not infer it from a normal request.

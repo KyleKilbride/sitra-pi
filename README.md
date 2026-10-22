@@ -137,6 +137,17 @@ instead.
 logged. Each agent gets one run pane that it reuses (a new run queues behind one still going), closed when the agent
 exits. When the run ends, the lead gets the result as a message and picks up from there. No sleep or poll loops.
 
+## Using /loop
+
+`/loop` runs an explicit advisor-first graph for work that needs intake, a frozen brief and independent verification.
+Start from a feature branch with `/loop start [--base <ref>] <goal>`. The runner dispatches advisors, groups their
+questions into one `/loop answer <answer>` round, and shows pending advisor roles plus the exact task text in
+`/loop status` and `loop_status`.
+
+When advisors are done, the lead submits its plan with `loop_submit_plan`. Approval stays human-only: type
+`/loop approve <summary>` yourself when the plan and architecture review are acceptable. Then use `/loop build`, run
+red and green checks with `run_in_pane`, and have the lead record them with `loop_record_build`.
+
 **Grimoire** (`/grimoire`): see below.
 
 **Long conversations stay sharp** ([docs/SHARPEN.md](docs/SHARPEN.md)): old tool output is stubbed before each model

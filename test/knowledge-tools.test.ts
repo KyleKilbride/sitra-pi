@@ -6,7 +6,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { renderEntry } from "../extensions/grimoire.ts";
 import sitraKnowledge from "../extensions/knowledge.ts";
 import { createLoopState } from "../extensions/loop.ts";
-import { loopStatePath, writeLoopStateFile } from "../extensions/loop-state.ts";
+import { loopStatePath, readLoopStateFile, writeLoopStateFile } from "../extensions/loop-state.ts";
 
 type Handler = (event: unknown, ctx: unknown) => void;
 
@@ -474,14 +474,33 @@ test("loop-pending advisor subagent dispatch skips the Grimoire look and rule ga
 
 	const result = f.call({
 		children: [
-			{ agent: "intent-advisor", task: "Find the intent." },
-			{ agent: "codebase-advisor", task: "Find the codebase facts." },
+			{
+				agent: "intent-advisor",
+				task: "Goal: goal\nLimits:\n- (none)\nDone lines:\n- (none)\nAnswers so far:\n- (none)\nCurrent questions:\n- (none)",
+			},
+			{
+				agent: "codebase-advisor",
+				task: "Goal: goal\nLimits:\n- (none)\nDone lines:\n- (none)\nAnswers so far:\n- (none)\nFind repository facts, files, tests, boundaries and owners.",
+			},
 		],
 	});
 
 	expect(result).toBeUndefined();
 	expect(existsSync(join(f.grimoire, ".sitra", "pending-pause"))).toBe(false);
 	expect(f.warnings).toEqual([]);
+	expect(readLoopStateFile(loopStatePath(f.profile, f.cwd, "feature")).startedAdvisors).toEqual([]);
+});
+
+test("loop-pending advisor subagent dispatch with a rewritten task is not treated as started", () => {
+	const f = loopGateFixture();
+	f.writeLoopState(f.baseState());
+
+	const result = f.call({
+		children: [{ agent: "intent-advisor", task: "Find the intent." }],
+	});
+
+	expect(result?.block).toBe(true);
+	expect(readLoopStateFile(loopStatePath(f.profile, f.cwd, "feature")).startedAdvisors).toEqual([]);
 });
 
 test("a non-loop subagent spawn still gets the Grimoire look nudge once", () => {

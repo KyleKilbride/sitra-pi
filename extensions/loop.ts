@@ -198,6 +198,7 @@ export const LOOP_STATE_SCHEMA = Type.Object(
 		done: Type.Array(Type.String()),
 		questions: Type.Array(Question),
 		dispatchedAdvisors: Type.Array(AdvisorRoleSchema),
+		startedAdvisors: Type.Optional(Type.Array(AdvisorRoleSchema)),
 		advisorRuns: AdvisorRuns,
 		plan: Type.Optional(
 			Type.Object({ author: Type.Literal("lead"), text: Type.String() }, { additionalProperties: false }),
@@ -315,6 +316,7 @@ export function createLoopState(input: {
 		done: input.done,
 		questions: [],
 		dispatchedAdvisors: ["intent", "codebase"],
+		startedAdvisors: [],
 		advisorRuns: {},
 		build: { testFiles: [], testHashes: [] },
 		rework: [],
@@ -353,11 +355,41 @@ function list(items: string[]): string {
 	return items.length ? items.map((item) => `- ${item}`).join("\n") : "- (none)";
 }
 
+function normalizeQuestionText(text: string): string {
+	return text.trim().replace(/\s+/g, " ");
+}
+
+function questionSource(question: LoopQuestion): Omit<LoopQuestion, "answer" | "sourceQuestions"> {
+	return {
+		id: question.id,
+		text: question.text,
+		recommended: question.recommended,
+		dependsOn: question.dependsOn,
+	};
+}
+
+function questionSources(question: LoopQuestion): Omit<LoopQuestion, "answer" | "sourceQuestions">[] {
+	return question.sourceQuestions?.length ? question.sourceQuestions : [questionSource(question)];
+}
+
 function answers(state: LoopState): string {
-	const answered = state.questions.filter((question) => question.answer);
+	const answered = state.questions.flatMap((question) =>
+		question.answer
+			? questionSources(question).map((source) => ({
+					text: source.text,
+					answer: question.answer ?? "",
+				}))
+			: [],
+	);
 	return answered.length
 		? answered.map((question) => `- ${question.text}\n  Answer: ${question.answer}`).join("\n")
 		: "- (none)";
+}
+
+function currentQuestionTexts(state: LoopState): string[] {
+	return state.questions
+		.filter((question) => !question.answer)
+		.flatMap((question) => questionSources(question).map((source) => source.text));
 }
 
 export function advisorTask(state: LoopState, role: AdvisorRole): string {
@@ -370,7 +402,7 @@ export function advisorTask(state: LoopState, role: AdvisorRole): string {
 		"Answers so far:",
 		answers(state),
 	];
-	if (role === "intent") return [...base, "Current questions:", list(state.questions.map((q) => q.text))].join("\n");
+	if (role === "intent") return [...base, "Current questions:", list(currentQuestionTexts(state))].join("\n");
 	if (role === "codebase") return [...base, "Find repository facts, files, tests, boundaries and owners."].join("\n");
 	if (role === "test-design") {
 		return [
@@ -392,11 +424,24 @@ export function advisorTask(state: LoopState, role: AdvisorRole): string {
 
 function dispatch(state: LoopState, roles: AdvisorRole[]): { state: LoopState; effects: LoopEffect[] } {
 	return {
-		state: { ...state, dispatchedAdvisors: roles },
+		state: {
+			...state,
+			dispatchedAdvisors: roles,
+			startedAdvisors: (state.startedAdvisors ?? []).filter((role) => roles.includes(role)),
+		},
 		effects: [
 			{ type: "dispatch-advisors", roles, advisors: roles.map((role) => ({ role, task: advisorTask(state, role) })) },
 		],
 	};
+}
+
+export function recordAdvisorStarted(state: LoopState, roles: AdvisorRole[]): LoopState {
+	const pending = new Set(state.dispatchedAdvisors);
+	const started = new Set(state.startedAdvisors ?? []);
+	for (const role of roles) {
+		if (pending.has(role)) started.add(role);
+	}
+	return { ...state, startedAdvisors: [...started] };
 }
 
 export function tokensFromSubagentResult(details: Record<string, unknown>): {
@@ -450,15 +495,52 @@ export function abandonLoop(
 	};
 }
 
-function groupedQuestion(id: string, reason: string, questions: LoopQuestion[]): LoopQuestion {
+function answeredQuestionTexts(state: LoopState): Set<string> {
+	const texts = new Set<string>();
+	for (const question of state.questions) {
+		if (!question.answer) continue;
+		for (const source of questionSources(question)) {
+			texts.add(normalizeQuestionText(source.text));
+		}
+		texts.add(normalizeQuestionText(question.text));
+	}
+	return texts;
+}
+
+function uniqueQuestions(questions: LoopQuestion[]): LoopQuestion[] {
+	const texts = new Set<string>();
+	const out: LoopQuestion[] = [];
+	for (const question of questions) {
+		const text = normalizeQuestionText(question.text);
+		if (texts.has(text)) continue;
+		texts.add(text);
+		out.push(question);
+	}
+	return out;
+}
+
+function unansweredQuestions(state: LoopState, questions: LoopQuestion[]): LoopQuestion[] {
+	const answered = answeredQuestionTexts(state);
+	return uniqueQuestions(questions.filter((question) => !answered.has(normalizeQuestionText(question.text))));
+}
+
+function runQuestions(state: LoopState, run: AdvisorRun): LoopQuestion[] {
+	return run.status === "blocked" ? uniqueQuestions(run.openQuestions) : unansweredQuestions(state, run.openQuestions);
+}
+
+function groupedQuestion(prefix: string, reason: string, questions: LoopQuestion[]): LoopQuestion {
 	const body = questions
 		.map((question, index) => `${index + 1}. ${question.text}\nRecommended: ${question.recommended}`)
 		.join("\n\n");
+	const fingerprint = sha256Text(
+		JSON.stringify(questions.map((question) => [question.id, normalizeQuestionText(question.text)])),
+	).slice(0, 12);
 	return {
-		id,
+		id: `${prefix}-${fingerprint}`,
 		text: body || reason,
 		recommended: "Answer every item in one reply so the runner can continue.",
 		dependsOn: questions.map((question) => question.id),
+		sourceQuestions: questions.map(questionSource),
 	};
 }
 
@@ -487,7 +569,7 @@ function withBlock(
 		if (state.block.questionId === input.question.id) {
 			const current = state.questions.find((question) => question.id === state.block?.questionId) ?? input.question;
 			return {
-				state,
+				state: { ...state, startedAdvisors: [] },
 				effects: [{ type: "ask-person", reason: state.block.kind, question: current }],
 			};
 		}
@@ -498,7 +580,7 @@ function withBlock(
 		);
 		const current = questions.find((question) => question.id === state.block?.questionId) ?? input.question;
 		return {
-			state: { ...state, questions },
+			state: { ...state, questions, startedAdvisors: [] },
 			effects: [{ type: "ask-person", reason: state.block.kind, question: current }],
 		};
 	}
@@ -518,6 +600,7 @@ function withBlock(
 		},
 		questions: [...state.questions, input.question],
 		dispatchedAdvisors: [],
+		startedAdvisors: [],
 	};
 	return { state: blocked, effects: [{ type: "ask-person", reason: input.kind, question: input.question }] };
 }
@@ -555,9 +638,9 @@ function reportQuestions(role: HelperReportRole, report: HelperReport): LoopQues
 		const details = report.details as { questions: LoopQuestion[] };
 		for (const question of details.questions) out.push(question);
 	}
-	for (const [index, text] of report.openQuestions.entries()) {
+	for (const text of report.openQuestions) {
 		out.push({
-			id: `${role}-open-${index + 1}`,
+			id: `${role}-open-${sha256Text(normalizeQuestionText(text)).slice(0, 12)}`,
 			text,
 			recommended: "Use the report's recommended answer if one was supplied; otherwise answer directly.",
 			dependsOn: [],
@@ -571,7 +654,7 @@ function reportQuestions(role: HelperReportRole, report: HelperReport): LoopQues
 			dependsOn: [],
 		});
 	}
-	return out;
+	return uniqueQuestions(out);
 }
 
 function toAdvisorRun(
@@ -608,14 +691,14 @@ function adviseEffects(state: LoopState): { state: LoopState; effects: LoopEffec
 	if (intent && codebase) {
 		if (state.dispatchedAdvisors.some((role) => role === "intent" || role === "codebase"))
 			return { state, effects: [] };
-		const earlyQuestions = [...intent.openQuestions, ...codebase.openQuestions];
+		const earlyQuestions = [...runQuestions(state, intent), ...runQuestions(state, codebase)];
 		if (earlyQuestions.length > 0) {
 			const question = groupedQuestion("advisor-questions", "Advisor questions need an answer.", earlyQuestions);
 			return withBlock(state, { kind: "questions", question, pendingAdvisors: affectedAdvisors(state) });
 		}
 		if (!testDesign) return dispatch(state, ["test-design"]);
 		if (state.dispatchedAdvisors.includes("test-design")) return { state, effects: [] };
-		const allQuestions = [...testDesign.openQuestions];
+		const allQuestions = runQuestions(state, testDesign);
 		if (allQuestions.length > 0) {
 			const question = groupedQuestion("advisor-questions", "Advisor questions need an answer.", allQuestions);
 			return withBlock(state, { kind: "questions", question, pendingAdvisors: affectedAdvisors(state) });
@@ -634,12 +717,9 @@ function architectureEffects(state: LoopState): { state: LoopState; effects: Loo
 	if (!run && !state.dispatchedAdvisors.includes("architecture")) return dispatch(state, ["architecture"]);
 	if (!run) return { state, effects: [] };
 	if (state.dispatchedAdvisors.includes("architecture")) return { state, effects: [] };
-	if (run.openQuestions.length > 0) {
-		const question = groupedQuestion(
-			"architecture-questions",
-			"Architecture questions need an answer.",
-			run.openQuestions,
-		);
+	const openQuestions = runQuestions(state, run);
+	if (openQuestions.length > 0) {
+		const question = groupedQuestion("architecture-questions", "Architecture questions need an answer.", openQuestions);
 		return withBlock(state, { kind: "questions", question, pendingAdvisors: ["architecture"] });
 	}
 	const question: LoopQuestion = {
@@ -768,6 +848,7 @@ export function applyAdvisorReport(
 	const next: LoopState = {
 		...state,
 		dispatchedAdvisors: state.dispatchedAdvisors.filter((role) => role !== report.role),
+		startedAdvisors: (state.startedAdvisors ?? []).filter((role) => role !== report.role),
 		advisorRuns: { ...state.advisorRuns, [key]: toAdvisorRun(report.role, report, options) },
 	};
 	if (state.stage === "architecture-review") return architectureEffects(next);
