@@ -44,27 +44,43 @@ const content = (text: string) => [{ type: "text", text }];
 
 afterEach(() => vi.unstubAllEnvs());
 
-function installFakeHerdr(options: { waitFails?: boolean } = {}): {
+function installFakeHerdr(
+	options: { waitFails?: boolean; waitFailures?: number; splitPaneIds?: string[] } = {},
+): {
 	cwd: string;
 	calls(): string[][];
 } {
 	const cwd = realpathSync(mkdtempSync(join(tmpdir(), "sitra-lead-herdr-")));
 	const bin = join(cwd, "bin");
 	const calls = join(cwd, "herdr-calls.jsonl");
+	const state = join(cwd, "herdr-state.json");
 	mkdirSync(bin, { recursive: true });
 	const herdrPath = join(bin, "herdr");
 	writeFileSync(
 		herdrPath,
 		`#!/usr/bin/env node
-const { appendFileSync } = require("node:fs");
+const { appendFileSync, readFileSync, writeFileSync } = require("node:fs");
 const args = process.argv.slice(2);
 appendFileSync(process.env.HERDR_FAKE_CALLS, JSON.stringify(args) + "\\n");
+let state = { splitCount: 0, waitCount: 0 };
+try {
+  state = JSON.parse(readFileSync(process.env.HERDR_FAKE_STATE, "utf8"));
+} catch {}
+const saveState = () => writeFileSync(process.env.HERDR_FAKE_STATE, JSON.stringify(state));
 if (args[0] === "pane" && args[1] === "split") {
-  console.log(JSON.stringify({ pane_id: "pane-fresh" }));
+  const ids = JSON.parse(process.env.HERDR_FAKE_SPLIT_PANE_IDS);
+  const pane_id = ids[Math.min(state.splitCount, ids.length - 1)];
+  state.splitCount += 1;
+  saveState();
+  console.log(JSON.stringify({ pane_id }));
   process.exit(0);
 }
-if (args[0] === "pane" && args[1] === "wait-output" && process.env.HERDR_FAKE_WAIT_FAILS === "1") {
-  process.exit(124);
+if (args[0] === "pane" && args[1] === "wait-output") {
+  state.waitCount += 1;
+  saveState();
+  if (state.waitCount <= Number(process.env.HERDR_FAKE_WAIT_FAILURES || "0")) {
+    process.exit(124);
+  }
 }
 process.exit(0);
 `,
@@ -74,7 +90,9 @@ process.exit(0);
 	vi.stubEnv("HERDR_ENV", "1");
 	vi.stubEnv("HERDR_PANE_ID", "pane-current");
 	vi.stubEnv("HERDR_FAKE_CALLS", calls);
-	vi.stubEnv("HERDR_FAKE_WAIT_FAILS", options.waitFails ? "1" : "0");
+	vi.stubEnv("HERDR_FAKE_STATE", state);
+	vi.stubEnv("HERDR_FAKE_SPLIT_PANE_IDS", JSON.stringify(options.splitPaneIds ?? ["pane-fresh"]));
+	vi.stubEnv("HERDR_FAKE_WAIT_FAILURES", String(options.waitFailures ?? (options.waitFails ? 1_000_000 : 0)));
 	vi.stubEnv("PI_CODING_AGENT_DIR", join(cwd, "profile"));
 	return {
 		cwd,
@@ -531,6 +549,29 @@ describe("run_in_pane herdr pane readiness", () => {
 		expect(runCalls).toHaveLength(1);
 		expect(runCalls[0]?.[3]).toContain("printf 'sitra-%s\\n'");
 		expect(runCalls[0]?.[3]).not.toContain("never-run");
+	});
+
+	test("after a ready timeout the next run opens a new pane and waits again", async () => {
+		const fake = installFakeHerdr({ waitFailures: 1, splitPaneIds: ["pane-first", "pane-second"] });
+		const { tools } = fakePi();
+
+		const first = await tools
+			.get("run_in_pane")
+			?.execute("1", { command: "echo first", label: "first timeout" }, undefined, undefined, { cwd: fake.cwd });
+		const second = await tools
+			.get("run_in_pane")
+			?.execute("2", { command: "echo second", label: "second succeeds" }, undefined, undefined, { cwd: fake.cwd });
+
+		expect(first?.content[0]?.text).toContain("pane shell never became ready");
+		expect(first?.content[0]?.text).toContain("left as-is");
+		expect(second?.content[0]?.text).toContain('herdr pane pane-second ("second succeeds")');
+		const calls = fake.calls();
+		expect(calls.filter((call) => call[0] === "pane" && call[1] === "split").length).toBe(2);
+		const waits = calls.filter((call) => call[0] === "pane" && call[1] === "wait-output");
+		expect(waits.map((call) => call[2])).toEqual(["pane-first", "pane-second"]);
+		const commandRuns = calls.filter((call) => call[0] === "pane" && call[1] === "run" && call[3]?.startsWith("bash "));
+		expect(commandRuns).toHaveLength(1);
+		expect(commandRuns[0]?.[2]).toBe("pane-second");
 	});
 
 	test("in a reused pane types without waiting", async () => {

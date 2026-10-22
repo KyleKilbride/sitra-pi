@@ -251,11 +251,12 @@ export default function sitraLead(pi: Pi): void {
 					try {
 						herdr(["pane", "wait-output", pane, "--match", `sitra-ready-${nonce}`, "--timeout", "15000"]);
 					} catch {
+						runPane = undefined;
 						return {
 							content: [
 								{
 									type: "text",
-									text: `The run "${p.label}" was not started: pane shell never became ready (${pane}). Log: ${log}`,
+									text: `The run "${p.label}" was not started: pane shell never became ready (${pane}); the pane was left as-is for you to inspect. Log: ${log}`,
 								},
 							],
 							details: { log, runId, pane, error: "pane shell never became ready" },
