@@ -6,7 +6,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Type } from "typebox";
-import { HELPER_REPORT_SCHEMA, renderHelperReport, validateHelperReport } from "./helper-report.ts";
+import { HELPER_REPORT_TOOL_SCHEMA, renderHelperReport, validateHelperReport } from "./helper-report.ts";
 import { paneCommand, readRun, shellQuote } from "./runs.ts";
 import { gitBranch, mainCheckout } from "./sessions.ts";
 
@@ -130,10 +130,10 @@ export default function sitraLead(pi: Pi): void {
 			name: "helper_report",
 			label: "Report helper result",
 			description:
-				"Return a helper or teammate result as structured fields: status, summary, evidence, open questions for the person, and assumptions.",
+				"Return a helper or teammate result as structured fields: status, summary, evidence, open questions for the person, and assumptions. Role-specific reports set role and details.",
 			promptSnippet:
-				"helper_report: helpers can record validated status, summary, evidence, open questions for the person and assumptions",
-			parameters: HELPER_REPORT_SCHEMA,
+				"helper_report: helpers can record validated status, summary, evidence, open questions for the person and assumptions; role-specific reports set role and details",
+			parameters: HELPER_REPORT_TOOL_SCHEMA,
 			async execute(_id, params) {
 				const valid = validateHelperReport(params);
 				if (!valid.ok) throw new Error(`invalid helper_report: ${valid.reason}`);
