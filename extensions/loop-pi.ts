@@ -29,12 +29,13 @@ import {
 	replaceBlockWithStale,
 	roleForAgent,
 	staleReason,
+	staleReasonText,
 	startBuild,
 	startLoop,
 	tokensFromSubagentResult,
 	validateLoopState,
 } from "./loop.ts";
-import { readRun, readRunHeader } from "./runs.ts";
+import { hashFiles, readRun, readRunHeader } from "./runs.ts";
 
 interface Ctx {
 	cwd: string;
@@ -123,19 +124,8 @@ function git(cwd: string, args: string[]): string {
 	}
 }
 
-function fileSha256(path: string): string {
-	return createHash("sha256").update(readFileSync(path)).digest("hex");
-}
-
-function resolveWorktreePath(cwd: string, file: string): string {
-	if (!file.trim()) throw new Error("test file path is empty");
-	if (file.startsWith("/")) return file;
-	const worktree = git(cwd, ["rev-parse", "--show-toplevel"]);
-	return join(worktree, file);
-}
-
 function testHashes(cwd: string, files: string[]): LoopTestHash[] {
-	return files.map((file) => ({ file, sha256: fileSha256(resolveWorktreePath(cwd, file)) }));
+	return hashFiles(git(cwd, ["rev-parse", "--show-toplevel"]), files);
 }
 
 function currentCommit(cwd: string): string {
@@ -160,10 +150,22 @@ function diffAgainstBase(cwd: string, state: LoopState): string {
 	});
 }
 
+function runsDir(): string {
+	return join(profileDir(), "runs");
+}
+
+function runLogForId(runId: string): string {
+	if (!runId || runId.includes("/") || runId.includes("\\")) throw new Error("run id must be a file id from run_in_pane");
+	return join(runsDir(), `${runId}.log`);
+}
+
+function frozenTestFiles(state: LoopState): string[] {
+	return state.frozenBrief?.advisorRuns.testDesign?.acceptanceTestFiles ?? state.advisorRuns.testDesign?.acceptanceTestFiles ?? [];
+}
+
 function testsOnlyAncestorProblem(
 	cwd: string,
-	state: LoopState,
-	testFiles: string[],
+	testHashes: LoopTestHash[],
 	redCommit: string,
 ): string | undefined {
 	try {
@@ -172,18 +174,19 @@ function testsOnlyAncestorProblem(
 		return `red run commit ${redCommit} is not an ancestor of HEAD`;
 	}
 	if (redCommit === currentCommit(cwd)) return "red run commit is HEAD, not a tests-only ancestor";
-	const changed = execFileSync("git", ["diff", "--name-only", `${state.baseRef}...${redCommit}`], {
-		cwd,
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "pipe"],
-	})
-		.trim()
-		.split("\n")
-		.filter(Boolean)
-		.sort();
-	const tests = [...testFiles].sort();
-	if (JSON.stringify(changed) !== JSON.stringify(tests)) {
-		return `red run commit ${redCommit} is not tests-only`;
+	for (const expected of testHashes) {
+		let raw: string;
+		try {
+			raw = execFileSync("git", ["show", `${redCommit}:${expected.file}`], {
+				cwd,
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+		} catch {
+			return `test file ${expected.file} does not exist at red run commit ${redCommit}`;
+		}
+		const actual = createHash("sha256").update(raw).digest("hex");
+		if (actual !== expected.sha256) return `test file ${expected.file} has a different hash at red run commit ${redCommit}`;
 	}
 	return undefined;
 }
@@ -286,7 +289,7 @@ function loadMutableState(gitState: GitState): LoopState {
 	if (!reason) return state;
 	const blocked = blockForStaleState(state, { branch: gitState.branch, baseHead: gitState.baseHead });
 	writeLoopStateFile(path, blocked.state);
-	throw new Error(`loop state is stale: ${reason}`);
+	throw new Error(`loop state is stale: ${staleReasonText(reason)}`);
 }
 
 function blockIfBuildOrVerifyStale(
@@ -295,12 +298,18 @@ function blockIfBuildOrVerifyStale(
 	state: LoopState,
 	gitState: GitState,
 ): { state: LoopState; effects: LoopEffect[] } | undefined {
+	const baseReason = staleReason(state, { branch: gitState.branch, baseHead: gitState.baseHead });
+	if (baseReason) {
+		const blocked = blockForStaleState(state, { branch: gitState.branch, baseHead: gitState.baseHead });
+		writeLoopStateFile(path, blocked.state);
+		return blocked;
+	}
 	if (state.build.testFiles.length === 0 && !state.verifierRequest) return undefined;
 	if (state.stage === "verify" && !worktreeClean(cwd)) {
 		const blocked = blockForStaleState(state, {
 			branch: gitState.branch,
 			baseHead: gitState.baseHead,
-			diffHash: "dirty-worktree",
+			dirtyWorktree: true,
 		});
 		writeLoopStateFile(path, blocked.state);
 		return blocked;
@@ -370,7 +379,21 @@ function loopStatus(cwd: string, state: LoopState): ToolResult {
 			details: blocked.state,
 		};
 	}
-	const stale = staleReason(state, { branch: gitState.branch, baseHead: gitState.baseHead });
+	let stale = staleReason(state, { branch: gitState.branch, baseHead: gitState.baseHead });
+	if (!stale) {
+		try {
+			stale = staleReason(state, {
+				branch: gitState.branch,
+				baseHead: gitState.baseHead,
+				...(state.build.testFiles.length > 0 ? { testHashes: testHashes(cwd, state.build.testFiles) } : {}),
+				...(state.verifierRequest
+					? { ...(worktreeClean(cwd) ? { diffHash: diffHash(diffAgainstBase(cwd, state)) } : { dirtyWorktree: true }) }
+					: {}),
+			});
+		} catch (error) {
+			stale = { kind: "test-hashes", detail: `test hashes could not be checked: ${String(error)}` };
+		}
+	}
 	const tokens = Object.values(state.advisorRuns).reduce(
 		(sum, run) => sum + (run?.outputTokens ?? 0) + (run?.contextTokens ?? 0),
 		0,
@@ -383,7 +406,7 @@ function loopStatus(cwd: string, state: LoopState): ToolResult {
 					`stage: ${state.stage}`,
 					`goal: ${state.goal}`,
 					`advisor tokens recorded: ${tokens}`,
-					...(stale ? [`stale: ${stale}`] : []),
+					...(stale ? [`stale: ${stale.kind === "test-hashes" ? "test hashes" : staleReasonText(stale)}`] : []),
 				].join("\n"),
 			},
 		],
@@ -396,7 +419,7 @@ function recordBuildFromParams(
 	ctx: Ctx,
 	path: string,
 	state: LoopState,
-	params: { testFiles: string[]; redRunLog: string; greenRunLog: string; maxVerifierRerunMs?: number },
+	params: { redRunId: string; greenRunId: string; maxVerifierRerunMs?: number },
 ): LoopState {
 	if (!worktreeClean(ctx.cwd)) {
 		const blocked = blockForBuildEvidenceFailure(state, "worktree must be clean before recording build evidence");
@@ -404,11 +427,12 @@ function recordBuildFromParams(
 		emitEffects(pi, blocked.state, blocked.effects);
 		return blocked.state;
 	}
-	const hashes = testHashes(ctx.cwd, params.testFiles);
-	const redRun = parseLoopRunLog(params.redRunLog);
-	const greenRun = parseLoopRunLog(params.greenRunLog);
+	const testFiles = frozenTestFiles(state);
+	const hashes = testHashes(ctx.cwd, testFiles);
+	const redRun = parseLoopRunLog(runLogForId(params.redRunId));
+	const greenRun = parseLoopRunLog(runLogForId(params.greenRunId));
 	if (redRun.loop?.commit) {
-		const ancestorProblem = testsOnlyAncestorProblem(ctx.cwd, state, params.testFiles, redRun.loop.commit);
+		const ancestorProblem = testsOnlyAncestorProblem(ctx.cwd, hashes, redRun.loop.commit);
 		if (ancestorProblem) {
 			const blocked = blockForBuildEvidenceFailure(state, ancestorProblem);
 			writeLoopStateFile(path, blocked.state);
@@ -419,7 +443,7 @@ function recordBuildFromParams(
 	const result = recordBuildEvidence(state, {
 		commit: currentCommit(ctx.cwd),
 		diff: diffAgainstBase(ctx.cwd, state),
-		testFiles: params.testFiles,
+		testFiles,
 		testHashes: hashes,
 		redRun,
 		greenRun,
@@ -533,24 +557,20 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 		}
 		if (!parsed || typeof parsed !== "object") throw new Error("invalid /loop record-build JSON: expected object");
 		const params = parsed as {
-			testFiles?: unknown;
-			redRunLog?: unknown;
-			greenRunLog?: unknown;
+			redRunId?: unknown;
+			greenRunId?: unknown;
 			maxVerifierRerunMs?: unknown;
 		};
 		if (
-			!Array.isArray(params.testFiles) ||
-			!params.testFiles.every((file) => typeof file === "string" && file.length > 0) ||
-			typeof params.redRunLog !== "string" ||
-			typeof params.greenRunLog !== "string" ||
+			typeof params.redRunId !== "string" ||
+			typeof params.greenRunId !== "string" ||
 			(params.maxVerifierRerunMs !== undefined && typeof params.maxVerifierRerunMs !== "number")
 		) {
-			throw new Error("invalid /loop record-build JSON: expected testFiles, redRunLog and greenRunLog");
+			throw new Error("invalid /loop record-build JSON: expected redRunId and greenRunId");
 		}
 		const next = recordBuildFromParams(pi, ctx, path, state, {
-			testFiles: params.testFiles,
-			redRunLog: params.redRunLog,
-			greenRunLog: params.greenRunLog,
+			redRunId: params.redRunId,
+			greenRunId: params.greenRunId,
 			...(typeof params.maxVerifierRerunMs === "number" ? { maxVerifierRerunMs: params.maxVerifierRerunMs } : {}),
 		});
 		pi.sendUserMessage(`LOOPS stage: ${next.stage}`, { deliverAs: "followUp", streamingBehavior: "followUp" });
@@ -738,14 +758,13 @@ export default function sitraLoop(pi: Pi): void {
 		name: "loop_record_build",
 		label: "Record loop build evidence",
 		description:
-			"Record LOOPS build evidence after explicit /loop build: test files, red run log, green run log, and optional verifier rerun budget.",
+			"Record LOOPS build evidence after explicit /loop build: red run id, green run id, and optional verifier rerun budget.",
 		promptSnippet:
-			"loop_record_build: after /loop build, record testFiles plus redRunLog and greenRunLog from red-then-green checks",
+			"loop_record_build: after /loop build, record redRunId and greenRunId from red-then-green run_in_pane checks",
 		parameters: Type.Object(
 			{
-				testFiles: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
-				redRunLog: Type.String({ minLength: 1 }),
-				greenRunLog: Type.String({ minLength: 1 }),
+				redRunId: Type.String({ minLength: 1 }),
+				greenRunId: Type.String({ minLength: 1 }),
 				maxVerifierRerunMs: Type.Optional(Type.Number()),
 			},
 			{ additionalProperties: false },
@@ -754,7 +773,15 @@ export default function sitraLoop(pi: Pi): void {
 			const checkout = checkoutGit(ctx.cwd);
 			const path = statePathFor({ ...checkout, baseRef: "", baseHead: "" });
 			const state = readLoopStateFile(path);
-			const gitState = currentGitForState(ctx.cwd, state);
+			let gitState: GitState;
+			try {
+				gitState = currentGitForState(ctx.cwd, state);
+			} catch (error) {
+				const blocked = blockForGitFailure(state, String(error));
+				writeLoopStateFile(path, blocked.state);
+				emitEffects(pi, blocked.state, blocked.effects);
+				return { content: [{ type: "text", text: `stage: ${blocked.state.stage}` }], details: blocked.state };
+			}
 			const stale = blockIfBuildOrVerifyStale(ctx.cwd, path, state, gitState);
 			if (stale) {
 				emitEffects(pi, stale.state, stale.effects);
@@ -764,9 +791,8 @@ export default function sitraLoop(pi: Pi): void {
 				};
 			}
 			const p = params as {
-				testFiles: string[];
-				redRunLog: string;
-				greenRunLog: string;
+				redRunId: string;
+				greenRunId: string;
 				maxVerifierRerunMs?: number;
 			};
 			const next = recordBuildFromParams(pi, ctx, path, state, p);

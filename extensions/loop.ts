@@ -173,6 +173,7 @@ export const LOOP_STATE_SCHEMA = Type.Object(
 			Type.Object({ author: Type.Literal("lead"), text: Type.String() }, { additionalProperties: false }),
 		),
 		approval: Type.Optional(Approval),
+		frozenBrief: Type.Optional(LOOP_BRIEF_SCHEMA),
 		frozenBriefHash: Type.Optional(Type.String()),
 		build: BuildState,
 		verifierRequest: Type.Optional(VerifierRequest),
@@ -199,6 +200,11 @@ export type AdvisorRun = Static<typeof AdvisorRun>;
 export type LoopState = Static<typeof LOOP_STATE_SCHEMA>;
 export type LoopBrief = Static<typeof LOOP_BRIEF_SCHEMA>;
 export type LoopTestHash = Static<typeof TestHash>;
+export type StaleReasonKind = "branch-changed" | "base-moved" | "brief" | "test-hashes" | "diff" | "dirty-worktree";
+export interface StaleReason {
+	kind: StaleReasonKind;
+	detail: string;
+}
 
 export interface AdvisorDispatch {
 	role: AdvisorRole;
@@ -265,16 +271,13 @@ export function createLoopState(input: {
 }
 
 export function buildBrief(state: LoopState): LoopBrief {
+	if (state.frozenBrief) return state.frozenBrief;
 	const brief: LoopBrief = {
 		version: 1,
 		goal: state.goal,
 		limits: state.limits,
 		done: state.done,
-		questions: state.questions.filter((question) => {
-			if (question.id === STALE_STATE_QUESTION_ID) return false;
-			if (!state.frozenBriefHash) return true;
-			return !["build-evidence", "verifier-intake", "verifier-classify"].includes(question.id);
-		}),
+		questions: state.questions.filter((question) => question.id !== STALE_STATE_QUESTION_ID),
 		advisorRuns: state.advisorRuns,
 	};
 	if (state.plan) brief.plan = state.plan;
@@ -562,6 +565,8 @@ export function nextLoopEffects(state: LoopState): LoopEffect[] {
 	if (state.stage === "plan") return [{ type: "write-lead-plan", brief: buildBrief(state) }];
 	if (state.stage === "architecture-review") return architectureEffects(state).effects;
 	if (state.stage === "brief-approved") return [{ type: "brief-approved", brief: buildBrief(state) }];
+	if (state.stage === "verify" && state.verifierRequest)
+		return [{ type: "dispatch-verifier", agent: "verifier", task: state.verifierRequest.task }];
 	return [];
 }
 
@@ -639,6 +644,9 @@ export function answerLoopQuestion(
 			: { state: next, effects: nextLoopEffects(next) };
 	}
 	const roles = state.block.kind === "questions" ? state.block.pendingAdvisors : affectedAdvisors(state);
+	if (state.block.kind === "questions" && state.block.resumeStage === "classify") {
+		return { state: { ...state, questions: answered }, effects: [] };
+	}
 	const advisorRuns = { ...state.advisorRuns };
 	for (const role of roles) delete advisorRuns[advisorKey(role)];
 	const architectureAffected = roles.includes("architecture");
@@ -672,7 +680,7 @@ export function replaceBlockWithStale(
 	if (!reason) return { state, effects: [] };
 	const question: LoopQuestion = {
 		id: STALE_STATE_QUESTION_ID,
-		text: `The loop state is stale: ${reason}. Should this graph continue from the current branch and base head?`,
+		text: `The loop state is stale: ${staleReasonText(reason)}. Should this graph continue from the current branch and base head?`,
 		recommended: "Answer how to proceed before the runner dispatches more work.",
 		dependsOn: [],
 	};
@@ -705,8 +713,9 @@ export function applyLeadPlan(state: LoopState, text: string): { state: LoopStat
 export function approveBrief(state: LoopState, approval: Approval): { state: LoopState; effects: LoopEffect[] } {
 	if (state.stage !== "architecture-review") throw new Error(`cannot approve a brief while stage is ${state.stage}`);
 	const approved: LoopState = { ...state, stage: "brief-approved", approval };
-	const frozenBriefHash = briefHash(buildBrief(approved));
-	const next = { ...approved, frozenBriefHash };
+	const frozenBrief = buildBrief(approved);
+	const frozenBriefHash = briefHash(frozenBrief);
+	const next = { ...approved, frozenBrief, frozenBriefHash };
 	return { state: next, effects: [{ type: "brief-approved", brief: buildBrief(next) }] };
 }
 
@@ -788,7 +797,7 @@ export function blockForBuildEvidenceFailure(
 function agreedTestProblem(state: LoopState, testFiles: string[]): string | undefined {
 	if (testFiles.length === 0) return "at least one test file is required";
 	const agreed = state.advisorRuns.testDesign?.acceptanceTestFiles ?? [];
-	if (agreed.length === 0) return undefined;
+	if (agreed.length === 0) return "frozen brief has no acceptance test target files";
 	const got = [...testFiles].sort();
 	const want = [...agreed].sort();
 	if (JSON.stringify(got) !== JSON.stringify(want)) {
@@ -978,40 +987,48 @@ export function applyVerifierReport(
 
 export function staleReason(
 	state: LoopState,
-	current: { branch: string; baseHead: string; testHashes?: LoopTestHash[]; diffHash?: string },
-): string | undefined {
-	if (state.branch !== current.branch) return `branch changed from ${state.branch} to ${current.branch}`;
-	if (state.baseHead !== current.baseHead) return `base head changed from ${state.baseHead} to ${current.baseHead}`;
+	current: { branch: string; baseHead: string; testHashes?: LoopTestHash[]; diffHash?: string; dirtyWorktree?: boolean },
+): StaleReason | undefined {
+	if (state.branch !== current.branch)
+		return { kind: "branch-changed", detail: `branch changed from ${state.branch} to ${current.branch}` };
+	if (state.baseHead !== current.baseHead)
+		return { kind: "base-moved", detail: `base head changed from ${state.baseHead} to ${current.baseHead}` };
 	if (state.frozenBriefHash && state.frozenBriefHash !== briefHash(buildBrief(state))) {
-		return "frozen brief hash is not current";
+		return { kind: "brief", detail: "frozen brief hash is not current" };
 	}
+	if (current.dirtyWorktree) return { kind: "dirty-worktree", detail: "worktree has uncommitted changes" };
 	if (
 		current.testHashes &&
 		state.build.testHashes.length > 0 &&
 		!sameHashes(state.build.testHashes, current.testHashes)
 	) {
-		return "test hashes do not match test files";
+		return { kind: "test-hashes", detail: "test hashes do not match test files" };
 	}
 	if (current.diffHash && state.verifierRequest && state.verifierRequest.diffHash !== current.diffHash) {
-		return "diff no longer matches verifier request";
+		return { kind: "diff", detail: "diff no longer matches verifier request" };
 	}
 	return undefined;
 }
 
+export function staleReasonText(reason: StaleReason): string {
+	return reason.detail;
+}
+
 export function blockForStaleState(
 	state: LoopState,
-	current: { branch: string; baseHead: string; testHashes?: LoopTestHash[]; diffHash?: string },
+	current: { branch: string; baseHead: string; testHashes?: LoopTestHash[]; diffHash?: string; dirtyWorktree?: boolean },
 ): { state: LoopState; effects: LoopEffect[] } {
 	const reason = staleReason(state, current);
 	if (!reason) return { state, effects: [] };
 	const question: LoopQuestion = {
 		id: STALE_STATE_QUESTION_ID,
-		text: `The loop state is stale: ${reason}. Should this graph continue from the current branch and base head?`,
+		text: `The loop state is stale: ${staleReasonText(reason)}. Should this graph continue from the current branch and base head?`,
 		recommended: "Answer how to proceed before the runner dispatches more work.",
 		dependsOn: [],
 	};
 	const verifyEvidenceStale =
-		state.stage === "verify" && (reason.includes("test hashes") || reason.includes("diff no longer matches"));
+		state.stage === "verify" &&
+		(reason.kind === "test-hashes" || reason.kind === "diff" || reason.kind === "dirty-worktree");
 	return withBlock(state, {
 		kind: "stale",
 		question,

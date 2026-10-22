@@ -181,6 +181,23 @@ function writeRunIdLog(profile: string, runId: string, contents: string): string
 	return file;
 }
 
+let nextRunId = 1;
+async function recordBuildWithLogs(
+	tools: ReturnType<typeof fakePi>["tools"],
+	profile: string,
+	redLog: string,
+	greenLog: string,
+	cwd: string,
+) {
+	const redRunId = `red-${nextRunId++}`;
+	const greenRunId = `green-${nextRunId++}`;
+	writeRunIdLog(profile, redRunId, readFileSync(redLog, "utf8"));
+	writeRunIdLog(profile, greenRunId, readFileSync(greenLog, "utf8"));
+	return tools
+		.get("loop_record_build")
+		?.execute("1", { redRunId, greenRunId }, undefined, undefined, ctx(cwd));
+}
+
 function status(cwd: string): string {
 	return execFileSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" });
 }
@@ -206,15 +223,24 @@ function approvedLoop(profile: string, cwd: string) {
 		advisorRuns: {
 			intent: { status: "done", summary: "intent", evidence: [], openQuestions: [], assumptions: [] },
 			codebase: { status: "done", summary: "codebase", evidence: [], openQuestions: [], assumptions: [] },
-			testDesign: { status: "done", summary: "tests", evidence: [], openQuestions: [], assumptions: [] },
+			testDesign: {
+				status: "done",
+				summary: "tests",
+				evidence: [],
+				openQuestions: [],
+				assumptions: [],
+				acceptanceTestFiles: ["loop.test.ts"],
+			},
 			architecture: { status: "done", summary: "architecture", evidence: [], openQuestions: [], assumptions: [] },
 		},
 		plan: { author: "lead", text: "Plan" },
 		approval: { approvedBy: "person", approvedAt: "2026-10-22T00:00:00.000Z", summary: "Approved." },
 	};
+	const frozenBrief = buildBrief(state);
 	writeLoopStateFile(loopStatePath(profile, cwd, "feature"), {
 		...state,
-		frozenBriefHash: briefHash(buildBrief(state)),
+		frozenBrief,
+		frozenBriefHash: briefHash(frozenBrief),
 	});
 }
 
@@ -260,7 +286,7 @@ describe("loop state files", () => {
 
 describe("Pi wiring", () => {
 	const usage =
-		/usage: \/loop start \[--base <ref>\] <task> \| \/loop answer <answer> \| \/loop plan <plan> \| \/loop approve <summary> \| \/loop status/;
+		/usage: \/loop start \[--base <ref>\] <task> \| \/loop answer <answer> \| \/loop plan <plan> \| \/loop approve <summary> \| \/loop build \| \/loop record-build <json> \| \/loop status/;
 
 	test("/loop start is explicit, writes state, and asks for the first advisors", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
@@ -689,15 +715,7 @@ describe("Pi wiring", () => {
 			testHashes: [{ file: "loop.test.ts", sha256: expectedHash }],
 			exitCode: 0,
 		});
-		const result = await tools
-			.get("loop_record_build")
-			?.execute(
-				"1",
-				{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
-				undefined,
-				undefined,
-				ctx(cwd),
-			);
+		const result = await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
 		expect(result?.content[0]?.text).toContain("stage: verify");
 		const state = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
 		expect(state.stage).toBe("verify");
@@ -731,30 +749,14 @@ describe("Pi wiring", () => {
 			testHashes: [{ file: "loop.test.ts", sha256: hash }],
 			exitCode: 0,
 		});
-		await tools
-			.get("loop_record_build")
-			?.execute(
-				"1",
-				{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
-				undefined,
-				undefined,
-				ctx(cwd),
-			);
+		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
 		expect(readLoopStateFile(loopStatePath(profile, cwd, "feature")).stage).toBe("verify");
 
 		approvedLoop(profile, cwd);
 		await commands.get("loop")?.handler("build", ctx(cwd));
 		writeLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
 		writeLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
-		await tools
-			.get("loop_record_build")
-			?.execute(
-				"1",
-				{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
-				undefined,
-				undefined,
-				ctx(cwd),
-			);
+		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
 		const rejected = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
 		expect(rejected.stage).toBe("blocked");
 		expect(rejected.questions.at(-1)?.text).toContain("run header");
@@ -818,15 +820,7 @@ describe("Pi wiring", () => {
 			exitCode: 0,
 		});
 		writeFileSync(join(cwd, "impl.ts"), "dirty\n");
-		await tools
-			.get("loop_record_build")
-			?.execute(
-				"1",
-				{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
-				undefined,
-				undefined,
-				ctx(cwd),
-			);
+		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
 		expect(readLoopStateFile(loopStatePath(profile, cwd, "feature")).stage).toBe("blocked");
 
 		execFileSync("git", ["checkout", "--", "impl.ts"], { cwd, stdio: "ignore" });
@@ -838,15 +832,7 @@ describe("Pi wiring", () => {
 			testHashes: [{ file: "loop.test.ts", sha256: hash }],
 			exitCode: 1,
 		});
-		await tools
-			.get("loop_record_build")
-			?.execute(
-				"1",
-				{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
-				undefined,
-				undefined,
-				ctx(cwd),
-			);
+		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
 		const blocked = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
 		expect(blocked.stage).toBe("blocked");
 		expect(blocked.questions.at(-1)?.text).toContain("tests-only");
@@ -878,15 +864,7 @@ describe("Pi wiring", () => {
 			exitCode: 0,
 		});
 		writeFileSync(join(cwd, "loop.test.ts"), "changed after logs\n");
-		await tools
-			.get("loop_record_build")
-			?.execute(
-				"1",
-				{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
-				undefined,
-				undefined,
-				ctx(cwd),
-			);
+		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
 		const state = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
 		expect(state.stage).toBe("blocked");
 		expect(state.block).toMatchObject({ kind: "questions", resumeStage: "build" });
@@ -917,15 +895,7 @@ describe("Pi wiring", () => {
 			testHashes: [{ file: "loop.test.ts", sha256: hash }],
 			exitCode: 0,
 		});
-		await tools
-			.get("loop_record_build")
-			?.execute(
-				"1",
-				{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
-				undefined,
-				undefined,
-				ctx(cwd),
-			);
+		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
 
 		await handlers.get("message_end")?.(
 			subagentResult(
@@ -946,15 +916,7 @@ describe("Pi wiring", () => {
 
 		approvedLoop(profile, cwd);
 		await commands.get("loop")?.handler("build", ctx(cwd));
-		await tools
-			.get("loop_record_build")
-			?.execute(
-				"1",
-				{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
-				undefined,
-				undefined,
-				ctx(cwd),
-			);
+		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
 		writeHeaderLoopLog(greenLog, {
 			commit: "stale",
 			testHashes: [{ file: "loop.test.ts", sha256: hash }],
@@ -986,15 +948,7 @@ describe("Pi wiring", () => {
 			testHashes: [{ file: "loop.test.ts", sha256: hash }],
 			exitCode: 0,
 		});
-		await tools
-			.get("loop_record_build")
-			?.execute(
-				"1",
-				{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
-				undefined,
-				undefined,
-				ctx(cwd),
-			);
+		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
 		await handlers.get("message_end")?.(
 			subagentResult(
 				"verifier",
@@ -1042,15 +996,7 @@ describe("Pi wiring", () => {
 			testHashes: [{ file: "loop.test.ts", sha256: hash }],
 			exitCode: 0,
 		});
-		await tools
-			.get("loop_record_build")
-			?.execute(
-				"1",
-				{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
-				undefined,
-				undefined,
-				ctx(cwd),
-			);
+		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
 		writeFileSync(join(cwd, "impl.ts"), "dirty\n");
 		await handlers.get("message_end")?.(
 			subagentResult(
@@ -1121,12 +1067,11 @@ describe("Pi wiring", () => {
 			testHashes: [{ file: "loop.test.ts", sha256: hash }],
 			exitCode: 0,
 		});
+		writeRunIdLog(profile, "status-red", readFileSync(redLog, "utf8"));
+		writeRunIdLog(profile, "status-green", readFileSync(greenLog, "utf8"));
 		await commands
 			.get("loop")
-			?.handler(
-				`record-build ${JSON.stringify({ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog })}`,
-				ctx(cwd),
-			);
+			?.handler(`record-build ${JSON.stringify({ redRunId: "status-red", greenRunId: "status-green" })}`, ctx(cwd));
 		const path = loopStatePath(profile, cwd, "feature");
 		writeFileSync(join(cwd, "loop.test.ts"), "changed\n");
 		const before = readFileSync(path, "utf8");

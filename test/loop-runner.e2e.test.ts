@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -439,13 +439,17 @@ async function runBuildVerifyE2e(kind: "pass" | "miss") {
 					const hashes = [{ file: "loop.test.ts", sha256: sha256(cwd, "loop.test.ts") }];
 					writeRunLog(redLog, redCommit, hashes, 1);
 					writeRunLog(greenLog, greenCommit, hashes, 0);
+					const redRunId = `${kind}-red-run`;
+					const greenRunId = `${kind}-green-run`;
+					mkdirSync(join(profile, "runs"), { recursive: true });
+					writeFileSync(join(profile, "runs", `${redRunId}.log`), readFileSync(redLog, "utf8"));
+					writeFileSync(join(profile, "runs", `${greenRunId}.log`), readFileSync(greenLog, "utf8"));
 					child.stdin.write(
 						`${JSON.stringify({
 							type: "prompt",
 							message: `/loop record-build ${JSON.stringify({
-								testFiles: ["loop.test.ts"],
-								redRunLog: redLog,
-								greenRunLog: greenLog,
+								redRunId,
+								greenRunId,
 							})}`,
 						})}\n`,
 					);

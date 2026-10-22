@@ -1,4 +1,8 @@
 /** Long commands run in a visible herdr pane with output teed to a log; agents check the log instead of waiting. */
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 export const EXIT_MARKER = "__SITRA_EXIT__=";
 /** First line of a run's log: the shell's pid (so a dead run is not "running" forever) and who started it. */
 export const HEADER_MARKER = "__SITRA_RUN__=";
@@ -13,6 +17,13 @@ export interface RunMeta {
 		commit: string;
 		testHashes: { file: string; sha256: string }[];
 	};
+}
+
+export function hashFiles(worktree: string, files: string[]): { file: string; sha256: string }[] {
+	return files.map((file) => ({
+		file,
+		sha256: createHash("sha256").update(readFileSync(file.startsWith("/") ? file : join(worktree, file))).digest("hex"),
+	}));
 }
 
 export function shellQuote(s: string): string {

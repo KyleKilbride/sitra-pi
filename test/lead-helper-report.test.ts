@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -175,7 +175,7 @@ describe("run_in_pane loop metadata", () => {
 			{ cwd },
 		);
 		const log = result?.details.log as string;
-		for (let i = 0; i < 100 && !readFileSync(log, "utf8").trim(); i++);
+		for (let i = 0; i < 100 && (!existsSync(log) || !readFileSync(log, "utf8").trim()); i++);
 		const header = readRunHeader(readFileSync(log, "utf8").split("\n")[0] ?? "");
 		expect(header?.meta.loop?.commit).toBe(head);
 		expect(header?.meta.loop?.testHashes).toEqual([

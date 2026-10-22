@@ -355,8 +355,8 @@ describe("stale state and validation", () => {
 	test("blocks stale state when branch/base changes or the frozen brief hash is no longer current", () => {
 		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
 		expect(staleReason(state, context)).toBeUndefined();
-		expect(staleReason(state, { ...context, branch: "other" })).toContain("branch changed");
-		expect(staleReason(state, { ...context, baseHead: "base-b" })).toContain("base head changed");
+		expect(staleReason(state, { ...context, branch: "other" })).toMatchObject({ kind: "branch-changed" });
+		expect(staleReason(state, { ...context, baseHead: "base-b" })).toMatchObject({ kind: "base-moved" });
 
 		state = {
 			...state,
@@ -402,7 +402,7 @@ describe("stale state and validation", () => {
 			},
 			frozenBriefHash: "not-current",
 		};
-		expect(staleReason(state, context)).toContain("frozen brief hash");
+		expect(staleReason(state, context)).toMatchObject({ kind: "brief" });
 	});
 
 	test("a freshly approved brief is not stale, and stale blocks can be left by answering", () => {
@@ -633,8 +633,8 @@ describe("build and verify slice", () => {
 		expect(staleReason(state, { ...context, testHashes })).toBeUndefined();
 		expect(
 			staleReason(state, { ...context, testHashes: [{ file: "test/loop.test.ts", sha256: "changed" }] }),
-		).toContain("test hashes");
-		expect(staleReason(state, { ...context, testHashes, diffHash: "different" })).toContain("diff");
+		).toMatchObject({ kind: "test-hashes" });
+		expect(staleReason(state, { ...context, testHashes, diffHash: "different" })).toMatchObject({ kind: "diff" });
 	});
 
 	test("post-approval block questions do not change the frozen brief hash or get re-frozen by stale answers", () => {

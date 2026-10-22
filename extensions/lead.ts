@@ -7,7 +7,8 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Type } from "typebox";
 import { HELPER_REPORT_TOOL_SCHEMA, renderHelperReport, validateHelperReport } from "./helper-report.ts";
-import { paneCommand, readRun, shellQuote } from "./runs.ts";
+import { loopStatePath, readLoopStateFile } from "./loop-pi.ts";
+import { hashFiles, paneCommand, readRun, shellQuote, type RunMeta } from "./runs.ts";
 import { gitBranch, mainCheckout } from "./sessions.ts";
 
 /** The lead's working rules, written for the person it works with (their name, or "the user"). */
@@ -125,6 +126,25 @@ export default function sitraLead(pi: Pi): void {
 
 	const runsDir = join(process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent"), "runs");
 
+	const loopRunMeta = (cwd: string, branch?: string): Pick<RunMeta, "loop"> => {
+		if (!branch) return {};
+		try {
+			const worktree = mainCheckout(cwd);
+			const profile = process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
+			const state = readLoopStateFile(loopStatePath(profile, worktree, branch));
+			if (state.stage !== "build") return {};
+			const testFiles =
+				state.frozenBrief?.advisorRuns.testDesign?.acceptanceTestFiles ??
+				state.advisorRuns.testDesign?.acceptanceTestFiles ??
+				[];
+			if (testFiles.length === 0) return {};
+			const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
+			return { loop: { commit, testHashes: hashFiles(worktree, testFiles) } };
+		} catch {
+			return {};
+		}
+	};
+
 	if (isTeammate) {
 		pi.registerTool({
 			name: "helper_report",
@@ -163,7 +183,8 @@ export default function sitraLead(pi: Pi): void {
 				.toLowerCase()
 				.replace(/[^a-z0-9]+/g, "-")
 				.slice(0, 40);
-			const log = join(runsDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${slug}.log`);
+			const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${slug}`;
+			const log = join(runsDir, `${runId}.log`);
 			const branch = gitBranch(ctx.cwd);
 			const line = paneCommand(p.command, log, {
 				label: p.label,
@@ -173,6 +194,7 @@ export default function sitraLead(pi: Pi): void {
 					process.env.PI_SUBAGENT_NAME?.trim() ||
 					(isTower ? (process.env.SITRA_TOWER_NAME?.trim() ?? "tower") : "lead"),
 				...(ctx.sessionManager?.getSessionId?.() ? { sessionId: ctx.sessionManager.getSessionId() } : {}),
+				...loopRunMeta(ctx.cwd, branch),
 			});
 			let where: string;
 			if (process.env.HERDR_ENV === "1" && process.env.HERDR_PANE_ID) {
@@ -223,7 +245,7 @@ export default function sitraLead(pi: Pi): void {
 						text: `Started in ${where}. You'll get a message with the result when it finishes; don't wait or poll. Log: ${log}`,
 					},
 				],
-				details: { log },
+				details: { log, runId },
 			};
 		},
 	});
