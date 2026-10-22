@@ -74,7 +74,10 @@ const AdvisorRun = Type.Object(
 	{ additionalProperties: false },
 );
 
-const TestHash = Type.Object({ file: Type.String(), sha256: Type.String() }, { additionalProperties: false });
+const TestHash = Type.Object(
+	{ file: Type.String(), sha256: Type.Optional(Type.String()), missing: Type.Optional(Type.Boolean()) },
+	{ additionalProperties: false },
+);
 
 const BuildState = Type.Object(
 	{
@@ -134,6 +137,7 @@ const VerifierRequest = Type.Object(
 		diffHash: Type.String({ minLength: 1 }),
 		testHashes: Type.Array(TestHash),
 		task: Type.String({ minLength: 1 }),
+		taskHash: Type.String({ minLength: 1 }),
 		runLogs: Type.Array(Type.String()),
 		maxVerifierRerunMs: Type.Number(),
 	},
@@ -741,6 +745,7 @@ export interface LoopRunEvidence {
 }
 
 function sameHashes(a: LoopTestHash[], b: LoopTestHash[]): boolean {
+	if (a.some((item) => item.missing) || b.some((item) => item.missing)) return false;
 	return (
 		JSON.stringify([...a].sort((x, y) => x.file.localeCompare(y.file))) ===
 		JSON.stringify([...b].sort((x, y) => x.file.localeCompare(y.file)))
@@ -749,6 +754,8 @@ function sameHashes(a: LoopTestHash[], b: LoopTestHash[]): boolean {
 
 function runTieProblem(run: LoopRunEvidence, testHashes: LoopTestHash[]): string | undefined {
 	if (!run.loop) return "it is missing run header loop metadata";
+	const missing = run.loop.testHashes.find((item) => item.missing);
+	if (missing) return `${missing.file} was missing when the run started`;
 	if (!sameHashes(run.loop.testHashes, testHashes)) return "it is tied to different test hashes";
 	return undefined;
 }
@@ -901,6 +908,7 @@ export function recordBuildEvidence(
 			diffHash: diffHash(input.diff),
 			testHashes: input.testHashes,
 			task,
+			taskHash: sha256Text(task),
 			runLogs: [redRunLog, greenRunLog],
 			maxVerifierRerunMs: input.maxVerifierRerunMs,
 		},

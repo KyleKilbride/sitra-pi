@@ -16,16 +16,25 @@ export interface RunMeta {
 	command?: string;
 	loop?: {
 		commit: string;
-		testHashes: { file: string; sha256: string }[];
+		testHashes: { file: string; sha256?: string; missing?: boolean }[];
 	};
 }
 
-export function hashFiles(worktree: string, files: string[]): { file: string; sha256: string }[] {
+export function hashFiles(worktree: string, files: string[]): { file: string; sha256?: string; missing?: boolean }[] {
 	return files.map((file) => ({
 		file,
-		sha256: createHash("sha256")
-			.update(readFileSync(file.startsWith("/") ? file : join(worktree, file)))
-			.digest("hex"),
+		...(() => {
+			try {
+				return {
+					sha256: createHash("sha256")
+						.update(readFileSync(file.startsWith("/") ? file : join(worktree, file)))
+						.digest("hex"),
+				};
+			} catch (error) {
+				if ((error as { code?: unknown }).code === "ENOENT") return { missing: true };
+				throw error;
+			}
+		})(),
 	}));
 }
 
@@ -100,13 +109,15 @@ export function readRunHeader(
 					item &&
 					typeof item === "object" &&
 					typeof (item as { file?: unknown }).file === "string" &&
-					typeof (item as { sha256?: unknown }).sha256 === "string",
+					(typeof (item as { sha256?: unknown }).sha256 === "string" ||
+						(item as { missing?: unknown }).missing === true),
 			)
 				? {
 						commit: (meta.loop as { commit: string }).commit.slice(0, 200),
-						testHashes: (meta.loop as { testHashes: { file: string; sha256: string }[] }).testHashes.map((item) => ({
+						testHashes: (meta.loop as { testHashes: { file: string; sha256?: string; missing?: boolean }[] }).testHashes.map((item) => ({
 							file: item.file.slice(0, 500),
-							sha256: item.sha256.slice(0, 200),
+							...(item.sha256 ? { sha256: item.sha256.slice(0, 200) } : {}),
+							...(item.missing === true ? { missing: true } : {}),
 						})),
 					}
 				: undefined;

@@ -1,5 +1,6 @@
 // @ts-nocheck — deterministic scripted model for loop-foundation tests.
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
+import { readFileSync, writeFileSync } from "node:fs";
 
 function script() {
 	try {
@@ -27,6 +28,17 @@ function textFrom(message) {
 		.filter((part) => part?.type === "text" && typeof part.text === "string")
 		.map((part) => part.text)
 		.join("\n");
+}
+
+function addVerifierTask(details, task) {
+	if (details?.agent !== "verifier" || typeof details.sessionFile !== "string") return details;
+	const raw = readFileSync(details.sessionFile, "utf8");
+	if (raw.includes('"role":"user"')) return details;
+	writeFileSync(
+		details.sessionFile,
+		`${JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: task }] } })}\n${raw}`,
+	);
+	return details;
 }
 
 export default function (pi) {
@@ -68,6 +80,7 @@ export default function (pi) {
 		const batch = helpers[index]?.messages;
 		if (!Array.isArray(batch)) return;
 		for (const details of batch) {
+			addVerifierTask(details, text);
 			await pi.sendMessage(
 				{ customType: "subagent_result", content: "helper finished", display: false, details },
 				{ deliverAs: "followUp", streamingBehavior: "followUp" },

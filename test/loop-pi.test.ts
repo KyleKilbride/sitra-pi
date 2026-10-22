@@ -96,6 +96,13 @@ function sessionFileWithHelperReport(report: unknown): string {
 	]);
 }
 
+function sessionFileWithVerifierReport(report: unknown, task: string): string {
+	return sessionFileWithEntries([
+		{ type: "message", message: { role: "user", content: [{ type: "text", text: task }] } },
+		{ type: "message", message: { role: "toolResult", toolName: "helper_report", details: report } },
+	]);
+}
+
 function failedHelperEntry() {
 	return { type: "message", message: { role: "toolResult", toolName: "helper_report", isError: true, details: {} } };
 }
@@ -156,7 +163,7 @@ function writeLoopLog(
 
 function writeHeaderLoopLog(
 	file: string,
-	input: { commit: string; testHashes: { file: string; sha256: string }[]; exitCode: number },
+	input: { commit: string; testHashes: ({ file: string; sha256: string } | { file: string; missing: true })[]; exitCode: number },
 ): void {
 	writeFileSync(
 		file,
@@ -906,7 +913,7 @@ describe("Pi wiring", () => {
 		await handlers.get("message_end")?.(
 			subagentResult(
 				"verifier",
-				sessionFileWithHelperReport(
+				sessionFileWithVerifierReport(
 					helperReport("verifier", {
 						checksRun: [],
 						rerunChecks: [],
@@ -914,6 +921,7 @@ describe("Pi wiring", () => {
 						testHashesChecked: ["loop.test.ts"],
 						goalMatched: true,
 					}),
+					readLoopStateFile(loopStatePath(profile, cwd, "feature")).verifierRequest?.task ?? "",
 				),
 			),
 			ctx(cwd),
@@ -931,7 +939,7 @@ describe("Pi wiring", () => {
 		await handlers.get("message_end")?.(
 			subagentResult(
 				"verifier",
-				sessionFileWithHelperReport(
+				sessionFileWithVerifierReport(
 					helperReport("verifier", {
 						checksRun: [],
 						rerunChecks: [],
@@ -939,6 +947,7 @@ describe("Pi wiring", () => {
 						testHashesChecked: ["loop.test.ts"],
 						goalMatched: true,
 					}),
+					readLoopStateFile(loopStatePath(profile, cwd, "feature")).verifierRequest?.task ?? "",
 				),
 			),
 			ctx(cwd),
@@ -958,17 +967,20 @@ describe("Pi wiring", () => {
 		await handlers.get("message_end")?.(
 			subagentResult(
 				"verifier",
-				sessionFileWithHelperReport({
-					...helperReport("verifier", {
-						checksRun: [],
-						rerunChecks: [],
-						acceptedLogs: [],
-						testHashesChecked: ["loop.test.ts"],
-						goalMatched: false,
-						missClass: "execution-slip",
-					}),
-					summary: "Verifier found a miss.",
-				}),
+				sessionFileWithVerifierReport(
+					{
+						...helperReport("verifier", {
+							checksRun: [],
+							rerunChecks: [],
+							acceptedLogs: [],
+							testHashesChecked: ["loop.test.ts"],
+							goalMatched: false,
+							missClass: "execution-slip",
+						}),
+						summary: "Verifier found a miss.",
+					},
+					readLoopStateFile(loopStatePath(profile, cwd, "feature")).verifierRequest?.task ?? "",
+				),
 			),
 			ctx(cwd),
 		);
@@ -1003,11 +1015,12 @@ describe("Pi wiring", () => {
 			exitCode: 0,
 		});
 		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
+		const verifierTask = readLoopStateFile(loopStatePath(profile, cwd, "feature")).verifierRequest?.task ?? "";
 		writeFileSync(join(cwd, "impl.ts"), "dirty\n");
 		await handlers.get("message_end")?.(
 			subagentResult(
 				"verifier",
-				sessionFileWithHelperReport(
+				sessionFileWithVerifierReport(
 					helperReport("verifier", {
 						checksRun: [],
 						rerunChecks: [],
@@ -1015,6 +1028,7 @@ describe("Pi wiring", () => {
 						testHashesChecked: ["loop.test.ts"],
 						goalMatched: true,
 					}),
+					verifierTask,
 				),
 			),
 			ctx(cwd),
@@ -1034,7 +1048,7 @@ describe("Pi wiring", () => {
 		await handlers.get("message_end")?.(
 			subagentResult(
 				"verifier",
-				sessionFileWithHelperReport(
+				sessionFileWithVerifierReport(
 					helperReport("verifier", {
 						checksRun: [],
 						rerunChecks: [],
@@ -1042,11 +1056,74 @@ describe("Pi wiring", () => {
 						testHashesChecked: ["loop.test.ts"],
 						goalMatched: true,
 					}),
+					verifierTask,
 				),
 			),
 			ctx(cwd),
 		);
 		expect(readFileSync(loopStatePath(profile, cwd, "feature"), "utf8")).toBe(before);
+	});
+
+	test("verifier intake ignores reports whose child task hash does not match the recorded dispatch", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		approvedLoop(profile, cwd);
+		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
+		const redCommit = commitAll(cwd, "add tests");
+		writeFileSync(join(cwd, "impl.ts"), "green\n");
+		const greenCommit = commitAll(cwd, "implement");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		const hash = sha256sum(cwd, "loop.test.ts");
+		const redLog = join(profile, "red.log");
+		const greenLog = join(profile, "green.log");
+		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
+		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
+		const path = loopStatePath(profile, cwd, "feature");
+		const verifyState = readLoopStateFile(path);
+		const verifierReport = helperReport("verifier", {
+			checksRun: [],
+			rerunChecks: [],
+			acceptedLogs: [],
+			testHashesChecked: ["loop.test.ts"],
+			goalMatched: true,
+		});
+
+		await handlers.get("message_end")?.(
+			subagentResult("verifier", sessionFileWithVerifierReport(verifierReport, "different task")),
+			ctx(cwd),
+		);
+		expect(readLoopStateFile(path)).toEqual(verifyState);
+
+		await handlers.get("message_end")?.(
+			subagentResult("verifier", sessionFileWithVerifierReport(verifierReport, verifyState.verifierRequest?.task ?? "")),
+			ctx(cwd),
+		);
+		expect(readLoopStateFile(path).stage).toBe("done");
+	});
+
+	test("record-build blocks clearly when run metadata says a frozen test file was missing", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		approvedLoop(profile, cwd);
+		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
+		const redCommit = commitAll(cwd, "add tests");
+		writeFileSync(join(cwd, "impl.ts"), "green\n");
+		const greenCommit = commitAll(cwd, "implement");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		const greenHash = sha256sum(cwd, "loop.test.ts");
+		const redLog = join(profile, "red.log");
+		const greenLog = join(profile, "green.log");
+		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", missing: true }], exitCode: 1 });
+		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: greenHash }], exitCode: 0 });
+		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
+		const blocked = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		expect(blocked.stage).toBe("blocked");
+		expect(blocked.questions.at(-1)?.text).toContain("loop.test.ts was missing");
 	});
 
 	test("loop_status reports test-hash and diff staleness without writing", async () => {
@@ -1115,13 +1192,14 @@ describe("Pi wiring", () => {
 			exitCode: 0,
 		});
 		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
+		const verifierTask = readLoopStateFile(loopStatePath(profile, cwd, "feature")).verifierRequest?.task ?? "";
 
 		writeFileSync(join(cwd, changedFile), contents);
 		commitAll(cwd, `change ${changedFile}`);
 		await handlers.get("message_end")?.(
 			subagentResult(
 				"verifier",
-				sessionFileWithHelperReport(
+				sessionFileWithVerifierReport(
 					helperReport("verifier", {
 						checksRun: [],
 						rerunChecks: [],
@@ -1129,6 +1207,7 @@ describe("Pi wiring", () => {
 						testHashesChecked: ["loop.test.ts"],
 						goalMatched: true,
 					}),
+					verifierTask,
 				),
 			),
 			ctx(cwd),
