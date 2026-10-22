@@ -19,6 +19,8 @@ import {
 	blockForStaleState,
 	type LoopEffect,
 	type LoopState,
+	recordBlockAnswer,
+	replaceBlockWithStale,
 	roleForAgent,
 	staleReason,
 	startLoop,
@@ -252,6 +254,20 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 		if (!rest) throw new Error("usage: /loop answer <answer>");
 		const rawState = currentState;
 		const isStaleAnswer = rawState.stage === "blocked" && rawState.block?.kind === "stale";
+		if (!isStaleAnswer && rawState.block) {
+			const answered = recordBlockAnswer(rawState, rest);
+			writeLoopStateFile(path, answered);
+			const stale = replaceBlockWithStale(answered, { branch: gitState.branch, baseHead: gitState.baseHead });
+			if (stale.effects.length > 0) {
+				writeLoopStateFile(path, stale.state);
+				emitEffects(pi, stale.state, stale.effects);
+				return;
+			}
+			const result = answerLoopQuestion(answered, { answer: rest, current: gitState });
+			writeLoopStateFile(path, result.state);
+			emitEffects(pi, result.state, result.effects);
+			return;
+		}
 		const state = isStaleAnswer ? rawState : loadMutableState(gitState);
 		const result = answerLoopQuestion(state, { answer: rest, current: gitState });
 		writeLoopStateFile(path, result.state);

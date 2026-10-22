@@ -373,14 +373,16 @@ function withBlock(
 		};
 	}
 	const resumeStage = input.resumeStage ?? state.stage;
-	const safeResumeStage = resumeStage === "blocked" || resumeStage === "needs-person" ? "advise" : resumeStage;
+	if (resumeStage === "blocked" || resumeStage === "needs-person") {
+		throw new Error(`invalid block resumeStage ${resumeStage}`);
+	}
 	const blocked: LoopState = {
 		...state,
 		stage: input.kind === "questions" ? "needs-person" : "blocked",
 		block: {
 			kind: input.kind,
 			questionId: input.question.id,
-			resumeStage: safeResumeStage,
+			resumeStage,
 			pendingAdvisors: input.pendingAdvisors ?? pendingAdvisorsForResume(state),
 		},
 		questions: [...state.questions, input.question],
@@ -606,6 +608,44 @@ export function answerLoopQuestion(
 		dispatchedAdvisors: [],
 	};
 	return roles.length ? dispatch(next, roles) : { state: next, effects: nextLoopEffects(next) };
+}
+
+export function recordBlockAnswer(state: LoopState, answer: string): LoopState {
+	if (!state.block) throw new Error("blocked state is missing block details");
+	return {
+		...state,
+		questions: state.questions.map((question) =>
+			question.answer || question.id !== state.block?.questionId ? question : { ...question, answer },
+		),
+	};
+}
+
+export function replaceBlockWithStale(
+	state: LoopState,
+	current: { branch: string; baseHead: string },
+): { state: LoopState; effects: LoopEffect[] } {
+	if (!state.block) throw new Error("blocked state is missing block details");
+	const reason = staleReason(state, current);
+	if (!reason) return { state, effects: [] };
+	const question: LoopQuestion = {
+		id: STALE_STATE_QUESTION_ID,
+		text: `The loop state is stale: ${reason}. Should this graph continue from the current branch and base head?`,
+		recommended: "Answer how to proceed before the runner dispatches more work.",
+		dependsOn: [],
+	};
+	const blocked: LoopState = {
+		...state,
+		stage: "blocked",
+		block: {
+			kind: "stale",
+			questionId: question.id,
+			resumeStage: state.block.resumeStage,
+			pendingAdvisors: state.block.pendingAdvisors,
+		},
+		questions: [...state.questions, question],
+		dispatchedAdvisors: [],
+	};
+	return { state: blocked, effects: [{ type: "ask-person", reason: "stale", question }] };
 }
 
 export function applyLeadPlan(state: LoopState, text: string): { state: LoopState; effects: LoopEffect[] } {
