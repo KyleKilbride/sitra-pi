@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { createLoopState, staleReason } from "../extensions/loop.ts";
+import { EXIT_MARKER } from "../extensions/runs.ts";
+import { briefHash, buildBrief, createLoopState, LOOP_RUN_MARKER, staleReason } from "../extensions/loop.ts";
 import sitraLoop, { loopStatePath, readLoopStateFile, writeLoopStateFile } from "../extensions/loop-pi.ts";
 
 vi.setConfig({ testTimeout: 30_000 });
@@ -126,6 +127,53 @@ function moveBase(cwd: string): string {
 	execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd, stdio: "ignore" });
 	execFileSync("git", ["checkout", "feature"], { cwd, stdio: "ignore" });
 	return head;
+}
+
+function commitAll(cwd: string, message: string): string {
+	execFileSync("git", ["add", "."], { cwd, stdio: "ignore" });
+	execFileSync("git", ["-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", message], {
+		cwd,
+		stdio: "ignore",
+	});
+	return execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
+}
+
+function writeLoopLog(
+	file: string,
+	input: { commit: string; testHashes: { file: string; sha256: string }[]; exitCode: number },
+): void {
+	writeFileSync(
+		file,
+		[
+			`${LOOP_RUN_MARKER}${JSON.stringify({ commit: input.commit, testHashes: input.testHashes })}`,
+			"test output",
+			`${EXIT_MARKER}${input.exitCode}`,
+		].join("\n"),
+	);
+}
+
+function approvedLoop(profile: string, cwd: string) {
+	const state = {
+		...createLoopState({
+			worktree: cwd,
+			branch: "feature",
+			baseRef: "origin/main",
+			baseHead: execFileSync("git", ["rev-parse", "origin/main"], { cwd, encoding: "utf8" }).trim(),
+			goal: "Add the runner",
+			limits: ["No full suite."],
+			done: ["Verifier passes."],
+		}),
+		stage: "brief-approved",
+		advisorRuns: {
+			intent: { status: "done", summary: "intent", evidence: [], openQuestions: [], assumptions: [] },
+			codebase: { status: "done", summary: "codebase", evidence: [], openQuestions: [], assumptions: [] },
+			testDesign: { status: "done", summary: "tests", evidence: [], openQuestions: [], assumptions: [] },
+			architecture: { status: "done", summary: "architecture", evidence: [], openQuestions: [], assumptions: [] },
+		},
+		plan: { author: "lead", text: "Plan" },
+		approval: { approvedBy: "person", approvedAt: "2026-10-22T00:00:00.000Z", summary: "Approved." },
+	};
+	writeLoopStateFile(loopStatePath(profile, cwd, "feature"), { ...state, frozenBriefHash: briefHash(buildBrief(state)) });
 }
 
 afterEach(() => vi.unstubAllEnvs());
@@ -569,5 +617,168 @@ describe("Pi wiring", () => {
 		expect(resumed.block).toBeUndefined();
 		expect(resumed.questions.find((question) => question.id === "advisor-intake-intent")?.answer).toBe("retry intent");
 		expect(resumed.dispatchedAdvisors).toEqual(["intent"]);
+	});
+
+	test("/loop build is explicit and loop_record_build computes hashes from test files before dispatching verifier", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, tools, userMessages } = fakePi();
+		const { cwd } = gitWorktree();
+		approvedLoop(profile, cwd);
+		writeFileSync(join(cwd, "loop.test.ts"), "expect(true).toBe(true)\n");
+		const commit = commitAll(cwd, "add tests");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		expect(readLoopStateFile(loopStatePath(profile, cwd, "feature")).stage).toBe("build");
+		const redLog = join(profile, "red.log");
+		const greenLog = join(profile, "green.log");
+		const hashBefore = readLoopStateFile(loopStatePath(profile, cwd, "feature")).build.testHashes;
+		expect(hashBefore).toEqual([]);
+
+		const expectedHash = execFileSync("sha256sum", ["loop.test.ts"], { cwd, encoding: "utf8" }).split(/\s+/)[0];
+		writeLoopLog(redLog, { commit, testHashes: [{ file: "loop.test.ts", sha256: expectedHash }], exitCode: 1 });
+		writeLoopLog(greenLog, { commit, testHashes: [{ file: "loop.test.ts", sha256: expectedHash }], exitCode: 0 });
+		const result = await tools.get("loop_record_build")?.execute(
+			"1",
+			{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
+			undefined,
+			undefined,
+			ctx(cwd),
+		);
+		expect(result?.content[0]?.text).toContain("stage: verify");
+		const state = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		expect(state.stage).toBe("verify");
+		expect(state.build.testHashes).toEqual([{ file: "loop.test.ts", sha256: expectedHash }]);
+		expect(userMessages.join("\n")).toContain("Start verifier");
+		expect(userMessages.join("\n")).toContain("maxVerifierRerunMs: 120000");
+		expect(userMessages.join("\n")).not.toContain("## Context from the lead's conversation");
+	});
+
+	test("recording build evidence blocks loudly when a recorded hash no longer matches the test file", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		approvedLoop(profile, cwd);
+		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
+		const commit = commitAll(cwd, "add tests");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		const originalHash = execFileSync("sha256sum", ["loop.test.ts"], { cwd, encoding: "utf8" }).split(/\s+/)[0];
+		const redLog = join(profile, "red.log");
+		const greenLog = join(profile, "green.log");
+		writeLoopLog(redLog, { commit, testHashes: [{ file: "loop.test.ts", sha256: originalHash }], exitCode: 1 });
+		writeLoopLog(greenLog, { commit, testHashes: [{ file: "loop.test.ts", sha256: originalHash }], exitCode: 0 });
+		writeFileSync(join(cwd, "loop.test.ts"), "changed after logs\n");
+		await tools.get("loop_record_build")?.execute(
+			"1",
+			{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
+			undefined,
+			undefined,
+			ctx(cwd),
+		);
+		const state = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		expect(state.stage).toBe("build");
+		expect(state.block).toMatchObject({ kind: "questions", resumeStage: "build" });
+		expect(state.questions.at(-1)?.text).toContain("red run");
+	});
+
+	test("verifier helper_report moves verify to done or classify and rejects stale accepted logs", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		approvedLoop(profile, cwd);
+		writeFileSync(join(cwd, "loop.test.ts"), "ok\n");
+		const commit = commitAll(cwd, "add tests");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		const hash = execFileSync("sha256sum", ["loop.test.ts"], { cwd, encoding: "utf8" }).split(/\s+/)[0];
+		const redLog = join(profile, "red.log");
+		const greenLog = join(profile, "green.log");
+		writeLoopLog(redLog, { commit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
+		writeLoopLog(greenLog, { commit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		await tools.get("loop_record_build")?.execute(
+			"1",
+			{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
+			undefined,
+			undefined,
+			ctx(cwd),
+		);
+
+		await handlers.get("message_end")?.(
+			subagentResult(
+				"verifier",
+				sessionFileWithHelperReport(
+					helperReport("verifier", {
+						checksRun: [],
+						rerunChecks: [],
+						acceptedLogs: [{ log: greenLog, reason: "exact commit and test hashes" }],
+						testHashesChecked: ["loop.test.ts"],
+						goalMatched: true,
+					}),
+				),
+			),
+			ctx(cwd),
+		);
+		expect(readLoopStateFile(loopStatePath(profile, cwd, "feature")).stage).toBe("done");
+
+		approvedLoop(profile, cwd);
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		await tools.get("loop_record_build")?.execute(
+			"1",
+			{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
+			undefined,
+			undefined,
+			ctx(cwd),
+		);
+		writeLoopLog(greenLog, { commit: "stale", testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		await handlers.get("message_end")?.(
+			subagentResult(
+				"verifier",
+				sessionFileWithHelperReport(
+					helperReport("verifier", {
+						checksRun: [],
+						rerunChecks: [],
+						acceptedLogs: [{ log: greenLog, reason: "looks green" }],
+						testHashesChecked: ["loop.test.ts"],
+						goalMatched: true,
+					}),
+				),
+			),
+			ctx(cwd),
+		);
+		const blocked = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		expect(blocked.stage).toBe("verify");
+		expect(blocked.block).toMatchObject({ kind: "intake-failed" });
+
+		approvedLoop(profile, cwd);
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		writeLoopLog(greenLog, { commit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		await tools.get("loop_record_build")?.execute(
+			"1",
+			{ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog },
+			undefined,
+			undefined,
+			ctx(cwd),
+		);
+		await handlers.get("message_end")?.(
+			subagentResult(
+				"verifier",
+				sessionFileWithHelperReport({
+					...helperReport("verifier", {
+						checksRun: [],
+						rerunChecks: [],
+						acceptedLogs: [],
+						testHashesChecked: ["loop.test.ts"],
+						goalMatched: false,
+						missClass: "execution-slip",
+					}),
+					summary: "Verifier found a miss.",
+				}),
+			),
+			ctx(cwd),
+		);
+		const missed = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		expect(missed.stage).toBe("classify");
+		expect(missed.block).toMatchObject({ kind: "questions", resumeStage: "classify" });
+		expect(missed.verification).toMatchObject({ status: "missed", summary: "Verifier found a miss." });
 	});
 });

@@ -5,19 +5,49 @@ import {
 	answerLoopQuestion,
 	applyAdvisorReport,
 	applyLeadPlan,
+	applyVerifierReport,
 	approveBrief,
 	blockForAdvisorIntakeFailure,
 	blockForStaleState,
 	briefHash,
 	buildBrief,
 	createLoopState,
+	LOOP_RUN_MARKER,
 	nextLoopEffects,
+	recordBuildEvidence,
+	startBuild,
 	staleReason,
 	startLoop,
 	validateLoopState,
+	verifierTask,
 } from "../extensions/loop.ts";
 
 const context = { worktree: "/repo", branch: "feature", baseRef: "origin/main", baseHead: "base-a" };
+const testHashes = [{ file: "test/loop.test.ts", sha256: "abc123" }];
+
+function approvedState() {
+	let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: ["No full suite."], done: [] });
+	state = applyAdvisorReport(state, report("intent"), { outputTokens: 1, contextTokens: 0 }).state;
+	state = applyAdvisorReport(state, report("codebase"), { outputTokens: 1, contextTokens: 0 }).state;
+	state = applyAdvisorReport(state, report("test-design"), { outputTokens: 1, contextTokens: 0 }).state;
+	state = applyLeadPlan(state, "Keep transitions pure and Pi wiring thin.").state;
+	state = applyAdvisorReport(state, report("architecture"), { outputTokens: 1, contextTokens: 0 }).state;
+	return approveBrief(state, {
+		approvedBy: "person",
+		approvedAt: "2026-10-22T00:00:00.000Z",
+		summary: "Approved for build.",
+	}).state;
+}
+
+const run = (overrides: Partial<{ log: string; done: boolean; exitCode: number; commit: string; testHashes: typeof testHashes }> = {}) => ({
+	log: overrides.log ?? "/tmp/run.log",
+	done: overrides.done ?? true,
+	exitCode: overrides.exitCode ?? 0,
+	loop: {
+		commit: overrides.commit ?? "commit-a",
+		testHashes: overrides.testHashes ?? testHashes,
+	},
+});
 
 const report = (role: HelperReport["role"], extra: Partial<HelperReport> = {}): HelperReport => ({
 	status: "done",
@@ -469,5 +499,203 @@ describe("stale state and validation", () => {
 			reason: expect.stringContaining("/version"),
 		});
 		expect(advisorKey("test-design")).toBe("testDesign");
+	});
+});
+
+describe("build and verify slice", () => {
+	test("starts build only after brief approval, records runner-computed test hashes, and writes an isolated verifier task", () => {
+		let state = approvedState();
+		const started = startBuild(state);
+		state = started.state;
+		expect(state.stage).toBe("build");
+		expect(started.effects).toEqual([]);
+		const result = recordBuildEvidence(state, {
+			commit: "commit-a",
+			diff: "diff --git a/extensions/loop.ts b/extensions/loop.ts",
+			testFiles: ["test/loop.test.ts"],
+			testHashes,
+			redRun: run({ log: "/tmp/red.log", exitCode: 1 }),
+			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+			maxVerifierRerunMs: 120_000,
+		});
+		expect(result.state.stage).toBe("verify");
+		expect(result.state.build).toMatchObject({
+			commit: "commit-a",
+			testFiles: ["test/loop.test.ts"],
+			testHashes,
+			redRunLog: "/tmp/red.log",
+			greenRunLog: "/tmp/green.log",
+		});
+		expect(result.effects).toHaveLength(1);
+		expect(result.effects[0]).toMatchObject({ type: "dispatch-verifier", agent: "verifier" });
+		const task = result.effects[0]?.type === "dispatch-verifier" ? result.effects[0].task : "";
+		expect(task).toContain("Frozen brief:");
+		expect(task).toContain("diff --git");
+		expect(task).toContain('"sha256": "abc123"');
+		expect(task).toContain("/tmp/red.log");
+		expect(task).toContain("/tmp/green.log");
+		expect(task).toContain("maxVerifierRerunMs: 120000");
+		expect(task).not.toContain("builder transcript");
+		expect(task).not.toContain("## Context from the lead's conversation");
+	});
+
+	test("blocks verify, without reopening the brief, when the red run is missing, passed, unfinished, or not tied to current hashes", () => {
+		const state = startBuild(approvedState()).state;
+		for (const redRun of [
+			undefined,
+			run({ exitCode: 0 }),
+			run({ done: false, exitCode: 1 }),
+			run({ exitCode: 1, testHashes: [{ file: "test/loop.test.ts", sha256: "stale" }] }),
+		]) {
+			const result = recordBuildEvidence(state, {
+				commit: "commit-a",
+				diff: "diff",
+				testFiles: ["test/loop.test.ts"],
+				testHashes,
+				redRun,
+				greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+				maxVerifierRerunMs: 120_000,
+			});
+			expect(result.state.stage).toBe("build");
+			expect(result.state.block).toMatchObject({ kind: "questions", resumeStage: "build" });
+			expect(result.effects).toMatchObject([{ type: "ask-person" }]);
+		}
+	});
+
+	test("treats changed test hashes and changed verifier diff as stale in build and verify", () => {
+		let state = startBuild(approvedState()).state;
+		state = recordBuildEvidence(state, {
+			commit: "commit-a",
+			diff: "original diff",
+			testFiles: ["test/loop.test.ts"],
+			testHashes,
+			redRun: run({ log: "/tmp/red.log", exitCode: 1 }),
+			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+			maxVerifierRerunMs: 120_000,
+		}).state;
+		expect(staleReason(state, { ...context, testHashes })).toBeUndefined();
+		expect(staleReason(state, { ...context, testHashes: [{ file: "test/loop.test.ts", sha256: "changed" }] })).toContain(
+			"test hashes",
+		);
+		expect(staleReason(state, { ...context, testHashes, diffHash: "different" })).toContain("diff");
+	});
+
+	test("accepts verifier pass to the single done state and miss or blocked reports to classify with a structural block", () => {
+		let state = recordBuildEvidence(startBuild(approvedState()).state, {
+			commit: "commit-a",
+			diff: "diff",
+			testFiles: ["test/loop.test.ts"],
+			testHashes,
+			redRun: run({ log: "/tmp/red.log", exitCode: 1 }),
+			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+			maxVerifierRerunMs: 120_000,
+		}).state;
+		const passed = applyVerifierReport(
+			state,
+			{
+				status: "done",
+				role: "verifier",
+				summary: "Verified.",
+				evidence: ["diff"],
+				openQuestions: [],
+				assumptions: [],
+				details: {
+					checksRun: ["pnpm vitest run test/loop.test.ts"],
+					rerunChecks: [{ command: "pnpm vitest run test/loop.test.ts", log: "/tmp/rerun.log", reason: "cheap" }],
+					acceptedLogs: [{ log: "/tmp/green.log", reason: "tied to commit and hashes" }],
+					testHashesChecked: ["test/loop.test.ts"],
+					goalMatched: true,
+				},
+			},
+			{ acceptedLogs: [run({ log: "/tmp/green.log", exitCode: 0 })] },
+		).state;
+		expect(passed.stage).toBe("done");
+		expect(nextLoopEffects(passed)).toEqual([]);
+
+		state = { ...state, verification: undefined };
+		const missed = applyVerifierReport(
+			state,
+			{
+				status: "done",
+				role: "verifier",
+				summary: "Goal missed.",
+				evidence: ["diff"],
+				openQuestions: [],
+				assumptions: [],
+				details: {
+					checksRun: [],
+					rerunChecks: [],
+					acceptedLogs: [],
+					testHashesChecked: ["test/loop.test.ts"],
+					goalMatched: false,
+					missClass: "execution-slip",
+				},
+			},
+			{ acceptedLogs: [] },
+		).state;
+		expect(missed.stage).toBe("classify");
+		expect(missed.block).toMatchObject({ kind: "questions", resumeStage: "classify" });
+		expect(missed.verification).toMatchObject({ status: "missed", summary: "Goal missed." });
+
+		const blocked = applyVerifierReport(
+			{ ...state, verification: undefined },
+			{
+				status: "blocked",
+				role: "verifier",
+				summary: "Could not inspect evidence.",
+				evidence: [],
+				openQuestions: ["Which log should I trust?"],
+				assumptions: [],
+				details: {
+					checksRun: [],
+					rerunChecks: [],
+					acceptedLogs: [],
+					testHashesChecked: [],
+					goalMatched: false,
+				},
+			},
+			{ acceptedLogs: [] },
+		).state;
+		expect(blocked.stage).toBe("classify");
+		expect(blocked.verification).toMatchObject({ status: "blocked" });
+	});
+
+	test("rejects verifier reports that accept logs not tied to the exact commit and test hashes", () => {
+		const state = recordBuildEvidence(startBuild(approvedState()).state, {
+			commit: "commit-a",
+			diff: "diff",
+			testFiles: ["test/loop.test.ts"],
+			testHashes,
+			redRun: run({ log: "/tmp/red.log", exitCode: 1 }),
+			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+			maxVerifierRerunMs: 120_000,
+		}).state;
+		const result = applyVerifierReport(
+			state,
+			{
+				status: "done",
+				role: "verifier",
+				summary: "Accepted stale log.",
+				evidence: [],
+				openQuestions: [],
+				assumptions: [],
+				details: {
+					checksRun: [],
+					rerunChecks: [],
+					acceptedLogs: [{ log: "/tmp/green.log", reason: "looked green" }],
+					testHashesChecked: ["test/loop.test.ts"],
+					goalMatched: true,
+				},
+			},
+			{ acceptedLogs: [run({ log: "/tmp/green.log", exitCode: 0, commit: "other" })] },
+		);
+		expect(result.state.stage).toBe("verify");
+		expect(result.state.block).toMatchObject({ kind: "intake-failed", resumeStage: "verify" });
+		expect(result.effects[0]).toMatchObject({ type: "ask-person", reason: "intake-failed" });
+	});
+
+	test("exports the loop run marker so build logs do not rely on prose", () => {
+		expect(LOOP_RUN_MARKER).toBe("__SITRA_LOOP_CHECK__=");
+		expect(verifierTask).toBeTypeOf("function");
 	});
 });
