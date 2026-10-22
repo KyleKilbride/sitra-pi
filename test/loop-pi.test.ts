@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { EXIT_MARKER } from "../extensions/runs.ts";
-import { briefHash, buildBrief, createLoopState, LOOP_RUN_MARKER, staleReason } from "../extensions/loop.ts";
+import { briefHash, buildBrief, createLoopState, LOOP_RUN_MARKER, type LoopState, staleReason } from "../extensions/loop.ts";
 import sitraLoop, { loopStatePath, readLoopStateFile, writeLoopStateFile } from "../extensions/loop-pi.ts";
 
 vi.setConfig({ testTimeout: 30_000 });
@@ -152,8 +152,14 @@ function writeLoopLog(
 	);
 }
 
+function sha256sum(cwd: string, file: string): string {
+	const [hash] = execFileSync("sha256sum", [file], { cwd, encoding: "utf8" }).split(/\s+/);
+	if (!hash) throw new Error(`sha256sum produced no hash for ${file}`);
+	return hash;
+}
+
 function approvedLoop(profile: string, cwd: string) {
-	const state = {
+	const state: LoopState = {
 		...createLoopState({
 			worktree: cwd,
 			branch: "feature",
@@ -634,7 +640,7 @@ describe("Pi wiring", () => {
 		const hashBefore = readLoopStateFile(loopStatePath(profile, cwd, "feature")).build.testHashes;
 		expect(hashBefore).toEqual([]);
 
-		const expectedHash = execFileSync("sha256sum", ["loop.test.ts"], { cwd, encoding: "utf8" }).split(/\s+/)[0];
+		const expectedHash = sha256sum(cwd, "loop.test.ts");
 		writeLoopLog(redLog, { commit, testHashes: [{ file: "loop.test.ts", sha256: expectedHash }], exitCode: 1 });
 		writeLoopLog(greenLog, { commit, testHashes: [{ file: "loop.test.ts", sha256: expectedHash }], exitCode: 0 });
 		const result = await tools.get("loop_record_build")?.execute(
@@ -662,7 +668,7 @@ describe("Pi wiring", () => {
 		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
 		const commit = commitAll(cwd, "add tests");
 		await commands.get("loop")?.handler("build", ctx(cwd));
-		const originalHash = execFileSync("sha256sum", ["loop.test.ts"], { cwd, encoding: "utf8" }).split(/\s+/)[0];
+		const originalHash = sha256sum(cwd, "loop.test.ts");
 		const redLog = join(profile, "red.log");
 		const greenLog = join(profile, "green.log");
 		writeLoopLog(redLog, { commit, testHashes: [{ file: "loop.test.ts", sha256: originalHash }], exitCode: 1 });
@@ -690,7 +696,7 @@ describe("Pi wiring", () => {
 		writeFileSync(join(cwd, "loop.test.ts"), "ok\n");
 		const commit = commitAll(cwd, "add tests");
 		await commands.get("loop")?.handler("build", ctx(cwd));
-		const hash = execFileSync("sha256sum", ["loop.test.ts"], { cwd, encoding: "utf8" }).split(/\s+/)[0];
+		const hash = sha256sum(cwd, "loop.test.ts");
 		const redLog = join(profile, "red.log");
 		const greenLog = join(profile, "green.log");
 		writeLoopLog(redLog, { commit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
