@@ -21,7 +21,7 @@ describe("mainCheckout", () => {
 		mkdirSync(join(repo, "sub"));
 		expect(mainCheckout(repo)).toBe(repo);
 		expect(mainCheckout(join(repo, "sub"))).toBe(repo);
-	}, 30_000);
+	});
 
 	test("is the main checkout from inside a linked worktree, so every worktree counts as one project", () => {
 		const repo = makeRepo();
@@ -30,7 +30,7 @@ describe("mainCheckout", () => {
 		mkdirSync(join(wt, "deep"));
 		expect(mainCheckout(wt)).toBe(repo);
 		expect(mainCheckout(join(wt, "deep"))).toBe(repo);
-	}, 30_000);
+	});
 
 	test("falls back to the folder itself outside git", () => {
 		const dir = realpathSync(mkdtempSync(join(tmpdir(), "sitra-nogit-")));

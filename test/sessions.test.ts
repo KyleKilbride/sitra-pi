@@ -741,7 +741,7 @@ fi
 		} finally {
 			s.restore();
 		}
-	}, 30_000);
+	});
 });
 
 describe("reading the end of big transcripts", () => {

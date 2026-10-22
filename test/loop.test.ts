@@ -14,6 +14,7 @@ import {
 	createLoopState,
 	nextLoopEffects,
 	recordBuildEvidence,
+	reworkProposal,
 	staleReason,
 	startBuild,
 	startLoop,
@@ -194,7 +195,7 @@ describe("advisor transition and ordering", () => {
 			}),
 			{ outputTokens: 3, contextTokens: 33 },
 		).state;
-		expect(state.stage).toBe("blocked");
+		expect(state.stage).toBe("needs-person");
 		expect(state.questions).toHaveLength(1);
 		expect(state.questions[0]?.text).toContain("Should the CLI command be /loop start?");
 
@@ -284,7 +285,7 @@ describe("advisor transition and ordering", () => {
 			outputTokens: 2,
 			contextTokens: 0,
 		}).state;
-		expect(state.stage).toBe("blocked");
+		expect(state.stage).toBe("needs-person");
 		expect(state.questions).toHaveLength(1);
 		expect(state.questions[0]?.text).toContain("Should the runner ask before build?");
 		expect(state.questions[0]?.text).toContain("Which command starts the graph?");
@@ -326,7 +327,7 @@ describe("advisor transition and ordering", () => {
 			report("architecture", { status: "blocked", openQuestions: ["Is the private checklist readable?"] }),
 			{ outputTokens: 4, contextTokens: 0 },
 		).state;
-		expect(state.stage).toBe("blocked");
+		expect(state.stage).toBe("needs-person");
 		expect(state.questions).toHaveLength(1);
 	});
 
@@ -340,7 +341,7 @@ describe("advisor transition and ordering", () => {
 			outputTokens: 4,
 			contextTokens: 0,
 		}).state;
-		expect(state.stage).toBe("blocked");
+		expect(state.stage).toBe("needs-person");
 		expect(state.questions[0]?.text).toContain("Checklist unreadable.");
 	});
 
@@ -367,7 +368,7 @@ describe("advisor transition and ordering", () => {
 			{ outputTokens: 1, contextTokens: 0 },
 		).state;
 		state = applyAdvisorReport(state, report("codebase"), { outputTokens: 1, contextTokens: 0 }).state;
-		expect(state.stage).toBe("blocked");
+		expect(state.stage).toBe("needs-person");
 		expect(state.block).toMatchObject({ kind: "questions" });
 		expect(state.questions.at(-1)?.text).toContain("Which repo?");
 		expect(state.questions.at(-1)?.text).toContain("Use the existing profile?");
@@ -492,7 +493,7 @@ describe("stale state and validation", () => {
 			outputTokens: 1,
 			contextTokens: 0,
 		}).state;
-		expect(state.stage).toBe("blocked");
+		expect(state.stage).toBe("needs-person");
 		const answered = answerLoopQuestion(state, {
 			answer: "Yes, keep it in the profile.",
 			current: { ...context, baseHead: "base-b" },
@@ -868,6 +869,11 @@ describe("build and verify slice", () => {
 		]);
 	});
 
+	test("rework proposals require recorded verification summary", () => {
+		const state = { ...verifiedState(), verification: undefined, rework: [{ class: "check-gap" as const, evidence: [] }] };
+		expect(() => reworkProposal(state, 0, "2026-10-22T00:00:00.000Z")).toThrow(/verification/);
+	});
+
 	test("a second miss after rework blocks instead of starting a blind retry, and answering reruns advisors", () => {
 		const state = {
 			...verifiedState(),
@@ -887,9 +893,11 @@ describe("build and verify slice", () => {
 			current: context,
 		});
 		expect(answered.state.stage).toBe("advise");
+		expect(answered.state.frozenBrief).toBeUndefined();
+		expect(answered.state.frozenBriefHash).toBeUndefined();
 		expect(answered.state.build.testHashes).toEqual([]);
 		expect(answered.state.verifierRequest).toBeUndefined();
-		expect(answered.effects).toMatchObject([{ type: "dispatch-advisors", roles: ["intent", "codebase"] }]);
+		expect(answered.effects).toMatchObject([{ type: "dispatch-advisors", roles: ["intent", "codebase", "test-design"] }]);
 	});
 
 	test("rejects verifier reports that accept logs not tied to the exact commit and test hashes", () => {

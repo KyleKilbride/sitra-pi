@@ -1163,7 +1163,8 @@ describe("Pi wiring", () => {
 			ctx(cwd),
 		);
 		const missed = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
-		expect(missed.stage).toBe("brief-approved");
+		expect(missed.stage).toBe("blocked");
+		expect(missed.block).toMatchObject({ kind: "rework-learning", resumeStage: "brief-approved" });
 		expect(missed.rework[0]).toMatchObject({
 			class: "execution-slip",
 			proposalPath: expect.stringMatching(/^proposals\//),
@@ -1171,7 +1172,7 @@ describe("Pi wiring", () => {
 		expect(missed.verification).toMatchObject({ status: "missed", summary: "Verifier found a miss." });
 	});
 
-	test("verifier misses write Grimoire proposals only and leave the loop ready for one rework build", async () => {
+	test("verifier misses write Grimoire proposals only and ask before one rework build", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
 		const { commands, handlers, tools, userMessages } = fakePi();
@@ -1221,7 +1222,8 @@ describe("Pi wiring", () => {
 
 		const state = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
 		const proposals = listProposals(join(profile, "grimoire"));
-		expect(state.stage).toBe("brief-approved");
+		expect(state.stage).toBe("blocked");
+		expect(state.block).toMatchObject({ kind: "rework-learning", resumeStage: "brief-approved" });
 		expect(state.rework).toEqual([
 			{ class: "context-missed", evidence: ["extensions/loop.ts:1"], proposalPath: proposals[0]?.file },
 		]);
@@ -1232,7 +1234,7 @@ describe("Pi wiring", () => {
 			tags: ["loops", "rework", "context-missed"],
 		});
 		expect(existsSync(join(profile, "grimoire", "kinds"))).toBe(false);
-		expect(userMessages.join("\n")).toContain("LOOPS stage: brief-approved");
+		expect(userMessages.join("\n")).toContain("LOOPS needs one answer before continuing");
 	});
 
 	test("verifier intake requires clean worktree and the recorded verifier dispatch", async () => {
