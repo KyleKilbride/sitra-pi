@@ -318,20 +318,7 @@ async function runBuildVerifyE2e(kind: "pass" | "miss") {
 				env: {
 					...process.env,
 					PI_CODING_AGENT_DIR: profile,
-					SITRA_LOOP_MODEL_SCRIPT: JSON.stringify([
-						{ text: "ack" },
-						{
-							tool: {
-								name: "loop_record_build",
-								arguments: {
-									testFiles: ["loop.test.ts"],
-									redRunLog: redLog,
-									greenRunLog: greenLog,
-								},
-							},
-						},
-						...Array.from({ length: 30 }, () => ({ text: "ack" })),
-					]),
+					SITRA_LOOP_MODEL_SCRIPT: JSON.stringify(Array.from({ length: 40 }, () => ({ text: "ack" }))),
 					SITRA_LOOP_AUTO_HELPERS: JSON.stringify([
 						{
 							when: "Start intent-advisor",
@@ -439,7 +426,16 @@ async function runBuildVerifyE2e(kind: "pass" | "miss") {
 					const hashes = [{ file: "loop.test.ts", sha256: sha256(cwd, "loop.test.ts") }];
 					writeRunLog(redLog, commit, hashes, 1);
 					writeRunLog(greenLog, commit, hashes, 0);
-					child.stdin.write(`${JSON.stringify({ type: "prompt", message: "Record the loop build evidence." })}\n`);
+					child.stdin.write(
+						`${JSON.stringify({
+							type: "prompt",
+							message: `/loop record-build ${JSON.stringify({
+								testFiles: ["loop.test.ts"],
+								redRunLog: redLog,
+								greenRunLog: greenLog,
+							})}`,
+						})}\n`,
+					);
 				}
 				if (!finished && text.includes(kind === "pass" ? "stage: done" : "stage: classify")) {
 					finished = true;

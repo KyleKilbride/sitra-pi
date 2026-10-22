@@ -50,8 +50,8 @@ interface ToolResult {
 }
 
 const LOOP_USAGE =
-	"usage: /loop start [--base <ref>] <task> | /loop answer <answer> | /loop plan <plan> | /loop approve <summary> | /loop build | /loop status";
-const LOOP_VERBS = ["start", "answer", "plan", "approve", "build", "status"] as const;
+	"usage: /loop start [--base <ref>] <task> | /loop answer <answer> | /loop plan <plan> | /loop approve <summary> | /loop build | /loop record-build <json> | /loop status";
+const LOOP_VERBS = ["start", "answer", "plan", "approve", "build", "record-build", "status"] as const;
 type LoopVerb = (typeof LOOP_VERBS)[number];
 
 interface Pi {
@@ -363,6 +363,28 @@ function loopStatus(cwd: string, state: LoopState): ToolResult {
 	};
 }
 
+function recordBuildFromParams(
+	pi: Pi,
+	ctx: Ctx,
+	path: string,
+	state: LoopState,
+	params: { testFiles: string[]; redRunLog: string; greenRunLog: string; maxVerifierRerunMs?: number },
+): LoopState {
+	const hashes = testHashes(ctx.cwd, params.testFiles);
+	const result = recordBuildEvidence(state, {
+		commit: currentCommit(ctx.cwd),
+		diff: diffAgainstBase(ctx.cwd, state),
+		testFiles: params.testFiles,
+		testHashes: hashes,
+		redRun: parseLoopRunLog(params.redRunLog),
+		greenRun: parseLoopRunLog(params.greenRunLog),
+		maxVerifierRerunMs: params.maxVerifierRerunMs ?? 120_000,
+	});
+	writeLoopStateFile(path, result.state);
+	emitEffects(pi, result.state, result.effects);
+	return result.state;
+}
+
 async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> {
 	const { verb, rest } = splitCommand(args);
 	if (!verb || !isLoopVerb(verb)) throw new Error(LOOP_USAGE);
@@ -453,6 +475,40 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 			"LOOPS stage: build\nMaterialize the agreed tests, run red then green checks, and record evidence with loop_record_build.",
 			{ deliverAs: "followUp", streamingBehavior: "followUp" },
 		);
+		return;
+	}
+	if (verb === "record-build") {
+		if (!rest) throw new Error(LOOP_USAGE);
+		const state = loadMutableState(gitState);
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(rest);
+		} catch (error) {
+			throw new Error(`invalid /loop record-build JSON: ${String(error)}`);
+		}
+		if (!parsed || typeof parsed !== "object") throw new Error("invalid /loop record-build JSON: expected object");
+		const params = parsed as {
+			testFiles?: unknown;
+			redRunLog?: unknown;
+			greenRunLog?: unknown;
+			maxVerifierRerunMs?: unknown;
+		};
+		if (
+			!Array.isArray(params.testFiles) ||
+			!params.testFiles.every((file) => typeof file === "string" && file.length > 0) ||
+			typeof params.redRunLog !== "string" ||
+			typeof params.greenRunLog !== "string" ||
+			(params.maxVerifierRerunMs !== undefined && typeof params.maxVerifierRerunMs !== "number")
+		) {
+			throw new Error("invalid /loop record-build JSON: expected testFiles, redRunLog and greenRunLog");
+		}
+		const next = recordBuildFromParams(pi, ctx, path, state, {
+			testFiles: params.testFiles,
+			redRunLog: params.redRunLog,
+			greenRunLog: params.greenRunLog,
+			...(typeof params.maxVerifierRerunMs === "number" ? { maxVerifierRerunMs: params.maxVerifierRerunMs } : {}),
+		});
+		pi.sendUserMessage(`LOOPS stage: ${next.stage}`, { deliverAs: "followUp", streamingBehavior: "followUp" });
 		return;
 	}
 }
@@ -658,21 +714,10 @@ export default function sitraLoop(pi: Pi): void {
 				greenRunLog: string;
 				maxVerifierRerunMs?: number;
 			};
-			const hashes = testHashes(ctx.cwd, p.testFiles);
-			const result = recordBuildEvidence(state, {
-				commit: currentCommit(ctx.cwd),
-				diff: diffAgainstBase(ctx.cwd, state),
-				testFiles: p.testFiles,
-				testHashes: hashes,
-				redRun: parseLoopRunLog(p.redRunLog),
-				greenRun: parseLoopRunLog(p.greenRunLog),
-				maxVerifierRerunMs: p.maxVerifierRerunMs ?? 120_000,
-			});
-			writeLoopStateFile(path, result.state);
-			emitEffects(pi, result.state, result.effects);
+			const next = recordBuildFromParams(pi, ctx, path, state, p);
 			return {
-				content: [{ type: "text", text: `stage: ${result.state.stage}` }],
-				details: result.state,
+				content: [{ type: "text", text: `stage: ${next.stage}` }],
+				details: next,
 			};
 		},
 	});
