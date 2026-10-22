@@ -186,7 +186,7 @@ export default function sitraTower(pi: Pi): void {
 	// The alert check runs every 2 seconds over every session, so it reads only the end of each transcript and skips
 	// transcripts that haven't changed. A whole-file read of one long session cost a quarter of a second each time.
 	const readAlertTail = createTailReader(200);
-	const readFileTail = (sessionFile: string) => readTranscriptTail(readAlertTail(sessionFile), 8);
+	const readFileTail = (sessionFile: string) => readTranscriptTail(readAlertTail.read(sessionFile), 8);
 	// On-demand tools want more turns; every turn is at least one line, so ten lines per turn leaves plenty of room.
 	const readTurns = (sessionFile: string, turns: number) =>
 		readTranscriptTail(readLastLines(sessionFile, Math.max(200, turns * 10)), turns);
@@ -382,6 +382,8 @@ export default function sitraTower(pi: Pi): void {
 
 	const cleanup = () => {
 		if (inboxTimer) clearInterval(inboxTimer);
+		process.off("SIGHUP", cleanup);
+		process.off("exit", cleanup);
 		if (radarPane) {
 			try {
 				herdr(["pane", "close", radarPane]);
@@ -395,6 +397,7 @@ export default function sitraTower(pi: Pi): void {
 		currentId = undefined;
 	};
 	pi.on("session_shutdown", cleanup);
+	process.once("SIGHUP", cleanup);
 	process.once("exit", cleanup);
 
 	if (role === "lead") {

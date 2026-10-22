@@ -3,7 +3,18 @@ import { existsSync, watch } from "node:fs";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { grimoireDir } from "./grimoire.ts";
-import { collectRadarSnapshot, createRefreshScheduler, frameUpdate, TRANSCRIPT_TAIL_LINES } from "./radar.ts";
+import {
+	collectRadarSnapshot,
+	collectWorkerRepos,
+	createFolderLookupCache,
+	createRefreshScheduler,
+	createTranscriptCache,
+	createWrapCache,
+	frameUpdate,
+	loadPullRequests,
+	type PullRequestSnapshot,
+	TRANSCRIPT_TAIL_LINES,
+} from "./radar.ts";
 import { createRadarKeyDecoder, focusCommands, initialRadarState, reduceRadarKey } from "./radar-model.ts";
 import { loadMailbox, type MailSnapshot } from "./radar-store.ts";
 import { buildRadarLayout } from "./radar-view.ts";
@@ -14,12 +25,21 @@ export function runRadarTui(profileDir: string, options?: { towerName?: string; 
 	if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("Radar needs an interactive terminal.");
 	const out = process.stdout;
 	const readLines = createTailReader(TRANSCRIPT_TAIL_LINES);
+	const transcripts = createTranscriptCache(readLines.read);
+	const folders = createFolderLookupCache();
+	const wrapCache = createWrapCache();
+	let pullRequests: PullRequestSnapshot = { items: [], notices: [] };
+	const pullRequestAbort = new AbortController();
+	let pullRequestBusy = false;
+	let lastPullRequestRefresh = 0;
 	const collect = () =>
 		collectRadarSnapshot(profileDir, {
 			towerName: options?.towerName,
 			includeHerdr: true,
-			includePullRequests: true,
-			readLines,
+			pullRequests,
+			folders,
+			transcripts,
+			readLines: readLines.read,
 		});
 	let state = initialRadarState();
 	let snapshot = collect();
@@ -34,7 +54,7 @@ export function runRadarTui(profileDir: string, options?: { towerName?: string; 
 	let escapeTimer: ReturnType<typeof setTimeout> | undefined;
 	const paint = () => {
 		if (closed) return;
-		const layout = buildRadarLayout(snapshot, { cols: out.columns ?? 100, rows: out.rows ?? 32, state });
+		const layout = buildRadarLayout(snapshot, { cols: out.columns ?? 100, rows: out.rows ?? 32, state, wrapCache });
 		if (["message", "run", "summary"].includes(state.view)) state = { ...state, scroll: layout.scrollStart };
 		const lines = [...layout.header, ...layout.body, ...layout.summary, ...layout.footer];
 		out.write(frameUpdate(shown, lines));
@@ -68,6 +88,51 @@ export function runRadarTui(profileDir: string, options?: { towerName?: string; 
 				paint();
 			});
 	};
+	const refreshCaches = () => {
+		const sessionFiles = new Set<string>();
+		for (const worker of snapshot.workers) {
+			if (worker.lead.sessionFile) sessionFiles.add(worker.lead.sessionFile);
+			for (const teammate of worker.teammates) {
+				if (teammate.sessionFile) sessionFiles.add(teammate.sessionFile);
+			}
+		}
+		readLines.retain(sessionFiles);
+		transcripts.retain(sessionFiles);
+		wrapCache.retain(
+			new Set([
+				...snapshot.mail.map((m) => `message:${m.id}`),
+				...snapshot.runs.map((r) => `run:${r.id}`),
+				"message:missing",
+				"run:missing",
+				"summary",
+			]),
+		);
+	};
+	const updatePullRequests = () => {
+		if (pullRequestBusy || closed) return;
+		pullRequestBusy = true;
+		lastPullRequestRefresh = Date.now();
+		const repos = collectWorkerRepos(snapshot.workers, folders);
+		void loadPullRequests(repos, pullRequestAbort.signal)
+			.then((value) => {
+				pullRequests = value;
+			})
+			.finally(() => {
+				pullRequestBusy = false;
+				if (closed) return;
+				const selectedId = snapshot.workers[state.selected]?.lead.id;
+				snapshot = { ...collect(), mail: mailbox.items, mailNotice: mailbox.notice };
+				refreshCaches();
+				if (state.view === "workers") {
+					const selected = selectedId ? snapshot.workers.findIndex((w) => w.lead.id === selectedId) : state.selected;
+					state = {
+						...state,
+						selected: Math.max(0, Math.min(selected < 0 ? state.selected : selected, snapshot.workers.length - 1)),
+					};
+				}
+				paint();
+			});
+	};
 	const refresh = createRefreshScheduler(() => {
 		if (closed) return;
 		const selectedId =
@@ -83,6 +148,8 @@ export function runRadarTui(profileDir: string, options?: { towerName?: string; 
 			state = { ...state, selected: Math.max(0, Math.min(selected < 0 ? state.selected : selected, list.length - 1)) };
 		}
 		if (Date.now() - lastMailRefresh >= 5000) updateMail();
+		if (Date.now() - lastPullRequestRefresh >= 60_000) updatePullRequests();
+		refreshCaches();
 		paint();
 	}, 500);
 	const watchers: ReturnType<typeof watch>[] = [];
@@ -102,6 +169,7 @@ export function runRadarTui(profileDir: string, options?: { towerName?: string; 
 		if (closed) return;
 		closed = true;
 		mailAbort.abort();
+		pullRequestAbort.abort();
 		clearInterval(timer);
 		if (escapeTimer) clearTimeout(escapeTimer);
 		refresh.cancel();
@@ -171,6 +239,8 @@ export function runRadarTui(profileDir: string, options?: { towerName?: string; 
 	process.once("exit", cleanup);
 	out.on("resize", onResize);
 	out.write("\x1b]0;sitra radar\x07\x1b[?1049h\x1b[?25l\x1b[2J");
+	refreshCaches();
 	paint();
 	updateMail();
+	updatePullRequests();
 }

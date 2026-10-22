@@ -769,13 +769,33 @@ describe("reading the end of big transcripts", () => {
 		const fixed = new Date("2026-10-16T10:00:00.000Z");
 		writeFileSync(file, "a\nb\n");
 		utimesSync(file, fixed, fixed);
-		const read = createTailReader(10);
-		expect(read(file)).toBe("a\nb");
+		const tail = createTailReader(10);
+		expect(tail.read(file)).toBe("a\nb");
 		writeFileSync(file, "c\nd\n");
 		utimesSync(file, fixed, fixed);
-		expect(read(file)).toBe("a\nb");
+		expect(tail.read(file)).toBe("a\nb");
 		writeFileSync(file, "c\nd\ne\n");
-		expect(read(file)).toBe("c\nd\ne");
+		expect(tail.read(file)).toBe("c\nd\ne");
+	});
+
+	test("a tail reader drops cached files not retained by the current refresh", () => {
+		const dir = tmp();
+		const a = join(dir, "a.jsonl");
+		const b = join(dir, "b.jsonl");
+		writeFileSync(a, "a\n");
+		writeFileSync(b, "b\n");
+		const tail = createTailReader(10);
+		expect(tail.read(a)).toBe("a");
+		expect(tail.read(b)).toBe("b");
+		tail.retain(new Set([a]));
+		expect(tail.size).toBe(1);
+	});
+
+	test("the default tail byte cap is one megabyte", () => {
+		const dir = tmp();
+		const file = join(dir, "oversized.jsonl");
+		writeFileSync(file, `${"x".repeat(1024 * 1024 + 1)}\n`);
+		expect(readLastLines(file, 1)).toBe("");
 	});
 });
 

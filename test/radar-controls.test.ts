@@ -1,10 +1,11 @@
 import { describe, expect, test } from "vitest";
 import type { RadarSnapshot, WorkerCard } from "../extensions/radar.ts";
-import { renderRadarFrame, visibleWidth } from "../extensions/radar.ts";
+import { createWrapCache, renderRadarFrame, visibleWidth } from "../extensions/radar.ts";
 import {
 	createRadarKeyDecoder,
 	focusCommands,
 	initialRadarState,
+	type RadarState,
 	reduceRadarKey,
 	terminalText,
 	validSummary,
@@ -205,6 +206,24 @@ describe("viewport budget", () => {
 		const normalized = { ...state, scroll: layout.scrollStart };
 		const previous = reduceRadarKey(normalized, "up", big).state;
 		expect(previous.scroll).toBe(layout.scrollStart - 1);
+	});
+
+	test("message scroll keys reuse wrapped lines for the same message and width", () => {
+		const message = snapshot.mail[0];
+		if (!message) throw new Error("Missing message fixture");
+		const big = {
+			...snapshot,
+			mail: [{ ...message, body: "word ".repeat(20_000) }],
+		};
+		let wraps = 0;
+		const wrapCache = createWrapCache(() => wraps++);
+		let state: RadarState = { ...initialRadarState(), view: "message", itemId: "m1", scroll: 0 };
+		buildRadarLayout(big, { cols: 84, rows: 24, state, wrapCache });
+		for (let i = 0; i < 50; i++) {
+			state = reduceRadarKey(state, "down", big).state;
+			buildRadarLayout(big, { cols: 84, rows: 24, state, wrapCache });
+		}
+		expect(wraps).toBe(1);
 	});
 });
 

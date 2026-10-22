@@ -1,11 +1,14 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { writeProposal } from "../extensions/grimoire.ts";
 import {
 	collectRadarSnapshot,
+	collectWorkerRepos,
+	createFolderLookupCache,
 	createRefreshScheduler,
+	createTranscriptCache,
 	frameUpdate,
 	renderRadarFrame,
 	visibleWidth,
@@ -216,6 +219,38 @@ fi
 		}
 	});
 
+	test("removes its session record when the pane sends SIGHUP", () => {
+		const profile = tmp();
+		const saved = {
+			PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
+			SITRA_ROLE: process.env.SITRA_ROLE,
+			SITRA_NO_RADAR: process.env.SITRA_NO_RADAR,
+		};
+		process.env.PI_CODING_AGENT_DIR = profile;
+		process.env.SITRA_ROLE = "tower";
+		process.env.SITRA_NO_RADAR = "1";
+		try {
+			const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
+			sitraTower({
+				on: (event, fn) => handlers.set(event, fn as never),
+				registerTool: () => {},
+				registerCommand: () => {},
+				events: { on: () => {} },
+			});
+			const ctx = { cwd: profile, sessionManager: { getSessionId: () => "tower-sighup" } };
+			handlers.get("session_start")?.({}, ctx);
+			const record = join(profile, "sitra-sessions", "tower-sighup.json");
+			expect(existsSync(record)).toBe(true);
+			process.emit("SIGHUP", "SIGHUP");
+			expect(existsSync(record)).toBe(false);
+		} finally {
+			for (const [key, value] of Object.entries(saved)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
+
 	test("herdr workspace view keeps the lead when a teammate tab is focused, preserves stopped leads, and clears answered questions", () => {
 		const profile = tmp();
 		const bin = tmp();
@@ -401,6 +436,111 @@ describe("radar refresh cost", () => {
 		expect(asked.length).toBeGreaterThan(0);
 		expect(asked.every((f) => f === transcript)).toBe(true);
 		expect(snap.workers[0]?.lastLine).toBe("Only the tail was read.");
+	});
+
+	test("does not run gh while collecting a refresh snapshot", () => {
+		const profile = tmp();
+		const repo = join(profile, "repo");
+		const bin = join(profile, "bin");
+		const marker = join(profile, "gh-called");
+		mkdirSync(repo, { recursive: true });
+		mkdirSync(bin, { recursive: true });
+		writeFileSync(
+			join(bin, "gh"),
+			`#!/bin/sh
+echo called > "${marker}"
+echo '[]'
+`,
+		);
+		chmodSync(join(bin, "gh"), 0o755);
+		writeSession(profile, {
+			id: "lead-gh",
+			role: "lead",
+			pid: process.pid,
+			cwd: repo,
+			repo,
+			status: "idle",
+			startedAt: "2026-10-16T10:00:00.000Z",
+			updatedAt: "2026-10-16T10:00:00.000Z",
+		});
+		const savedPath = process.env.PATH;
+		process.env.PATH = `${bin}:${process.env.PATH}`;
+		try {
+			collectRadarSnapshot(profile, {
+				pullRequests: { items: [], notices: [] },
+			});
+			expect(() => readFileSync(marker, "utf8")).toThrow();
+		} finally {
+			process.env.PATH = savedPath;
+		}
+	});
+
+	test("reuses cached folder git lookups on the next unchanged refresh", () => {
+		const profile = tmp();
+		const repo = join(profile, "repo");
+		let gitCalls = 0;
+		mkdirSync(repo, { recursive: true });
+		writeSession(profile, {
+			id: "lead-git",
+			role: "lead",
+			pid: process.pid,
+			cwd: repo,
+			repo,
+			status: "idle",
+			startedAt: "2026-10-16T10:00:00.000Z",
+			updatedAt: "2026-10-16T10:00:00.000Z",
+		});
+		const folders = createFolderLookupCache({
+			mainCheckout: (cwd) => {
+				gitCalls++;
+				return cwd;
+			},
+			gitBranch: () => {
+				gitCalls++;
+				return "main";
+			},
+		});
+		let snap = collectRadarSnapshot(profile, { folders });
+		collectWorkerRepos(snap.workers, folders);
+		gitCalls = 0;
+		snap = collectRadarSnapshot(profile, { folders });
+		collectWorkerRepos(snap.workers, folders);
+		expect(gitCalls).toBe(0);
+	});
+
+	test("parses an unchanged transcript tail once across refreshes", () => {
+		const profile = tmp();
+		const transcript = join(profile, "lead.jsonl");
+		writeFileSync(
+			transcript,
+			`${JSON.stringify({
+				type: "message",
+				timestamp: "2026-10-16T10:00:00.000Z",
+				message: { role: "assistant", content: [{ type: "text", text: "Parsed once." }] },
+			})}\n`,
+		);
+		writeSession(profile, {
+			id: "lead-parse",
+			role: "lead",
+			pid: process.pid,
+			cwd: profile,
+			repo: profile,
+			sessionFile: transcript,
+			status: "working",
+			startedAt: "2026-10-16T10:00:00.000Z",
+			updatedAt: "2026-10-16T10:00:00.000Z",
+		});
+		let parses = 0;
+		const transcripts = createTranscriptCache(
+			(file) => readFileSync(file, "utf8"),
+			(line) => {
+				parses++;
+				return JSON.parse(line);
+			},
+		);
+		collectRadarSnapshot(profile, { transcripts });
+		collectRadarSnapshot(profile, { transcripts });
+		expect(parses).toBe(1);
 	});
 
 	test("bursts of refresh requests run at most once per interval, with one trailing refresh", () => {

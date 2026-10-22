@@ -412,7 +412,7 @@ export function formatSessionsReport(records: readonly SessionRecord[]): string 
 	return lines.join("\n");
 }
 
-function extractText(content: unknown): string {
+export function extractText(content: unknown): string {
 	if (typeof content === "string") return content.trim();
 	if (!Array.isArray(content)) return "";
 	const texts: string[] = [];
@@ -439,7 +439,7 @@ export function readLastLines(
 	options?: { chunkBytes?: number; maxBytes?: number },
 ): string {
 	const chunkBytes = options?.chunkBytes ?? 64 * 1024;
-	const maxBytes = options?.maxBytes ?? 8 * 1024 * 1024;
+	const maxBytes = options?.maxBytes ?? 1024 * 1024;
 	let fd: number;
 	try {
 		fd = openSync(file, "r");
@@ -484,22 +484,32 @@ export function readLastLines(
 export function createTailReader(
 	maxLines: number,
 	options?: { chunkBytes?: number; maxBytes?: number },
-): (file: string) => string {
+): { read(file: string): string; retain(files: ReadonlySet<string>): void; readonly size: number } {
 	const cache = new Map<string, { size: number; mtimeMs: number; text: string }>();
-	return (file) => {
-		let size: number;
-		let mtimeMs: number;
-		try {
-			({ size, mtimeMs } = statSync(file));
-		} catch {
-			cache.delete(file);
-			return "";
-		}
-		const hit = cache.get(file);
-		if (hit && hit.size === size && hit.mtimeMs === mtimeMs) return hit.text;
-		const text = readLastLines(file, maxLines, options);
-		cache.set(file, { size, mtimeMs, text });
-		return text;
+	return {
+		read(file) {
+			let size: number;
+			let mtimeMs: number;
+			try {
+				({ size, mtimeMs } = statSync(file));
+			} catch {
+				cache.delete(file);
+				return "";
+			}
+			const hit = cache.get(file);
+			if (hit && hit.size === size && hit.mtimeMs === mtimeMs) return hit.text;
+			const text = readLastLines(file, maxLines, options);
+			cache.set(file, { size, mtimeMs, text });
+			return text;
+		},
+		retain(files) {
+			for (const file of cache.keys()) {
+				if (!files.has(file)) cache.delete(file);
+			}
+		},
+		get size() {
+			return cache.size;
+		},
 	};
 }
 

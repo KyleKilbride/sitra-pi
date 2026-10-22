@@ -1,5 +1,5 @@
 /** Live, keyboard-driven workspace dashboard with read-only mailbox and run logs. */
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { grimoireDir, listProposals } from "./grimoire.ts";
@@ -10,14 +10,15 @@ import { readRun, readRunHeader } from "./runs.ts";
 import {
 	createTailReader,
 	detectSessionAlerts,
+	extractText,
 	gitBranch,
 	groupWorkerSessions,
 	listSessions,
 	mainCheckout,
 	readLastLines,
-	readTranscriptTail,
 	type SessionAlert,
 	type SessionRecord,
+	type TranscriptItem,
 } from "./sessions.ts";
 
 export type VisualState = "working" | "waiting_for_user" | "error_loop" | "idle" | "stopped";
@@ -192,99 +193,278 @@ function cleanMarkdown(text: string): string {
 /** How many transcript lines the radar reads from the end of each session file; nothing older is ever needed. */
 export const TRANSCRIPT_TAIL_LINES = 200;
 
-function readTranscriptInsights(
-	readLines: (file: string) => string,
-	sessionFile: string | undefined,
-	nowMs: number,
-	status: string,
-): {
+export interface FolderLookupCache {
+	values: Map<string, { mainCheckout?: string; branch?: string | null }>;
+	mainCheckout(cwd: string): string;
+	gitBranch(cwd: string): string | undefined;
+}
+
+export function createFolderLookupCache(lookups?: {
+	mainCheckout?(cwd: string): string;
+	gitBranch?(cwd: string): string | undefined;
+}): FolderLookupCache {
+	return {
+		values: new Map(),
+		mainCheckout: lookups?.mainCheckout ?? mainCheckout,
+		gitBranch: lookups?.gitBranch ?? gitBranch,
+	};
+}
+
+function cachedMainCheckout(cwd: string, folders: FolderLookupCache | undefined): string {
+	if (!folders) return mainCheckout(cwd);
+	const hit = folders.values.get(cwd);
+	if (hit?.mainCheckout) return hit.mainCheckout;
+	const value = folders.mainCheckout(cwd);
+	folders.values.set(cwd, { ...hit, mainCheckout: value });
+	return value;
+}
+
+function cachedGitBranch(cwd: string, folders: FolderLookupCache | undefined): string | undefined {
+	if (!folders) return gitBranch(cwd);
+	const hit = folders.values.get(cwd);
+	if (hit && "branch" in hit) return hit.branch ?? undefined;
+	const value = folders.gitBranch(cwd);
+	folders.values.set(cwd, { ...hit, branch: value ?? null });
+	return value;
+}
+
+export interface WrapCache {
+	get(id: string, width: number, text: string, wrap: () => string[]): string[];
+	retain(ids: ReadonlySet<string>): void;
+}
+
+export function createWrapCache(onWrap?: () => void): WrapCache {
+	const byId = new Map<string, Map<number, { text: string; lines: string[] }>>();
+	return {
+		get(id, width, text, wrap) {
+			let widths = byId.get(id);
+			if (!widths) {
+				widths = new Map();
+				byId.set(id, widths);
+			}
+			const hit = widths.get(width);
+			if (hit?.text === text) return hit.lines;
+			onWrap?.();
+			const lines = wrap();
+			widths.set(width, { text, lines });
+			return lines;
+		},
+		retain(ids) {
+			for (const id of byId.keys()) {
+				if (!ids.has(id)) byId.delete(id);
+			}
+		},
+	};
+}
+
+interface TranscriptInsights {
 	nowLine?: string;
 	lastLine?: string;
 	lastAction?: string;
 	activity: number[];
-} {
-	const buckets: number[] = [0, 0, 0, 0, 0, 0, 0, 0];
-	if (!sessionFile || !existsSync(sessionFile)) {
-		if (status === "working") buckets[7] = 2;
-		return { activity: buckets };
-	}
-	try {
-		const raw = readLines(sessionFile);
-		const tail = readTranscriptTail(raw, 6);
-		const last = tail[tail.length - 1];
-		const lastAction = last ? `${last.role}: ${last.text}` : undefined;
-		const lines = raw.split("\n");
-		const windowMs = 12 * 60_000;
-		let nowLine: string | undefined;
-		let lastLine: string | undefined;
+}
 
-		for (let i = Math.max(0, lines.length - 100); i < lines.length; i++) {
-			const line = lines[i]?.trim();
-			if (!line) continue;
-			const tsMatch = /"timestamp":"([^"]+)"/.exec(line);
-			if (tsMatch?.[1]) {
-				const age = nowMs - Date.parse(tsMatch[1]);
-				if (Number.isFinite(age) && age >= 0 && age <= windowMs) {
-					const idx = Math.min(7, Math.max(0, 7 - Math.floor((age / windowMs) * 8)));
-					buckets[idx] = (buckets[idx] ?? 0) + 1;
-				}
-			}
-			try {
-				const entry = JSON.parse(line) as {
-					type?: string;
-					message?: { role?: string; content?: unknown };
-				};
-				if (entry.type !== "message" || !entry.message) continue;
-				if (entry.message.role === "user") {
-					if (nowLine?.startsWith("Asking you:")) nowLine = undefined;
-					continue;
-				}
-				if (entry.message.role !== "assistant") continue;
-				const content = entry.message.content;
-				if (!Array.isArray(content)) continue;
-				for (const part of content) {
-					if (!part || typeof part !== "object") continue;
-					const p = part as { type?: string; thinking?: string; text?: string; name?: string; arguments?: unknown };
-					if (p.type === "thinking" && typeof p.thinking === "string") {
-						const m = /^\*\*([^*]+)\*\*\s*(.*)/s.exec(p.thinking.trim());
-						if (m?.[1]) {
-							const firstSentence = m[2]?.trim().split(/\.\s|\n/)[0] ?? "";
-							nowLine = firstSentence
-								? `${cleanMarkdown(m[1])} — ${cleanMarkdown(firstSentence)}`
-								: cleanMarkdown(m[1]);
-						}
-					} else if (p.type === "text" && typeof p.text === "string" && p.text.trim()) {
-						for (const rawLine of p.text.trim().split("\n")) {
-							const trimmed = rawLine.trim();
-							if (!trimmed || trimmed.startsWith("---") || trimmed.startsWith("|")) continue;
-							lastLine = cleanMarkdown(trimmed);
-							break;
-						}
-					} else if (p.type === "toolCall" && p.name === "ask_user_question" && status === "waiting_for_user") {
-						const args = p.arguments as { questions?: { header?: string; question?: string }[] } | undefined;
-						const q = args?.questions?.[0];
-						if (q?.question) {
-							nowLine = `Asking you: ${cleanMarkdown(q.question.split("\n")[0] ?? q.question)}`;
-						}
-					}
-				}
-			} catch {
-				// Ignore non-JSON lines.
-			}
+type JsonParse = (line: string) => unknown;
+
+interface ParsedTranscript {
+	size: number;
+	mtimeMs: number;
+	items: unknown[];
+	tails: Map<number, TranscriptItem[]>;
+}
+
+export interface TranscriptCache {
+	readTail(file: string, maxItems: number): TranscriptItem[];
+	readInsights(file: string | undefined, nowMs: number, status: string): TranscriptInsights;
+	retain(files: ReadonlySet<string>): void;
+}
+
+function emptyTranscriptInsights(status: string): TranscriptInsights {
+	const buckets: number[] = [0, 0, 0, 0, 0, 0, 0, 0];
+	if (status === "working") buckets[7] = 2;
+	return { activity: buckets };
+}
+
+function parseTranscriptItems(jsonl: string, parseJson: JsonParse): unknown[] {
+	const items: unknown[] = [];
+	for (const line of jsonl.split("\n")) {
+		if (!line.trim()) continue;
+		try {
+			items.push(parseJson(line));
+		} catch {
+			// Skip malformed lines.
 		}
-		if (status === "working" && buckets.every((b) => !b)) {
-			buckets[6] = 1;
-			buckets[7] = 3;
-		}
-		return {
-			...(nowLine ? { nowLine } : {}),
-			...(lastLine ? { lastLine } : {}),
-			...(lastAction ? { lastAction } : {}),
-			activity: buckets,
-		};
-	} catch {
-		return { activity: buckets };
 	}
+	return items;
+}
+
+function transcriptItem(entry: unknown): TranscriptItem | undefined {
+	const value = entry as {
+		type?: string;
+		content?: unknown;
+		message?: {
+			role?: string;
+			toolName?: string;
+			isError?: boolean;
+			content?: unknown;
+		};
+	};
+	if (value.type === "custom_message" && value.content) {
+		const text = extractText(value.content);
+		return text ? { role: "custom", text } : undefined;
+	}
+	if (value.type !== "message" || !value.message) return undefined;
+	const msg = value.message;
+	if (msg.role === "user") {
+		const text = extractText(msg.content);
+		return text ? { role: "user", text } : undefined;
+	}
+	if (msg.role === "assistant") {
+		const text = extractText(msg.content);
+		return text ? { role: "assistant", text } : undefined;
+	}
+	if (msg.role === "toolResult") {
+		const tool = msg.toolName ?? "tool";
+		if (msg.isError) {
+			const text = extractText(msg.content).split("\n")[0] || "failed";
+			return { role: "tool", text: `${tool} error: ${text}`, error: true };
+		}
+		return { role: "tool", text: `${tool} ok`, error: false };
+	}
+	return undefined;
+}
+
+function transcriptItemsFromParsed(items: readonly unknown[], maxItems: number): TranscriptItem[] {
+	const out: TranscriptItem[] = [];
+	for (const item of items) {
+		const parsed = transcriptItem(item);
+		if (parsed) out.push(parsed);
+	}
+	return out.slice(-maxItems);
+}
+
+function firstSentence(text: string): string {
+	const dot = text.indexOf(". ");
+	const newline = text.indexOf("\n");
+	const cuts = [dot, newline].filter((idx) => idx >= 0);
+	const end = cuts.length ? Math.min(...cuts) : -1;
+	return (end >= 0 ? text.slice(0, end) : text).trim();
+}
+
+function thinkingLine(text: string): string | undefined {
+	const trimmed = text.trim();
+	if (!trimmed.startsWith("**")) return undefined;
+	const end = trimmed.indexOf("**", 2);
+	if (end < 0) return undefined;
+	const title = cleanMarkdown(trimmed.slice(2, end));
+	const sentence = firstSentence(trimmed.slice(end + 2).trim());
+	return sentence ? `${title} — ${cleanMarkdown(sentence)}` : title;
+}
+
+function readTranscriptInsightsFromParsed(
+	items: readonly unknown[],
+	nowMs: number,
+	status: string,
+): TranscriptInsights {
+	const buckets: number[] = [0, 0, 0, 0, 0, 0, 0, 0];
+	const tail = transcriptItemsFromParsed(items, 6);
+	const last = tail[tail.length - 1];
+	const lastAction = last ? `${last.role}: ${last.text}` : undefined;
+	const windowMs = 12 * 60_000;
+	let nowLine: string | undefined;
+	let lastLine: string | undefined;
+
+	for (const item of items.slice(-100)) {
+		const entry = item as { type?: string; timestamp?: unknown; message?: { role?: string; content?: unknown } };
+		if (typeof entry.timestamp === "string") {
+			const age = nowMs - Date.parse(entry.timestamp);
+			if (Number.isFinite(age) && age >= 0 && age <= windowMs) {
+				const idx = Math.min(7, Math.max(0, 7 - Math.floor((age / windowMs) * 8)));
+				buckets[idx] = (buckets[idx] ?? 0) + 1;
+			}
+		}
+		if (entry.type !== "message" || !entry.message) continue;
+		if (entry.message.role === "user") {
+			if (nowLine?.startsWith("Asking you:")) nowLine = undefined;
+			continue;
+		}
+		if (entry.message.role !== "assistant") continue;
+		const content = entry.message.content;
+		if (!Array.isArray(content)) continue;
+		for (const part of content) {
+			if (!part || typeof part !== "object") continue;
+			const p = part as { type?: string; thinking?: string; text?: string; name?: string; arguments?: unknown };
+			if (p.type === "thinking" && typeof p.thinking === "string") {
+				nowLine = thinkingLine(p.thinking) ?? nowLine;
+			} else if (p.type === "text" && typeof p.text === "string" && p.text.trim()) {
+				for (const rawLine of p.text.trim().split("\n")) {
+					const trimmed = rawLine.trim();
+					if (!trimmed || trimmed.startsWith("---") || trimmed.startsWith("|")) continue;
+					lastLine = cleanMarkdown(trimmed);
+					break;
+				}
+			} else if (p.type === "toolCall" && p.name === "ask_user_question" && status === "waiting_for_user") {
+				const args = p.arguments as { questions?: { question?: string }[] } | undefined;
+				const q = args?.questions?.[0];
+				const firstLine = q?.question?.split("\n")[0];
+				if (firstLine) nowLine = `Asking you: ${cleanMarkdown(firstLine)}`;
+			}
+		}
+	}
+	if (status === "working" && buckets.every((b) => !b)) {
+		buckets[6] = 1;
+		buckets[7] = 3;
+	}
+	return {
+		...(nowLine ? { nowLine } : {}),
+		...(lastLine ? { lastLine } : {}),
+		...(lastAction ? { lastAction } : {}),
+		activity: buckets,
+	};
+}
+
+export function createTranscriptCache(
+	readLines: (file: string) => string,
+	parseJson: JsonParse = JSON.parse,
+): TranscriptCache {
+	const cache = new Map<string, ParsedTranscript>();
+	const parsedFor = (file: string): ParsedTranscript | undefined => {
+		let size: number;
+		let mtimeMs: number;
+		try {
+			({ size, mtimeMs } = statSync(file));
+		} catch {
+			cache.delete(file);
+			return undefined;
+		}
+		const hit = cache.get(file);
+		if (hit && hit.size === size && hit.mtimeMs === mtimeMs) return hit;
+		const items = parseTranscriptItems(readLines(file), parseJson);
+		const parsed = { size, mtimeMs, items, tails: new Map<number, TranscriptItem[]>() };
+		cache.set(file, parsed);
+		return parsed;
+	};
+	return {
+		readTail(file, maxItems) {
+			const parsed = parsedFor(file);
+			if (!parsed) return [];
+			const hit = parsed.tails.get(maxItems);
+			if (hit) return hit;
+			const items = transcriptItemsFromParsed(parsed.items, maxItems);
+			parsed.tails.set(maxItems, items);
+			return items;
+		},
+		readInsights(file, nowMs, status) {
+			if (!file || !existsSync(file)) return emptyTranscriptInsights(status);
+			const parsed = parsedFor(file);
+			return parsed ? readTranscriptInsightsFromParsed(parsed.items, nowMs, status) : emptyTranscriptInsights(status);
+		},
+		retain(files) {
+			for (const file of cache.keys()) {
+				if (!files.has(file)) cache.delete(file);
+			}
+		},
+	};
 }
 
 /** A run with no recorded owner and no output for this long is assumed dead. */
@@ -454,7 +634,26 @@ function collectRuns(
 	);
 }
 
-function collectOpenPullRequests(repos: readonly string[]): { items: PullRequestSummary[]; notices: string[] } {
+export interface PullRequestSnapshot {
+	items: PullRequestSummary[];
+	notices: string[];
+}
+
+function ghPrList(repo: string, signal?: AbortSignal): Promise<string> {
+	return new Promise((resolve, reject) => {
+		execFile(
+			"gh",
+			["pr", "list", "--state", "open", "--limit", "20", "--json", "number,title,headRefName,isDraft,url"],
+			{ cwd: repo, encoding: "utf8", timeout: 2000, signal },
+			(error, stdout) => {
+				if (error) reject(error);
+				else resolve(stdout);
+			},
+		);
+	});
+}
+
+export async function loadPullRequests(repos: readonly string[], signal?: AbortSignal): Promise<PullRequestSnapshot> {
 	const items: PullRequestSummary[] = [];
 	const notices: string[] = [];
 	const seenRepos = new Set<string>();
@@ -463,11 +662,7 @@ function collectOpenPullRequests(repos: readonly string[]): { items: PullRequest
 		seenRepos.add(repo);
 		const project = basename(repo);
 		try {
-			const raw = execFileSync(
-				"gh",
-				["pr", "list", "--state", "open", "--limit", "20", "--json", "number,title,headRefName,isDraft,url"],
-				{ cwd: repo, encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "pipe"] },
-			);
+			const raw = await ghPrList(repo, signal);
 			const parsed = JSON.parse(raw) as {
 				number?: unknown;
 				title?: unknown;
@@ -492,6 +687,17 @@ function collectOpenPullRequests(repos: readonly string[]): { items: PullRequest
 		}
 	}
 	return { items, notices };
+}
+
+export function collectWorkerRepos(workers: readonly WorkerCard[], folders?: FolderLookupCache): string[] {
+	return Array.from(
+		new Set(
+			workers
+				.map((w) => w.lead.repo || w.lead.cwd)
+				.filter((repo): repo is string => Boolean(repo))
+				.map((repo) => cachedMainCheckout(repo, folders)),
+		),
+	);
 }
 
 interface HerdrWorkspaceMeta {
@@ -614,8 +820,9 @@ export function collectRadarSnapshot(
 		nowMs?: number;
 		towerName?: string;
 		includeHerdr?: boolean;
-		includePullRequests?: boolean;
-		listPullRequests?: (repos: string[]) => PullRequestSummary[];
+		pullRequests?: PullRequestSnapshot;
+		folders?: FolderLookupCache;
+		transcripts?: TranscriptCache;
 		readLines?: (file: string) => string;
 		pidAlive?: (pid: number, identity?: RunProcessIdentity) => RunLiveness | boolean;
 	},
@@ -624,8 +831,9 @@ export function collectRadarSnapshot(
 	const towerName = options?.towerName?.trim() || process.env.SITRA_TOWER_NAME?.trim() || "Tower";
 	const baseSessions = listSessions(profileDir);
 	const towerRecord = baseSessions.find((s) => s.role === "tower");
-	const readLines = options?.readLines ?? createTailReader(TRANSCRIPT_TAIL_LINES);
-	const readTail = (file: string) => (existsSync(file) ? readTranscriptTail(readLines(file), 8) : []);
+	const readLines = options?.readLines ?? createTailReader(TRANSCRIPT_TAIL_LINES).read;
+	const transcripts = options?.transcripts ?? createTranscriptCache(readLines);
+	const readTail = (file: string) => (existsSync(file) ? transcripts.readTail(file, 8) : []);
 	const alerts = detectSessionAlerts(baseSessions, readTail, nowMs);
 	const errorLoopIds = new Set(alerts.filter((a) => a.kind === "repeated_errors").map((a) => a.sessionId));
 	const groups = groupWorkerSessions(baseSessions);
@@ -676,6 +884,7 @@ export function collectRadarSnapshot(
 						: matchedGroup?.lead.status === "stopped"
 							? "stopped"
 							: "idle";
+			const branch = matchedGroup ? undefined : cachedGitBranch(cwd, options?.folders);
 			const lead: SessionRecord = matchedGroup?.lead
 				? {
 						...matchedGroup.lead,
@@ -687,8 +896,8 @@ export function collectRadarSnapshot(
 						role: "lead",
 						pid: process.pid,
 						cwd,
-						repo: mainCheckout(cwd),
-						...(gitBranch(cwd) ? { branch: gitBranch(cwd) } : {}),
+						repo: cachedMainCheckout(cwd, options?.folders),
+						...(branch ? { branch } : {}),
 						...(sessionFile ? { sessionFile } : {}),
 						...(ws.paneId ? { paneId: ws.paneId } : {}),
 						status,
@@ -704,7 +913,7 @@ export function collectRadarSnapshot(
 						: status === "stopped"
 							? "stopped"
 							: "idle";
-			const insights = readTranscriptInsights(readLines, sessionFile, nowMs, status);
+			const insights = transcripts.readInsights(sessionFile, nowMs, status);
 			const teammates = matchedGroup?.teammates ?? [];
 			const activeHelpers = Math.max(ws.activeSubagents, teammates.filter((t) => t.status === "working").length);
 			workers.push({
@@ -739,7 +948,7 @@ export function collectRadarSnapshot(
 						: g.lead.status === "stopped"
 							? "stopped"
 							: "idle";
-			const insights = readTranscriptInsights(readLines, g.lead.sessionFile, nowMs, g.lead.status);
+			const insights = transcripts.readInsights(g.lead.sessionFile, nowMs, g.lead.status);
 			const nextIndex = Math.max(0, ...workers.map((w) => w.index)) + 1;
 			workers.push({
 				index: nextIndex,
@@ -768,7 +977,7 @@ export function collectRadarSnapshot(
 						: g.lead.status === "stopped"
 							? "stopped"
 							: "idle";
-			const insights = readTranscriptInsights(readLines, g.lead.sessionFile, nowMs, g.lead.status);
+			const insights = transcripts.readInsights(g.lead.sessionFile, nowMs, g.lead.status);
 			workers.push({
 				index: i + 1,
 				title: basename(g.lead.repo || g.lead.cwd),
@@ -792,19 +1001,7 @@ export function collectRadarSnapshot(
 		// An unreadable Grimoire just shows nothing to review.
 	}
 	const runSummaries = collectRuns(profileDir, nowMs, options?.pidAlive ?? processLiveness);
-	const repos = Array.from(
-		new Set(
-			workers
-				.map((w) => w.lead.repo || w.lead.cwd)
-				.filter((repo): repo is string => Boolean(repo))
-				.map((repo) => mainCheckout(repo)),
-		),
-	);
-	const pullRequestResult = options?.listPullRequests
-		? { items: options.listPullRequests(repos), notices: [] }
-		: options?.includePullRequests
-			? collectOpenPullRequests(repos)
-			: { items: [], notices: [] };
+	const pullRequestResult = options?.pullRequests ?? { items: [], notices: [] };
 
 	return {
 		towerName,
