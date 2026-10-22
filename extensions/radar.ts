@@ -406,30 +406,34 @@ function collectRuns(
 					? "passed"
 					: "failed"
 				: unfinishedRunState(header, mtimeMs, nowMs, pidAlive);
-			return [{
-				id: full,
-				label,
-				state,
-				...(header?.meta.project ? { project: header.meta.project } : {}),
-				...(header?.meta.branch ? { branch: header.meta.branch } : {}),
-				...(header?.meta.agent ? { agent: header.meta.agent } : {}),
-				...(header?.meta.sessionId ? { sessionId: header.meta.sessionId } : {}),
-				tail: status.tail,
-				done: status.done,
-				...(status.exitCode !== undefined ? { exitCode: status.exitCode } : {}),
-				updatedAt: new Date(mtimeMs).toISOString(),
-			}];
+			return [
+				{
+					id: full,
+					label,
+					state,
+					...(header?.meta.project ? { project: header.meta.project } : {}),
+					...(header?.meta.branch ? { branch: header.meta.branch } : {}),
+					...(header?.meta.agent ? { agent: header.meta.agent } : {}),
+					...(header?.meta.sessionId ? { sessionId: header.meta.sessionId } : {}),
+					tail: status.tail,
+					done: status.done,
+					...(status.exitCode !== undefined ? { exitCode: status.exitCode } : {}),
+					updatedAt: new Date(mtimeMs).toISOString(),
+				},
+			];
 		} catch (error) {
 			if ((error as { code?: unknown }).code === "ENOENT") return [];
 			const full = join(dir, file);
-			return [{
-				id: full,
-				label: file.replace(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-/, "").replace(/\.log$/, ""),
-				state: "unknown",
-				tail: `Run log error: ${String(error)}`,
-				done: false,
-				updatedAt: new Date(nowMs).toISOString(),
-			}];
+			return [
+				{
+					id: full,
+					label: file.replace(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-/, "").replace(/\.log$/, ""),
+					state: "unknown",
+					tail: `Run log error: ${String(error)}`,
+					done: false,
+					updatedAt: new Date(nowMs).toISOString(),
+				},
+			];
 		}
 	});
 	// Live runs first so "who is running what" is the top of the list; unknowns stay visible just below them.
