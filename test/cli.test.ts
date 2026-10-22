@@ -181,6 +181,13 @@ describe("lead rules", () => {
 		expect(rules).not.toContain("Kyle");
 	});
 
+	test("treat a typed loop command as permission to run advisors", () => {
+		const rules = leadRules("Sam");
+		expect(rules).toContain(
+			"A /loop Sam typed is permission to run the loop and its advisors; never ask for a separate go.",
+		);
+	});
+
 	test('fall back to "the user" without a name', () => {
 		const rules = leadRules(undefined);
 		expect(rules).toContain("the agent the user talks to");

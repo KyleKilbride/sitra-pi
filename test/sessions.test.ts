@@ -241,6 +241,13 @@ describe("tower rules", () => {
 		expect(rules).toContain("read_session");
 	});
 
+	test("do not turn unchosen options into worker limits", () => {
+		const rules = towerRules("Sam", "Radar");
+		expect(rules).toContain(
+			"A brief carries only limits Sam gave; an option you offered that Sam has not chosen is not a limit.",
+		);
+	});
+
 	test("records a worker lifecycle and lets the tower inspect it through list_sessions and read_session", async () => {
 		const profile = tmp();
 		const prevDir = process.env.PI_CODING_AGENT_DIR;
@@ -491,6 +498,15 @@ function startSession(env: Record<string, string | undefined>) {
 }
 
 describe("tower edge cases", () => {
+	test("labels extra grounding instructions as a tower brief", () => {
+		const prompt = groundingPrompt("Sam", "Do NOT use /loop");
+		expect(prompt).toContain(
+			"Brief from the tower (written by the tower; Sam's own messages and commands override it): Do NOT use /loop\n",
+		);
+		expect(prompt).toContain("\n Reply in two short lines");
+		expect(prompt).not.toContain("Additional context from Sam");
+	});
+
 	test("a teammate stays with the lead that started it, even when another lead in the same repo is more recent", () => {
 		const older: SessionRecord = { ...baseLead, id: "lead-old", sessionFile: "/profile/sessions/old.jsonl" };
 		const newer: SessionRecord = {
