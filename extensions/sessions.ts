@@ -612,7 +612,9 @@ export interface PreparedWorktree {
 
 export function groundingPrompt(userName?: string, extraInstructions?: string): string {
 	const who = userName?.trim() || "the user";
-	const extra = extraInstructions?.trim() ? ` Additional context from ${who}: ${extraInstructions.trim()}` : "";
+	const extra = extraInstructions?.trim()
+		? ` Brief from the tower (written by the tower; ${who}'s own messages and commands override it): ${extraInstructions.trim()}\n`
+		: "";
 	return `Read AGENTS.md, CLAUDE.md, any project steering index, and Grimoire (the root and catalogue in your prompt) so you are grounded in this codebase and how ${who} works. Do not edit code or start a task yet.${extra} Reply in two short lines confirming which docs and rules you loaded and that you are ready for ${who} to drive.`;
 }
 
