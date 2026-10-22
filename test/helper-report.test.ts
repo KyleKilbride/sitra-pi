@@ -84,15 +84,18 @@ test("declared tool schema accepts every valid strict role report fixture", () =
 });
 
 test("declared tool schema keeps role detail choices nested under details", () => {
+	const detailsSchema = HELPER_REPORT_TOOL_SCHEMA.properties.details as unknown as {
+		anyOf: { description?: string }[];
+	};
 	expect(HELPER_REPORT_TOOL_SCHEMA.type).toBe("object");
 	expect(HELPER_REPORT_TOOL_SCHEMA).not.toHaveProperty("anyOf");
 	expect(HELPER_REPORT_TOOL_SCHEMA.properties.evidence.type).toBe("array");
 	expect(HELPER_REPORT_TOOL_SCHEMA.properties.openQuestions.type).toBe("array");
 	expect(HELPER_REPORT_TOOL_SCHEMA.properties.assumptions.type).toBe("array");
-	expect(HELPER_REPORT_TOOL_SCHEMA.properties.details.anyOf).toHaveLength(Object.keys(roleDetailsFixtures).length);
-	expect(
-		HELPER_REPORT_TOOL_SCHEMA.properties.details.anyOf.map((schema: { description?: string }) => schema.description),
-	).toContain('details when role is "test-design": only acceptanceTests');
+	expect(detailsSchema.anyOf).toHaveLength(Object.keys(roleDetailsFixtures).length);
+	expect(detailsSchema.anyOf.map((schema) => schema.description)).toContain(
+		'details when role is "test-design": only acceptanceTests',
+	);
 });
 
 test("test-design reports with another role's detail fields get actionable field guidance", () => {
@@ -104,7 +107,8 @@ test("test-design reports with another role's detail fields get actionable field
 			existingTests: ["test/init.test.ts"],
 		},
 	});
-	expect(result).toMatchObject({ ok: false });
+	expect(result.ok).toBe(false);
+	if (result.ok) throw new Error("expected test-design report to be rejected");
 	expect(result.reason).toContain("details for role test-design allow only: acceptanceTests");
 	expect(result.reason).toContain("remove: existingTests");
 });
@@ -117,7 +121,8 @@ test("nested role keys inside details are named in actionable field guidance", (
 			"test-design": { acceptanceTests: [] },
 		},
 	});
-	expect(result).toMatchObject({ ok: false });
+	expect(result.ok).toBe(false);
+	if (result.ok) throw new Error("expected nested role key to be rejected");
 	expect(result.reason).toContain("missing: acceptanceTests");
 	expect(result.reason).toContain("remove: test-design");
 });

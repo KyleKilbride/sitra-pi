@@ -236,12 +236,18 @@ export function validateHelperReport(
 	input: unknown,
 ): { ok: true; report: HelperReport } | { ok: false; reason: string } {
 	const schema = schemaFor(input);
-	if (!Value.Check(schema, input)) {
-		const errors = [...Value.Errors(schema, input)];
-		if (isRecord(input) && typeof input.role === "string" && input.role in ROLE_HELPER_REPORT_SCHEMAS) {
+	const valid = Value.Check(schema, input);
+	if (!valid) {
+		const originalInput: unknown = input;
+		const errors = [...Value.Errors(schema, originalInput)];
+		if (
+			isRecord(originalInput) &&
+			typeof originalInput.role === "string" &&
+			originalInput.role in ROLE_HELPER_REPORT_SCHEMAS
+		) {
 			return {
 				ok: false,
-				reason: roleDetailsReason(input, input.role as HelperReportRole) ?? schemaErrorReason(errors),
+				reason: roleDetailsReason(originalInput, originalInput.role as HelperReportRole) ?? schemaErrorReason(errors),
 			};
 		}
 		return { ok: false, reason: schemaErrorReason(errors) };
