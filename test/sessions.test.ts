@@ -239,6 +239,9 @@ describe("tower rules", () => {
 		expect(rules).toContain("Sam");
 		expect(rules).toContain("list_sessions");
 		expect(rules).toContain("read_session");
+		expect(rules).toContain(
+			"An option the person has not chosen is not a limit, so do not write unchosen options into briefs as bans.",
+		);
 	});
 
 	test("records a worker lifecycle and lets the tower inspect it through list_sessions and read_session", async () => {
@@ -438,6 +441,13 @@ describe("tower rules", () => {
 			if (prevTower === undefined) delete process.env.SITRA_TOWER_NAME;
 			else process.env.SITRA_TOWER_NAME = prevTower;
 		}
+	});
+
+	test("labels extra spawn instructions as the tower's brief and lets the person's messages override it", () => {
+		const prompt = groundingPrompt("Sam", "Do NOT use /loop");
+		expect(prompt).not.toContain("Additional context from Sam");
+		expect(prompt).toContain("Brief from the tower");
+		expect(prompt).toContain("the person's own messages and commands override it");
 	});
 });
 

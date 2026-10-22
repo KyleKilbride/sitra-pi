@@ -179,6 +179,9 @@ describe("lead rules", () => {
 		expect(rules).toContain("the agent Sam talks to");
 		expect(rules).toContain("Sam's words are the spec");
 		expect(rules).not.toContain("Kyle");
+		expect(rules).toContain(
+			"A `/loop` the person typed is permission to run the loop and its advisors. Never ask for a separate go.",
+		);
 	});
 
 	test('fall back to "the user" without a name', () => {
