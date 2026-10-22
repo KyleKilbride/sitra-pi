@@ -115,7 +115,9 @@ export function readRunHeader(
 			)
 				? {
 						commit: (meta.loop as { commit: string }).commit.slice(0, 200),
-						testHashes: (meta.loop as { testHashes: { file: string; sha256?: string; missing?: boolean }[] }).testHashes.map((item) => ({
+						testHashes: (
+							meta.loop as { testHashes: { file: string; sha256?: string; missing?: boolean }[] }
+						).testHashes.map((item) => ({
 							file: item.file.slice(0, 500),
 							...(item.sha256 ? { sha256: item.sha256.slice(0, 200) } : {}),
 							...(item.missing === true ? { missing: true } : {}),

@@ -1,6 +1,7 @@
 // @ts-nocheck — deterministic scripted model for loop-foundation tests.
-import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
+
 import { readFileSync, writeFileSync } from "node:fs";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 
 function script() {
 	try {

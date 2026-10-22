@@ -163,7 +163,11 @@ function writeLoopLog(
 
 function writeHeaderLoopLog(
 	file: string,
-	input: { commit: string; testHashes: ({ file: string; sha256: string } | { file: string; missing: true })[]; exitCode: number },
+	input: {
+		commit: string;
+		testHashes: ({ file: string; sha256: string } | { file: string; missing: true })[];
+		exitCode: number;
+	},
 ): void {
 	writeFileSync(
 		file,
@@ -1078,8 +1082,16 @@ describe("Pi wiring", () => {
 		const hash = sha256sum(cwd, "loop.test.ts");
 		const redLog = join(profile, "red.log");
 		const greenLog = join(profile, "green.log");
-		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
-		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		writeHeaderLoopLog(redLog, {
+			commit: redCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 1,
+		});
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 0,
+		});
 		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
 		const path = loopStatePath(profile, cwd, "feature");
 		const verifyState = readLoopStateFile(path);
@@ -1098,7 +1110,10 @@ describe("Pi wiring", () => {
 		expect(readLoopStateFile(path)).toEqual(verifyState);
 
 		await handlers.get("message_end")?.(
-			subagentResult("verifier", sessionFileWithVerifierReport(verifierReport, verifyState.verifierRequest?.task ?? "")),
+			subagentResult(
+				"verifier",
+				sessionFileWithVerifierReport(verifierReport, verifyState.verifierRequest?.task ?? ""),
+			),
 			ctx(cwd),
 		);
 		expect(readLoopStateFile(path).stage).toBe("done");
@@ -1118,8 +1133,16 @@ describe("Pi wiring", () => {
 		const greenHash = sha256sum(cwd, "loop.test.ts");
 		const redLog = join(profile, "red.log");
 		const greenLog = join(profile, "green.log");
-		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", missing: true }], exitCode: 1 });
-		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: greenHash }], exitCode: 0 });
+		writeHeaderLoopLog(redLog, {
+			commit: redCommit,
+			testHashes: [{ file: "loop.test.ts", missing: true }],
+			exitCode: 1,
+		});
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: greenHash }],
+			exitCode: 0,
+		});
 		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
 		const blocked = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
 		expect(blocked.stage).toBe("blocked");
