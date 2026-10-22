@@ -222,6 +222,12 @@ function cachedMainCheckout(cwd: string, folders: FolderLookupCache | undefined)
 	return value;
 }
 
+function errorCode(error: unknown): string {
+	const code = (error as NodeJS.ErrnoException).code;
+	if (typeof code === "string" && code) return code;
+	return error instanceof Error && error.message ? error.message : String(error);
+}
+
 export interface WrapCache {
 	get(id: string, width: number, text: string, wrap: () => string[]): string[];
 	retain(ids: ReadonlySet<string>): void;
@@ -830,6 +836,15 @@ export function collectRadarSnapshot(
 		: [];
 	const workers: WorkerCard[] = [];
 	const claimedLeadIds = new Set<string>();
+	const branchNotices: string[] = [];
+	const readWorkspaceBranch = (cwd: string): string | undefined => {
+		try {
+			return readGitHeadBranch(cwd);
+		} catch (error) {
+			branchNotices.push(`Branch unavailable for ${basename(cwd)}; ${errorCode(error)}.`);
+			return undefined;
+		}
+	};
 
 	if (herdrWorkspaces.length > 0) {
 		for (const ws of herdrWorkspaces) {
@@ -859,7 +874,7 @@ export function collectRadarSnapshot(
 						: matchedGroup?.lead.status === "stopped"
 							? "stopped"
 							: "idle";
-			const branch = matchedGroup ? undefined : readGitHeadBranch(cwd);
+			const branch = matchedGroup ? undefined : readWorkspaceBranch(cwd);
 			const lead: SessionRecord = matchedGroup?.lead
 				? {
 						...matchedGroup.lead,
@@ -977,6 +992,7 @@ export function collectRadarSnapshot(
 	}
 	const runSummaries = collectRuns(profileDir, nowMs, options?.pidAlive ?? processLiveness);
 	const pullRequestResult = options?.pullRequests ?? { items: [], notices: [] };
+	const statusNotices = [...branchNotices, ...pullRequestResult.notices.map((notice) => notice.text)];
 
 	return {
 		towerName,
@@ -984,9 +1000,7 @@ export function collectRadarSnapshot(
 		alerts,
 		runs: runSummaries,
 		...(pullRequestResult.items.length > 0 ? { pullRequests: pullRequestResult.items } : {}),
-		...(pullRequestResult.notices.length > 0
-			? { statusNotices: pullRequestResult.notices.map((notice) => notice.text) }
-			: {}),
+		...(statusNotices.length > 0 ? { statusNotices } : {}),
 		pendingProposals,
 		mail: collectMail(profileDir),
 		summary: readTowerSummary(profileDir),

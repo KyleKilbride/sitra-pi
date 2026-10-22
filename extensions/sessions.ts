@@ -302,9 +302,10 @@ export function readGitHeadBranch(cwd: string): string | undefined {
 		if (!head.startsWith("ref: ")) return head ? "HEAD" : undefined;
 		const ref = head.slice("ref: ".length).trim();
 		const prefix = "refs/heads/";
-		return ref.startsWith(prefix) ? ref.slice(prefix.length) || undefined : undefined;
-	} catch {
-		return undefined;
+		return ref.startsWith(prefix) ? ref.slice(prefix.length) || undefined : ref || undefined;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
 	}
 }
 

@@ -1,4 +1,13 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -564,6 +573,115 @@ fi
 			writeFileSync(join(repo, ".git", "HEAD"), "ref: refs/heads/two\n");
 			snap = collectRadarSnapshot(profile, { includeHerdr: true, folders });
 			expect(snap.workers[0]?.lead.branch).toBe("two");
+		} finally {
+			for (const [key, value] of Object.entries(savedEnv)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
+
+	test("herdr-only workspace reports unreadable .git and keeps the snapshot", () => {
+		const profile = tmp();
+		const repo = join(profile, "repo");
+		const bin = join(profile, "bin");
+		mkdirSync(repo, { recursive: true });
+		symlinkSync(".git", join(repo, ".git"));
+		mkdirSync(bin, { recursive: true });
+		writeFileSync(
+			join(bin, "herdr"),
+			`#!/bin/sh
+if [ "$1" = "workspace" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"workspaces":[{"workspace_id":"wE","number":1,"label":"[1] Error branch","active_tab_id":"wE:t1","agent_status":"idle"}]}}'
+elif [ "$1" = "tab" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"tabs":[{"tab_id":"wE:t1","label":"[1] repo › pi"}]}}'
+elif [ "$1" = "agent" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"agents":[{"workspace_id":"wE","tab_id":"wE:t1","pane_id":"wE:p1","agent":"pi","agent_status":"idle","cwd":"${repo}"}]}}'
+fi
+`,
+		);
+		chmodSync(join(bin, "herdr"), 0o755);
+		const folders = createFolderLookupCache({ mainCheckout: (cwd) => cwd });
+		const savedEnv = { HERDR_ENV: process.env.HERDR_ENV, PATH: process.env.PATH };
+		process.env.HERDR_ENV = "1";
+		process.env.PATH = `${bin}:${process.env.PATH}`;
+		try {
+			const snap = collectRadarSnapshot(profile, { includeHerdr: true, folders });
+			expect(snap.workers[0]?.lead.branch).toBeUndefined();
+			expect(snap.statusNotices?.join("\n")).toContain("Branch unavailable for repo");
+			expect(snap.statusNotices?.join("\n")).toContain("ELOOP");
+		} finally {
+			for (const [key, value] of Object.entries(savedEnv)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
+
+	test("herdr-only workspace reports unreadable HEAD and keeps the snapshot", () => {
+		const profile = tmp();
+		const repo = join(profile, "repo");
+		const bin = join(profile, "bin");
+		mkdirSync(join(repo, ".git"), { recursive: true });
+		symlinkSync("HEAD", join(repo, ".git", "HEAD"));
+		mkdirSync(bin, { recursive: true });
+		writeFileSync(
+			join(bin, "herdr"),
+			`#!/bin/sh
+if [ "$1" = "workspace" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"workspaces":[{"workspace_id":"wH","number":1,"label":"[1] Head branch","active_tab_id":"wH:t1","agent_status":"idle"}]}}'
+elif [ "$1" = "tab" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"tabs":[{"tab_id":"wH:t1","label":"[1] repo › pi"}]}}'
+elif [ "$1" = "agent" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"agents":[{"workspace_id":"wH","tab_id":"wH:t1","pane_id":"wH:p1","agent":"pi","agent_status":"idle","cwd":"${repo}"}]}}'
+fi
+`,
+		);
+		chmodSync(join(bin, "herdr"), 0o755);
+		const folders = createFolderLookupCache({ mainCheckout: (cwd) => cwd });
+		const savedEnv = { HERDR_ENV: process.env.HERDR_ENV, PATH: process.env.PATH };
+		process.env.HERDR_ENV = "1";
+		process.env.PATH = `${bin}:${process.env.PATH}`;
+		try {
+			const snap = collectRadarSnapshot(profile, { includeHerdr: true, folders });
+			expect(snap.workers[0]?.lead.branch).toBeUndefined();
+			expect(snap.statusNotices?.join("\n")).toContain("Branch unavailable for repo");
+			expect(snap.statusNotices?.join("\n")).toContain("ELOOP");
+		} finally {
+			for (const [key, value] of Object.entries(savedEnv)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
+
+	test("herdr-only workspace shows non-branch HEAD targets", () => {
+		const profile = tmp();
+		const repo = join(profile, "repo");
+		const bin = join(profile, "bin");
+		mkdirSync(join(repo, ".git"), { recursive: true });
+		writeFileSync(join(repo, ".git", "HEAD"), "ref: refs/tags/v1\n");
+		mkdirSync(bin, { recursive: true });
+		writeFileSync(
+			join(bin, "herdr"),
+			`#!/bin/sh
+if [ "$1" = "workspace" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"workspaces":[{"workspace_id":"wT","number":1,"label":"[1] Tag branch","active_tab_id":"wT:t1","agent_status":"idle"}]}}'
+elif [ "$1" = "tab" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"tabs":[{"tab_id":"wT:t1","label":"[1] repo › pi"}]}}'
+elif [ "$1" = "agent" ] && [ "$2" = "list" ]; then
+  echo '{"result":{"agents":[{"workspace_id":"wT","tab_id":"wT:t1","pane_id":"wT:p1","agent":"pi","agent_status":"idle","cwd":"${repo}"}]}}'
+fi
+`,
+		);
+		chmodSync(join(bin, "herdr"), 0o755);
+		const folders = createFolderLookupCache({ mainCheckout: (cwd) => cwd });
+		const savedEnv = { HERDR_ENV: process.env.HERDR_ENV, PATH: process.env.PATH };
+		process.env.HERDR_ENV = "1";
+		process.env.PATH = `${bin}:${process.env.PATH}`;
+		try {
+			const snap = collectRadarSnapshot(profile, { includeHerdr: true, folders });
+			expect(snap.workers[0]?.lead.branch).toBe("refs/tags/v1");
 		} finally {
 			for (const [key, value] of Object.entries(savedEnv)) {
 				if (value === undefined) delete process.env[key];
