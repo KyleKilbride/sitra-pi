@@ -41,6 +41,11 @@ interface ToolResult {
 	details: unknown;
 }
 
+const LOOP_USAGE =
+	"usage: /loop start [--base <ref>] <task> | /loop answer <answer> | /loop plan <plan> | /loop approve <summary> | /loop status";
+const LOOP_VERBS = ["start", "answer", "plan", "approve", "status"] as const;
+type LoopVerb = (typeof LOOP_VERBS)[number];
+
 interface Pi {
 	on(event: string, handler: (event: never, ctx: Ctx) => unknown): void;
 	registerCommand(name: string, command: { description: string; handler(args: string, ctx: Ctx): Promise<void> }): void;
@@ -144,6 +149,10 @@ function statePathFor(gitState: GitState): string {
 	return loopStatePath(profileDir(), gitState.worktree, gitState.branch);
 }
 
+function noLoopMessage(checkout: Omit<GitState, "baseRef" | "baseHead">): string {
+	return `no loop on ${checkout.branch} in ${checkout.worktree}; start one with /loop start <task>`;
+}
+
 function splitCommand(args: string): { verb: string; rest: string } {
 	const trimmed = args.trim();
 	const space = trimmed.indexOf(" ");
@@ -151,12 +160,16 @@ function splitCommand(args: string): { verb: string; rest: string } {
 	return { verb: trimmed.slice(0, space), rest: trimmed.slice(space + 1).trim() };
 }
 
+function isLoopVerb(verb: string): verb is LoopVerb {
+	return (LOOP_VERBS as readonly string[]).includes(verb);
+}
+
 function parseStart(rest: string): { baseRef?: string; goal: string } {
 	const prefix = "--base ";
 	if (!rest.startsWith(prefix)) return { goal: rest };
 	const after = rest.slice(prefix.length).trim();
 	const space = after.indexOf(" ");
-	if (space < 0) throw new Error("usage: /loop start [--base <ref>] <task>");
+	if (space < 0) throw new Error(LOOP_USAGE);
 	return { baseRef: after.slice(0, space), goal: after.slice(space + 1).trim() };
 }
 
@@ -166,8 +179,13 @@ function isBaseBranch(branch: string, baseRef: string): boolean {
 	return `refs/heads/${branch}` === `refs/heads/${baseBranch}`;
 }
 
-function loadCurrentState(gitState: GitState): LoopState {
-	return readLoopStateFile(statePathFor(gitState));
+function loadExistingCurrentState(checkout: Omit<GitState, "baseRef" | "baseHead">): {
+	path: string;
+	state: LoopState;
+} {
+	const path = statePathFor({ ...checkout, baseRef: "", baseHead: "" });
+	if (!existsSync(path)) throw new Error(noLoopMessage(checkout));
+	return { path, state: readLoopStateFile(path) };
 }
 
 function loadMutableState(gitState: GitState): LoopState {
@@ -215,10 +233,43 @@ function emitEffects(pi: Pi, state: LoopState, effects: LoopEffect[]): void {
 		pi.sendUserMessage(renderEffect(state, effect), { deliverAs: "followUp", streamingBehavior: "followUp" });
 }
 
+function loopStatus(cwd: string, state: LoopState): ToolResult {
+	let gitState: GitState;
+	try {
+		gitState = currentGitForState(cwd, state);
+	} catch (error) {
+		const blocked = blockForGitFailure(state, String(error));
+		return {
+			content: [{ type: "text", text: `stage: blocked\ngit: ${String(error)}` }],
+			details: blocked.state,
+		};
+	}
+	const stale = staleReason(state, { branch: gitState.branch, baseHead: gitState.baseHead });
+	const tokens = Object.values(state.advisorRuns).reduce(
+		(sum, run) => sum + (run?.outputTokens ?? 0) + (run?.contextTokens ?? 0),
+		0,
+	);
+	return {
+		content: [
+			{
+				type: "text",
+				text: [
+					`stage: ${state.stage}`,
+					`goal: ${state.goal}`,
+					`advisor tokens recorded: ${tokens}`,
+					...(stale ? [`stale: ${stale}`] : []),
+				].join("\n"),
+			},
+		],
+		details: state,
+	};
+}
+
 async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> {
 	const { verb, rest } = splitCommand(args);
+	if (!verb || !isLoopVerb(verb)) throw new Error(LOOP_USAGE);
 	if (verb === "start") {
-		if (!rest) throw new Error("usage: /loop start <task>");
+		if (!rest) throw new Error(LOOP_USAGE);
 		const parsed = parseStart(rest);
 		const gitState = currentGit(ctx.cwd, parsed.baseRef ?? defaultBaseRef(ctx.cwd));
 		if (isBaseBranch(gitState.branch, gitState.baseRef)) throw new Error("refusing to start a loop on the base branch");
@@ -239,8 +290,12 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 		return;
 	}
 	const checkout = checkoutGit(ctx.cwd);
-	const path = statePathFor({ ...checkout, baseRef: "", baseHead: "" });
-	const currentState = readLoopStateFile(path);
+	const { path, state: currentState } = loadExistingCurrentState(checkout);
+	if (verb === "status") {
+		if (!ctx.ui?.notify) throw new Error("/loop status requires an interactive UI");
+		ctx.ui.notify(loopStatus(ctx.cwd, currentState).content[0]?.text ?? "", "info");
+		return;
+	}
 	let gitState: GitState;
 	try {
 		gitState = currentGitForState(ctx.cwd, currentState);
@@ -251,7 +306,7 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 		return;
 	}
 	if (verb === "answer") {
-		if (!rest) throw new Error("usage: /loop answer <answer>");
+		if (!rest) throw new Error(LOOP_USAGE);
 		const rawState = currentState;
 		const isStaleAnswer = rawState.stage === "blocked" && rawState.block?.kind === "stale";
 		if (!isStaleAnswer && rawState.block) {
@@ -275,14 +330,14 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 		return;
 	}
 	if (verb === "plan") {
-		if (!rest) throw new Error("usage: /loop plan <plan>");
+		if (!rest) throw new Error(LOOP_USAGE);
 		const result = applyLeadPlan(loadMutableState(gitState), rest);
 		writeLoopStateFile(path, result.state);
 		emitEffects(pi, result.state, result.effects);
 		return;
 	}
 	if (verb === "approve") {
-		if (!rest) throw new Error("usage: /loop approve <summary>");
+		if (!rest) throw new Error(LOOP_USAGE);
 		const result = approveBrief(loadMutableState(gitState), {
 			approvedBy: "person",
 			approvedAt: new Date().toISOString(),
@@ -292,7 +347,6 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 		emitEffects(pi, result.state, result.effects);
 		return;
 	}
-	throw new Error("usage: /loop start <task> | /loop answer <answer> | /loop plan <plan> | /loop approve <summary>");
 }
 
 async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<void> {
@@ -420,36 +474,8 @@ export default function sitraLoop(pi: Pi): void {
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
 			const checkout = checkoutGit(ctx.cwd);
-			const state = loadCurrentState({ ...checkout, baseRef: "", baseHead: "" });
-			let gitState: GitState;
-			try {
-				gitState = currentGitForState(ctx.cwd, state);
-			} catch (error) {
-				const blocked = blockForGitFailure(state, String(error));
-				return {
-					content: [{ type: "text", text: `stage: blocked\ngit: ${String(error)}` }],
-					details: blocked.state,
-				};
-			}
-			const stale = staleReason(state, { branch: gitState.branch, baseHead: gitState.baseHead });
-			const tokens = Object.values(state.advisorRuns).reduce(
-				(sum, run) => sum + (run?.outputTokens ?? 0) + (run?.contextTokens ?? 0),
-				0,
-			);
-			return {
-				content: [
-					{
-						type: "text",
-						text: [
-							`stage: ${state.stage}`,
-							`goal: ${state.goal}`,
-							`advisor tokens recorded: ${tokens}`,
-							...(stale ? [`stale: ${stale}`] : []),
-						].join("\n"),
-					},
-				],
-				details: state,
-			};
+			const { state } = loadExistingCurrentState(checkout);
+			return loopStatus(ctx.cwd, state);
 		},
 	});
 
