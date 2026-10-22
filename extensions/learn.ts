@@ -375,6 +375,11 @@ function canonical(value: unknown): string {
 }
 const sameCall = (a: Call, b: Call) => a.tool === b.tool && canonical(a.input) === canonical(b.input);
 
+/** The stable identity used for pause follow-up comparisons: exact tool name plus canonical input. */
+export function callKey(call: Call): string {
+	return `${JSON.stringify(call.tool)}:${canonical(call.input)}`;
+}
+
 /**
  * When a call happened: the agent turn it belongs to, if the tool says, else the time. Calls the agent sends together
  * share a turn; a reaction to a pause needs a new turn (or, without turn ids, at least SAME_TURN_MS later).

@@ -1,5 +1,12 @@
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
+import { renderEntry } from "../extensions/grimoire.ts";
 import sitraKnowledge from "../extensions/knowledge.ts";
+import { createLoopState } from "../extensions/loop.ts";
+import { loopStatePath, writeLoopStateFile } from "../extensions/loop-state.ts";
 
 type Handler = (event: unknown, ctx: unknown) => void;
 
@@ -26,6 +33,91 @@ function fakePi(active: string[]) {
 		for (const h of handlers.get("before_agent_start") ?? []) h(event, { cwd: process.cwd() });
 	};
 	return { pi, tools, startTurn, active: () => current };
+}
+
+function gitWorktree(): { cwd: string; head: string } {
+	const cwd = realpathSync(mkdtempSync(join(tmpdir(), "sitra-grimoire-loop-work-")));
+	execFileSync("git", ["init", "-b", "main"], { cwd, stdio: "ignore" });
+	writeFileSync(join(cwd, "README.md"), "test\n");
+	execFileSync("git", ["add", "README.md"], { cwd, stdio: "ignore" });
+	execFileSync(
+		"git",
+		[
+			"-c",
+			"user.name=Test User",
+			"-c",
+			"user.email=test@example.com",
+			"-c",
+			"commit.gpgsign=false",
+			"commit",
+			"-m",
+			"initial",
+		],
+		{
+			cwd,
+			stdio: "ignore",
+		},
+	);
+	const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
+	execFileSync("git", ["remote", "add", "origin", cwd], { cwd, stdio: "ignore" });
+	execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd, stdio: "ignore" });
+	execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], {
+		cwd,
+		stdio: "ignore",
+	});
+	execFileSync("git", ["checkout", "-b", "feature"], { cwd, stdio: "ignore" });
+	return { cwd, head };
+}
+
+function loopGateFixture() {
+	const grimoire = realpathSync(mkdtempSync(join(tmpdir(), "sitra-grimoire-loop-")));
+	const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-grimoire-loop-profile-")));
+	const { cwd, head } = gitWorktree();
+	mkdirSync(join(grimoire, "kinds", "warnings"), { recursive: true });
+	writeFileSync(
+		join(grimoire, "kinds", "warnings", "one-builder.md"),
+		renderEntry({
+			kind: "warning",
+			title: "One builder per pull request",
+			body: "Use one builder per pull request.",
+			date: "2026-10-22",
+			when: ["tool:subagent"],
+		}),
+	);
+	vi.stubEnv("SITRA_GRIMOIRE", grimoire);
+	vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+	vi.stubEnv("PI_SUBAGENT_NAME", "");
+	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	sitraKnowledge({
+		on: (n: string, h: (e: unknown, c: unknown) => unknown) => handlers.set(n, h),
+		registerTool() {},
+		registerCommand() {},
+		sendUserMessage() {},
+	} as never);
+	const warnings: string[] = [];
+	const ctx = {
+		cwd,
+		hasUI: true,
+		ui: { setStatus() {}, notify: (message: string) => warnings.push(message) },
+	};
+	const call = (input: object) =>
+		handlers.get("tool_call")?.({ toolName: "subagent", input }, ctx) as
+			| { block?: boolean; reason?: string }
+			| undefined;
+	const search = () => handlers.get("tool_call")?.({ toolName: "grimoire_search", input: { query: "builder" } }, ctx);
+	const writeLoopState = (state: ReturnType<typeof createLoopState>) =>
+		writeLoopStateFile(loopStatePath(profile, cwd, "feature"), state);
+	const baseState = () =>
+		createLoopState({
+			worktree: cwd,
+			branch: "feature",
+			baseRef: "origin/main",
+			baseHead: head,
+			goal: "goal",
+			limits: [],
+			done: [],
+		});
+	return { grimoire, profile, cwd, call, search, writeLoopState, baseState, warnings };
 }
 
 afterEach(() => {
@@ -374,4 +466,70 @@ test("action triggers do not pre-scan unrelated root files before loading entrie
 	expect(result?.block).toBe(true);
 	expect(result?.reason).toContain("Open PRs as drafts.");
 	expect(warnings).toEqual([]);
+});
+
+test("loop-pending advisor subagent dispatch skips the Grimoire look and rule gates", () => {
+	const f = loopGateFixture();
+	f.writeLoopState(f.baseState());
+
+	const result = f.call({
+		children: [
+			{ agent: "intent-advisor", task: "Find the intent." },
+			{ agent: "codebase-advisor", task: "Find the codebase facts." },
+		],
+	});
+
+	expect(result).toBeUndefined();
+	expect(existsSync(join(f.grimoire, ".sitra", "pending-pause"))).toBe(false);
+	expect(f.warnings).toEqual([]);
+});
+
+test("a non-loop subagent spawn still gets the Grimoire look nudge once", () => {
+	const f = loopGateFixture();
+
+	const first = f.call({ agent: "scout", task: "Find nearby files." });
+
+	expect(first?.block).toBe(true);
+	expect(first?.reason).toContain("Paused once before your first change");
+	expect(f.call({ agent: "scout", task: "Find nearby files." })).toBeUndefined();
+});
+
+test("a same-call rerun is not paused again by the other Grimoire gate", () => {
+	const f = loopGateFixture();
+
+	const first = f.call({ agent: "builder", task: "Make the change." });
+	f.search();
+	const second = f.call({ task: "Make the change.", agent: "builder" });
+
+	expect(first?.block).toBe(true);
+	expect(first?.reason).toContain("Paused once before your first change");
+	expect(first?.reason).toContain("Use one builder per pull request.");
+	expect(second).toBeUndefined();
+});
+
+test("a mixed loop advisor and non-pending subagent call is still gated", () => {
+	const f = loopGateFixture();
+	f.writeLoopState(f.baseState());
+
+	const result = f.call({
+		children: [
+			{ agent: "intent-advisor", task: "Find the intent." },
+			{ agent: "scout", task: "Find unrelated context." },
+		],
+	});
+
+	expect(result?.block).toBe(true);
+	expect(result?.reason).toContain("Paused once before your first change");
+});
+
+test("unreadable loop state keeps the Grimoire gate on and warns", () => {
+	const f = loopGateFixture();
+	mkdirSync(join(f.profile, "loops"), { recursive: true });
+	writeFileSync(loopStatePath(f.profile, f.cwd, "feature"), "{");
+
+	const result = f.call({ agent: "intent-advisor", task: "Find the intent." });
+
+	expect(result?.block).toBe(true);
+	expect(result?.reason).toContain("Paused once before your first change");
+	expect(f.warnings[0]).toContain("LOOPS state could not be checked for the Grimoire gate");
 });
