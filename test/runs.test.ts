@@ -47,9 +47,7 @@ describe("runs in panes", () => {
 
 	test("run header keeps the full command for verifier evidence", () => {
 		const command = `pnpm vitest run ${Array.from({ length: 40 }, (_, index) => `test/file-${index}.test.ts`).join(" ")}`;
-		const header = readRunHeader(
-			`${HEADER_MARKER}${JSON.stringify({ pid: 123, meta: { command } })}`,
-		);
+		const header = readRunHeader(`${HEADER_MARKER}${JSON.stringify({ pid: 123, meta: { command } })}`);
 		expect(header?.meta.command).toBe(command);
 	});
 });
