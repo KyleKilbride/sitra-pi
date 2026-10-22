@@ -477,8 +477,24 @@ describe("Pi wiring", () => {
 			}),
 			stage: "done",
 			advisorRuns: {
-				intent: { status: "done", summary: "intent", evidence: [], openQuestions: [], assumptions: [], outputTokens: 500, contextTokens: 500 },
-				codebase: { status: "done", summary: "codebase", evidence: [], openQuestions: [], assumptions: [], outputTokens: 1000, contextTokens: 1000 },
+				intent: {
+					status: "done",
+					summary: "intent",
+					evidence: [],
+					openQuestions: [],
+					assumptions: [],
+					outputTokens: 500,
+					contextTokens: 500,
+				},
+				codebase: {
+					status: "done",
+					summary: "codebase",
+					evidence: [],
+					openQuestions: [],
+					assumptions: [],
+					outputTokens: 1000,
+					contextTokens: 1000,
+				},
 			},
 			rework: [
 				{ class: "context-missed", evidence: ["a"], proposalPath: "proposals/a.md" },
@@ -707,7 +723,7 @@ describe("Pi wiring", () => {
 			ctx(cwd),
 		);
 		const path = loopStatePath(profile, cwd, "feature");
-		expect(readLoopStateFile(path).stage).toBe("needs-person");
+		expect(readLoopStateFile(path).stage).toBe("blocked");
 		moveBase(cwd);
 		await commands.get("loop")?.handler("answer A1", ctx(cwd));
 		const stale = readLoopStateFile(path);
@@ -1040,8 +1056,11 @@ describe("Pi wiring", () => {
 			ctx(cwd),
 		);
 		const missed = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
-		expect(missed.stage).toBe("blocked");
-		expect(missed.block).toMatchObject({ kind: "questions", resumeStage: "classify" });
+		expect(missed.stage).toBe("brief-approved");
+		expect(missed.rework[0]).toMatchObject({
+			class: "execution-slip",
+			proposalPath: expect.stringMatching(/^proposals\//),
+		});
 		expect(missed.verification).toMatchObject({ status: "missed", summary: "Verifier found a miss." });
 	});
 

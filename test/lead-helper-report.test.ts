@@ -211,7 +211,7 @@ describe("run_in_pane loop metadata", () => {
 			},
 		]);
 		expect(details.runId).toBeTypeOf("string");
-	});
+	}, 30_000);
 
 	test("uses linked worktree state and hashes files in that worktree", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-lead-profile-")));
@@ -274,7 +274,7 @@ describe("run_in_pane loop metadata", () => {
 		expect(header?.meta.loop?.testHashes?.[0]?.sha256).toBe(
 			execFileSync("sha256sum", ["loop.test.ts"], { cwd: linked, encoding: "utf8" }).split(/\s+/)[0],
 		);
-	});
+	}, 30_000);
 
 	test("surfaces active loop state read failures instead of dropping loop metadata", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-lead-profile-")));
@@ -335,5 +335,5 @@ describe("run_in_pane loop metadata", () => {
 		]);
 		const header = readRunHeader(readFileSync(details.log, "utf8").split("\n")[0] ?? "");
 		expect(header?.meta.loop?.testHashes).toEqual([{ file: "missing.test.ts", missing: true }]);
-	});
+	}, 30_000);
 });

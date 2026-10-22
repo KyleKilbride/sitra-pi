@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Type } from "typebox";
-import { grimoireDir, grimoireStoreStatus } from "./grimoire.ts";
+import { grimoireDir, grimoireStoreStatus, writeProposal } from "./grimoire.ts";
 import { validateHelperReport } from "./helper-report.ts";
 import {
 	type AdvisorRole,
@@ -24,8 +24,10 @@ import {
 	type LoopEffect,
 	type LoopState,
 	type LoopTestHash,
+	loopMetricsLine,
 	recordBlockAnswer,
 	recordBuildEvidence,
+	recordReworkProposal,
 	replaceBlockWithStale,
 	roleForAgent,
 	staleReason,
@@ -335,12 +337,37 @@ function renderEffect(state: LoopState, effect: LoopEffect): string {
 			"Start verifier in a fresh context with this exact task. Do not add the builder transcript or any helper brief.",
 			effect.task,
 		].join("\n");
+	if (effect.type === "write-grimoire-proposal")
+		return `LOOPS classified rework ${effect.reworkIndex + 1}; drafting a Grimoire proposal for review.`;
 	return `LOOPS stage: brief-approved\nFrozen brief hash: ${state.frozenBriefHash ?? "(missing)"}`;
 }
 
 function emitEffects(pi: Pi, state: LoopState, effects: LoopEffect[]): void {
 	for (const effect of effects)
 		pi.sendUserMessage(renderEffect(state, effect), { deliverAs: "followUp", streamingBehavior: "followUp" });
+}
+
+function materializeEffects(state: LoopState, effects: LoopEffect[]): { state: LoopState; effects: LoopEffect[] } {
+	let current = state;
+	const rendered: LoopEffect[] = [];
+	for (const effect of effects) {
+		if (effect.type !== "write-grimoire-proposal") {
+			rendered.push(effect);
+			continue;
+		}
+		const proposalPath = writeProposal(grimoireDir(process.env), effect.proposal);
+		const recorded = recordReworkProposal(current, { reworkIndex: effect.reworkIndex, proposalPath });
+		current = recorded.state;
+		rendered.push(...recorded.effects);
+	}
+	return { state: current, effects: rendered };
+}
+
+function persistAndEmit(pi: Pi, path: string, result: { state: LoopState; effects: LoopEffect[] }): LoopState {
+	const materialized = materializeEffects(result.state, result.effects);
+	writeLoopStateFile(path, materialized.state);
+	emitEffects(pi, materialized.state, materialized.effects);
+	return materialized.state;
 }
 
 function loopStatus(cwd: string, state: LoopState): ToolResult {
@@ -369,10 +396,6 @@ function loopStatus(cwd: string, state: LoopState): ToolResult {
 			stale = { kind: "test-hashes", detail: `test hashes could not be checked: ${String(error)}` };
 		}
 	}
-	const tokens = Object.values(state.advisorRuns).reduce(
-		(sum, run) => sum + (run?.outputTokens ?? 0) + (run?.contextTokens ?? 0),
-		0,
-	);
 	return {
 		content: [
 			{
@@ -380,7 +403,7 @@ function loopStatus(cwd: string, state: LoopState): ToolResult {
 				text: [
 					`stage: ${state.stage}`,
 					`goal: ${state.goal}`,
-					`advisor tokens recorded: ${tokens}`,
+					loopMetricsLine(state),
 					...(stale ? [`stale: ${stale.kind === "test-hashes" ? "test hashes" : staleReasonText(stale)}`] : []),
 				].join("\n"),
 			},
@@ -450,8 +473,7 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 			done: [],
 			grimoire: grimoireStoreStatus(grimoireDir(process.env)),
 		});
-		writeLoopStateFile(path, result.state);
-		emitEffects(pi, result.state, result.effects);
+		persistAndEmit(pi, path, result);
 		return;
 	}
 	const checkout = checkoutGit(ctx.cwd);
@@ -484,21 +506,18 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 				return;
 			}
 			const result = answerLoopQuestion(answered, { answer: rest, current: gitState });
-			writeLoopStateFile(path, result.state);
-			emitEffects(pi, result.state, result.effects);
+			persistAndEmit(pi, path, result);
 			return;
 		}
 		const state = isStaleAnswer ? rawState : loadMutableState(gitState);
 		const result = answerLoopQuestion(state, { answer: rest, current: gitState });
-		writeLoopStateFile(path, result.state);
-		emitEffects(pi, result.state, result.effects);
+		persistAndEmit(pi, path, result);
 		return;
 	}
 	if (verb === "plan") {
 		if (!rest) throw new Error(LOOP_USAGE);
 		const result = applyLeadPlan(loadMutableState(gitState), rest);
-		writeLoopStateFile(path, result.state);
-		emitEffects(pi, result.state, result.effects);
+		persistAndEmit(pi, path, result);
 		return;
 	}
 	if (verb === "approve") {
@@ -508,14 +527,13 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 			approvedAt: new Date().toISOString(),
 			summary: rest,
 		});
-		writeLoopStateFile(path, result.state);
-		emitEffects(pi, result.state, result.effects);
+		persistAndEmit(pi, path, result);
 		return;
 	}
 	if (verb === "build") {
 		if (rest) throw new Error(LOOP_USAGE);
 		const result = startBuild(loadMutableState(gitState));
-		writeLoopStateFile(path, result.state);
+		persistAndEmit(pi, path, result);
 		pi.sendUserMessage(
 			"LOOPS stage: build\nMaterialize the agreed tests, run red then green checks, and record evidence with loop_record_build.",
 			{ deliverAs: "followUp", streamingBehavior: "followUp" },
@@ -623,10 +641,9 @@ async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<v
 			block(String(error));
 			return;
 		}
-		writeLoopStateFile(path, result.state);
-		emitEffects(pi, result.state, result.effects);
-		if (result.state.stage === "done" || result.state.stage === "blocked") {
-			pi.sendUserMessage(`LOOPS stage: ${result.state.stage}`, {
+		const next = persistAndEmit(pi, path, result);
+		if (next.stage === "done" || next.stage === "blocked" || next.stage === "brief-approved") {
+			pi.sendUserMessage(`LOOPS stage: ${next.stage}`, {
 				deliverAs: "followUp",
 				streamingBehavior: "followUp",
 			});
@@ -684,8 +701,7 @@ async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<v
 		block(String(error));
 		return;
 	}
-	writeLoopStateFile(path, result.state);
-	emitEffects(pi, result.state, result.effects);
+	persistAndEmit(pi, path, result);
 }
 
 function findHelperReport(input: unknown): unknown | undefined {
@@ -800,9 +816,11 @@ export default function sitraLoop(pi: Pi): void {
 		},
 	});
 
-	pi.on("message_end", (event, ctx) => {
+	const handlePossibleSubagentResult = (event: unknown, ctx: Ctx) => {
 		const result = subagentResultFromMessageEnd(event);
 		if (!result) return undefined;
 		return handleSubagentResult(pi, result, ctx);
-	});
+	};
+	pi.on("message_start", handlePossibleSubagentResult as never);
+	pi.on("message_end", handlePossibleSubagentResult as never);
 }

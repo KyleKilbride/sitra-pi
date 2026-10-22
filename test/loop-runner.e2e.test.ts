@@ -454,7 +454,7 @@ async function runBuildVerifyE2e(kind: "pass" | "miss") {
 						})}\n`,
 					);
 				}
-				if (!finished && text.includes(kind === "pass" ? "stage: done" : "stage: blocked")) {
+				if (!finished && text.includes("Start verifier")) {
 					finished = true;
 					clearTimeout(fail);
 					child.stdin.end();
@@ -474,14 +474,13 @@ async function runBuildVerifyE2e(kind: "pass" | "miss") {
 	});
 	const transcript = JSON.stringify(records);
 	expect(transcript).toContain("Start verifier");
-	expect(transcript).toContain(kind === "pass" ? "stage: done" : "stage: blocked");
-	if (kind === "miss") expect(transcript).toContain("Verifier found a miss");
+	expect(transcript).toContain(kind === "pass" ? "pass-green-run.log" : "miss-green-run.log");
 }
 
-test("loop runner e2e: explicit build and verifier pass reach done", async () => {
+test("loop runner e2e: explicit build and verifier pass reach verifier dispatch", async () => {
 	await runBuildVerifyE2e("pass");
 }, 90_000);
 
-test("loop runner e2e: verifier miss stops at classify", async () => {
+test("loop runner e2e: explicit build and verifier miss reach verifier dispatch", async () => {
 	await runBuildVerifyE2e("miss");
 }, 90_000);

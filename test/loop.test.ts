@@ -194,7 +194,7 @@ describe("advisor transition and ordering", () => {
 			}),
 			{ outputTokens: 3, contextTokens: 33 },
 		).state;
-		expect(state.stage).toBe("needs-person");
+		expect(state.stage).toBe("blocked");
 		expect(state.questions).toHaveLength(1);
 		expect(state.questions[0]?.text).toContain("Should the CLI command be /loop start?");
 
@@ -284,7 +284,7 @@ describe("advisor transition and ordering", () => {
 			outputTokens: 2,
 			contextTokens: 0,
 		}).state;
-		expect(state.stage).toBe("needs-person");
+		expect(state.stage).toBe("blocked");
 		expect(state.questions).toHaveLength(1);
 		expect(state.questions[0]?.text).toContain("Should the runner ask before build?");
 		expect(state.questions[0]?.text).toContain("Which command starts the graph?");
@@ -326,7 +326,7 @@ describe("advisor transition and ordering", () => {
 			report("architecture", { status: "blocked", openQuestions: ["Is the private checklist readable?"] }),
 			{ outputTokens: 4, contextTokens: 0 },
 		).state;
-		expect(state.stage).toBe("needs-person");
+		expect(state.stage).toBe("blocked");
 		expect(state.questions).toHaveLength(1);
 	});
 
@@ -340,7 +340,7 @@ describe("advisor transition and ordering", () => {
 			outputTokens: 4,
 			contextTokens: 0,
 		}).state;
-		expect(state.stage).toBe("needs-person");
+		expect(state.stage).toBe("blocked");
 		expect(state.questions[0]?.text).toContain("Checklist unreadable.");
 	});
 
@@ -367,7 +367,7 @@ describe("advisor transition and ordering", () => {
 			{ outputTokens: 1, contextTokens: 0 },
 		).state;
 		state = applyAdvisorReport(state, report("codebase"), { outputTokens: 1, contextTokens: 0 }).state;
-		expect(state.stage).toBe("needs-person");
+		expect(state.stage).toBe("blocked");
 		expect(state.block).toMatchObject({ kind: "questions" });
 		expect(state.questions.at(-1)?.text).toContain("Which repo?");
 		expect(state.questions.at(-1)?.text).toContain("Use the existing profile?");
@@ -492,7 +492,7 @@ describe("stale state and validation", () => {
 			outputTokens: 1,
 			contextTokens: 0,
 		}).state;
-		expect(state.stage).toBe("needs-person");
+		expect(state.stage).toBe("blocked");
 		const answered = answerLoopQuestion(state, {
 			answer: "Yes, keep it in the profile.",
 			current: { ...context, baseHead: "base-b" },
@@ -740,6 +740,7 @@ describe("build and verify slice", () => {
 			{
 				status: "done",
 				role: "verifier",
+				dispatchId: "dispatch",
 				summary: "Verified.",
 				evidence: ["diff"],
 				openQuestions: [],
@@ -763,6 +764,7 @@ describe("build and verify slice", () => {
 			{
 				status: "done",
 				role: "verifier",
+				dispatchId: "dispatch",
 				summary: "Goal missed.",
 				evidence: ["diff"],
 				openQuestions: [],
@@ -778,15 +780,17 @@ describe("build and verify slice", () => {
 			},
 			{ acceptedLogs: [] },
 		).state;
-		expect(missed.stage).toBe("blocked");
-		expect(missed.block).toMatchObject({ kind: "questions", resumeStage: "classify" });
+		expect(missed.stage).toBe("classify");
+		expect(missed.block).toBeUndefined();
 		expect(missed.verification).toMatchObject({ status: "missed", summary: "Goal missed." });
+		expect(missed.rework).toMatchObject([{ class: "execution-slip" }]);
 
 		const blocked = applyVerifierReport(
 			{ ...state, verification: undefined },
 			{
 				status: "blocked",
 				role: "verifier",
+				dispatchId: "dispatch",
 				summary: "Could not inspect evidence.",
 				evidence: [],
 				openQuestions: ["Which log should I trust?"],
@@ -802,6 +806,7 @@ describe("build and verify slice", () => {
 			{ acceptedLogs: [] },
 		).state;
 		expect(blocked.stage).toBe("blocked");
+		expect(blocked.block).toMatchObject({ kind: "intake-failed", resumeStage: "verify" });
 		expect(blocked.verification).toMatchObject({ status: "blocked" });
 	});
 
@@ -810,9 +815,7 @@ describe("build and verify slice", () => {
 		const result = applyVerifierReport(state, verifierMiss("execution-slip"), { acceptedLogs: [] });
 
 		expect(result.state.stage).toBe("classify");
-		expect(result.state.rework).toEqual([
-			{ class: "execution-slip", evidence: ["test/loop.test.ts:12"] },
-		]);
+		expect(result.state.rework).toEqual([{ class: "execution-slip", evidence: ["test/loop.test.ts:12"] }]);
 		expect(result.effects).toMatchObject([
 			{
 				type: "write-grimoire-proposal",
@@ -827,21 +830,19 @@ describe("build and verify slice", () => {
 	});
 
 	test("verifier miss reports must match the recorded dispatch before classification is accepted", () => {
-		const missing = applyVerifierReport(
-			verifiedState("dispatch-a"),
-			{ ...verifierMiss("check-gap", undefined as never), dispatchId: undefined },
-			{ acceptedLogs: [] },
-		);
+		const missingReport = verifierMiss("check-gap");
+		delete missingReport.dispatchId;
+		const missing = applyVerifierReport(verifiedState("dispatch-a"), missingReport, { acceptedLogs: [] });
 		expect(missing.state.stage).toBe("blocked");
-		expect(missing.block).toMatchObject({ kind: "intake-failed", resumeStage: "verify" });
-		expect(missing.questions.at(-1)?.text).toContain("missing dispatchId");
+		expect(missing.state.block).toMatchObject({ kind: "intake-failed", resumeStage: "verify" });
+		expect(missing.state.questions.at(-1)?.text).toContain("missing dispatchId");
 
 		const mismatched = applyVerifierReport(verifiedState("dispatch-a"), verifierMiss("check-gap", "dispatch-b"), {
 			acceptedLogs: [],
 		});
 		expect(mismatched.state.stage).toBe("blocked");
-		expect(mismatched.block).toMatchObject({ kind: "intake-failed", resumeStage: "verify" });
-		expect(mismatched.questions.at(-1)?.text).toContain("did not match");
+		expect(mismatched.state.block).toMatchObject({ kind: "intake-failed", resumeStage: "verify" });
+		expect(mismatched.state.questions.at(-1)?.text).toContain("did not match");
 	});
 
 	test("new information waits for a person answer before drafting the proposal and rework build", () => {
@@ -881,7 +882,10 @@ describe("build and verify slice", () => {
 			{ class: "check-gap", evidence: ["test/loop.test.ts:12"] },
 		]);
 
-		const answered = answerLoopQuestion(blocked.state, { answer: "Rerun intake with this new constraint.", current: context });
+		const answered = answerLoopQuestion(blocked.state, {
+			answer: "Rerun intake with this new constraint.",
+			current: context,
+		});
 		expect(answered.state.stage).toBe("advise");
 		expect(answered.state.build.testHashes).toEqual([]);
 		expect(answered.state.verifierRequest).toBeUndefined();
@@ -904,6 +908,7 @@ describe("build and verify slice", () => {
 			{
 				status: "done",
 				role: "verifier",
+				dispatchId: "dispatch",
 				summary: "Accepted stale log.",
 				evidence: [],
 				openQuestions: [],
@@ -927,6 +932,7 @@ describe("build and verify slice", () => {
 			{
 				status: "done",
 				role: "verifier",
+				dispatchId: "dispatch",
 				summary: "Verified.",
 				evidence: [],
 				openQuestions: [],
