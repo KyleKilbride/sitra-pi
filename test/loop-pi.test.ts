@@ -1180,6 +1180,53 @@ describe("Pi wiring", () => {
 		expect(resumed.dispatchedAdvisors).toEqual(["intent", "codebase"]);
 	});
 
+	test("/loop answer on a git failure preserves a pending advisor question", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands } = fakePi();
+		const { cwd } = gitWorktree({ originHead: false });
+		await commands.get("loop")?.handler("start --base origin/main Add the runner", ctx(cwd));
+		const path = loopStatePath(profile, cwd, "feature");
+		const state = readLoopStateFile(path);
+		writeLoopStateFile(path, {
+			...state,
+			stage: "needs-person",
+			baseRef: "missing-ref",
+			block: {
+				kind: "questions",
+				questionId: "advisor-questions-test",
+				resumeStage: "advise",
+				pendingAdvisors: ["intent"],
+			},
+			questions: [
+				{
+					id: "advisor-questions-test",
+					text: "Which repo should the advisor inspect?",
+					recommended: "Use the current repo.",
+					dependsOn: [],
+				},
+			],
+			dispatchedAdvisors: [],
+		});
+		await commands.get("loop")?.handler("answer fixed git", ctx(cwd));
+
+		let blocked = readLoopStateFile(path);
+		expect(blocked.stage).toBe("blocked");
+		expect(blocked.block).toMatchObject({ kind: "git" });
+		expect(blocked.deferredBlock).toMatchObject({ kind: "questions", questionId: "advisor-questions-test" });
+		expect(blocked.questions.find((question) => question.id === "advisor-questions-test")?.answer).toBeUndefined();
+
+		const fixed = readLoopStateFile(path);
+		writeLoopStateFile(path, { ...fixed, baseRef: "origin/main" });
+		await commands.get("loop")?.handler("answer git fixed now", ctx(cwd));
+
+		blocked = readLoopStateFile(path);
+		expect(blocked.stage).toBe("blocked");
+		expect(blocked.block).toMatchObject({ kind: "questions", questionId: "advisor-questions-test" });
+		expect(blocked.questions.find((question) => question.id === "advisor-questions-test")?.answer).toBeUndefined();
+		expect(blocked.questions.find((question) => question.id === "git-state")?.answer).toBe("git fixed now");
+	});
+
 	test("/loop answer on a stale checkout preserves a pending new-information decision", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
@@ -1430,7 +1477,7 @@ describe("Pi wiring", () => {
 		).rejects.toThrow(/not an agreed loop acceptance command/);
 	});
 
-	test("loop_run_evidence refuses an agreed command ending in a shell comment with a clear reason", async () => {
+	test("loop_run_evidence runs an agreed command ending in a shell comment", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
 		const { commands, tools } = fakePi();
@@ -1441,11 +1488,32 @@ describe("Pi wiring", () => {
 		const redCommit = commitAll(cwd, "add tests alone");
 		await commands.get("loop")?.handler("build", ctx(cwd));
 
-		await expect(
-			tools
-				.get("loop_run_evidence")
-				?.execute("red", { phase: "red", commit: redCommit, command: agreed }, undefined, undefined, ctx(cwd)),
-		).rejects.toThrow(/shell comments are not supported/);
+		const red = await tools
+			.get("loop_run_evidence")
+			?.execute("red", { phase: "red", commit: redCommit, command: agreed }, undefined, undefined, ctx(cwd));
+
+		expect(red?.content[0]?.text).toContain("exit: 1");
+		const details = red?.details as { runId: string };
+		const state = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		expect(state.build.evidence?.map((item) => item.runId)).toContain(details.runId);
+	});
+
+	test("loop_run_evidence runs an agreed command with a quoted hash", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		const agreed = 'grep -q "#" loop.test.ts';
+		approvedLoop(profile, cwd, agreed);
+		writeFileSync(join(cwd, "loop.test.ts"), "# hash literal\n");
+		const commit = commitAll(cwd, "add hash test");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+
+		const green = await tools
+			.get("loop_run_evidence")
+			?.execute("green", { phase: "green", commit, command: agreed }, undefined, undefined, ctx(cwd));
+
+		expect(green?.content[0]?.text).toContain("exit: 0");
 	});
 
 	test("loop_record_build accepts only runner-recorded evidence ids and matching log hashes", async () => {
@@ -2001,7 +2069,7 @@ describe("Pi wiring", () => {
 
 		expect(blocked?.content[0]?.text).toContain("reason: red commit changes non-acceptance files: impl.ts");
 		expect(blocked?.content[0]?.text).toContain(
-			"satisfy: Split the red commit so its diff from base touches only: loop.test.ts.",
+			"satisfy: Split the red commit so its own diff from its parent touches only: loop.test.ts.",
 		);
 	});
 

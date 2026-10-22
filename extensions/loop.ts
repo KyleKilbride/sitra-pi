@@ -604,7 +604,10 @@ function withBlock(
 	},
 ): { state: LoopState; effects: LoopEffect[] } {
 	if (state.block) {
-		if ((input.kind === "stale" || input.kind === "git") && isDecisionBlockKind(state.block.kind)) {
+		if (
+			((input.kind === "stale" || input.kind === "git") && isDecisionBlockKind(state.block.kind)) ||
+			(input.kind === "git" && state.block.kind === "questions")
+		) {
 			const blocked: LoopState = {
 				...state,
 				stage: "blocked",

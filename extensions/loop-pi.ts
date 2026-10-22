@@ -255,7 +255,7 @@ function testsOnlyAncestorProblem(
 	testHashes: LoopTestHash[],
 	redCommit: string,
 ): { reason: string; satisfy: string } | undefined {
-	const satisfy = `Split the red commit so its diff from base touches only: ${testFiles.join(", ")}.`;
+	const satisfy = `Split the red commit so its own diff from its parent touches only: ${testFiles.join(", ")}.`;
 	try {
 		execFileSync("git", ["merge-base", "--is-ancestor", redCommit, "HEAD"], { cwd, stdio: "ignore" });
 	} catch {
@@ -447,9 +447,6 @@ async function runEvidenceInWorktree(input: {
 	if (commands.length === 0) throw new Error("frozen brief has no agreed acceptance commands");
 	if (!commands.includes(input.command)) {
 		throw new Error(`command is not an agreed loop acceptance command: ${input.command}`);
-	}
-	if (input.command.includes("#")) {
-		throw new Error("agreed loop acceptance command contains a shell comment; shell comments are not supported");
 	}
 	mkdirSync(runsDir(), { recursive: true });
 	const id = runId(`loop-${input.phase}-evidence`);
