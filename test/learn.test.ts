@@ -222,6 +222,91 @@ describe("did a pause help", () => {
 });
 
 describe("capturing moments in Pi, Claude Code and Codex", () => {
+	test("Pi ignores extension-source dispatches when recording moments", async () => {
+		const { default: sitraKnowledge } = await import("../extensions/knowledge.ts");
+		const dir = tmp();
+		const session = join(dir, "session.jsonl");
+		writeFileSync(
+			session,
+			jsonl([
+				{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Waiting." }] } },
+			]),
+		);
+		const saved = { ...process.env };
+		Object.assign(process.env, { SITRA_GRIMOIRE: dir, SITRA_LEARN_SPAWN: "0" });
+		delete process.env.PI_SUBAGENT_NAME;
+		delete process.env.SITRA_GRIMOIRE_LEARN;
+		try {
+			const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+			sitraKnowledge({
+				on: (n: string, h: (event: unknown, ctx: unknown) => unknown) => handlers.set(n, h),
+				registerTool() {},
+				registerCommand() {},
+				sendUserMessage() {},
+			} as never);
+			const ctx = {
+				cwd: "/work/app",
+				hasUI: false,
+				ui: { setStatus() {}, notify() {} },
+				sessionManager: { getSessionFile: () => session, getSessionId: () => "s1" },
+			};
+			const dispatch = [
+				"LOOPS runner dispatch for stage advise:",
+				'Goal: "Understand what changes in PR 3"',
+			].join("\n");
+			handlers.get("input")?.({ type: "input", source: "extension", text: dispatch }, ctx);
+			handlers.get("before_agent_start")?.(
+				{ systemPromptOptions: { sections: {} }, messageType: "user", prompt: dispatch },
+				ctx,
+			);
+			const moments = join(dir, ".sitra", "moments");
+			expect(existsSync(moments) ? (await import("node:fs")).readdirSync(moments) : []).toHaveLength(0);
+		} finally {
+			for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+			Object.assign(process.env, saved);
+		}
+	});
+
+	test("Pi records exactly one moment for one interactive input", async () => {
+		const { default: sitraKnowledge } = await import("../extensions/knowledge.ts");
+		const dir = tmp();
+		const session = join(dir, "session.jsonl");
+		writeFileSync(
+			session,
+			jsonl([
+				{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "I opened the PR." }] } },
+			]),
+		);
+		const saved = { ...process.env };
+		Object.assign(process.env, { SITRA_GRIMOIRE: dir, SITRA_LEARN_SPAWN: "0" });
+		delete process.env.PI_SUBAGENT_NAME;
+		delete process.env.SITRA_GRIMOIRE_LEARN;
+		try {
+			const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+			sitraKnowledge({
+				on: (n: string, h: (event: unknown, ctx: unknown) => unknown) => handlers.set(n, h),
+				registerTool() {},
+				registerCommand() {},
+				sendUserMessage() {},
+			} as never);
+			const ctx = {
+				cwd: "/work/app",
+				hasUI: false,
+				ui: { setStatus() {}, notify() {} },
+				sessionManager: { getSessionFile: () => session, getSessionId: () => "s1" },
+			};
+			handlers.get("input")?.({ type: "input", source: "interactive", text: "I said open it as a draft" }, ctx);
+			const moments = join(dir, ".sitra", "moments");
+			const files = (await import("node:fs")).readdirSync(moments);
+			expect(files).toHaveLength(1);
+			const m = JSON.parse(readFileSync(join(moments, files[0] ?? ""), "utf8"));
+			expect(m).toMatchObject({ harness: "pi", message: "I said open it as a draft", agentReply: "I opened the PR." });
+		} finally {
+			for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+			Object.assign(process.env, saved);
+		}
+	});
+
 	test("Pi records a moment for each message the person sends (not for helpers or system-started turns), and records pause outcomes", async () => {
 		const { default: sitraKnowledge } = await import("../extensions/knowledge.ts");
 		const dir = tmp();
@@ -263,6 +348,7 @@ describe("capturing moments in Pi, Claude Code and Codex", () => {
 			};
 			const start = (event: object) =>
 				handlers.get("before_agent_start")?.({ systemPromptOptions: { sections: {} }, ...event }, ctx);
+			handlers.get("input")?.({ type: "input", source: "interactive", text: "I said open it as a draft" }, ctx);
 			start({ messageType: "user", prompt: "I said open it as a draft" });
 			start({ messageType: "custom", message: {} });
 			const moments = join(dir, ".sitra", "moments");

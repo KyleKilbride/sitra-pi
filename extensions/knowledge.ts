@@ -58,6 +58,7 @@ interface ToolResult {
 }
 
 interface Pi {
+	on(event: "input", handler: (event: { source: string; text: string }, ctx: Ctx) => void): void;
 	on(event: "session_start", handler: (event: unknown, ctx: Ctx) => void): void;
 	on(event: "tool_call", handler: (event: ToolCall, ctx: Ctx) => { block: true; reason: string } | undefined): void;
 	on(
@@ -349,10 +350,9 @@ export default function sitraKnowledge(pi: Pi): void {
 		status(ctx);
 	});
 
-	pi.on("before_agent_start", (event, ctx) => {
+	pi.on("input", (event, ctx) => {
 		// Nothing here may stop a turn: each step fails on its own.
-		const e = event as { messageType?: string; prompt?: string };
-		const person = !process.env.PI_SUBAGENT_NAME && e.messageType === "user" && typeof e.prompt === "string";
+		const person = !process.env.PI_SUBAGENT_NAME && event.source === "interactive" && typeof event.text === "string";
 		if (person && learningOn(process.env)) {
 			// Every message the person sends is a moment Grimoire may learn from; a detached learner decides it.
 			try {
@@ -360,7 +360,7 @@ export default function sitraKnowledge(pi: Pi): void {
 				captureMoment(dir(), process.env, {
 					harness: "pi",
 					cwd: ctx?.cwd ?? process.cwd(),
-					message: e.prompt as string,
+					message: event.text,
 					transcript: file ? readLastLines(file, 400, { maxBytes: 1_000_000 }) : "",
 				});
 			} catch {
@@ -375,6 +375,10 @@ export default function sitraKnowledge(pi: Pi): void {
 				// A status line is never worth a failed turn.
 			}
 		}
+	});
+
+	pi.on("before_agent_start", (event, ctx) => {
+		// Nothing here may stop a turn: each step fails on its own.
 		// A resumed conversation restores the tool list it was saved with, so one saved before Grimoire never sees
 		// these tools. Helpers keep the list their agent definition chose.
 		try {

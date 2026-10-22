@@ -123,10 +123,11 @@ cached prompt prefix survives from turn to turn.
 
 ## Learning from corrections
 
-Nobody has to remember to reflect. Every message the person sends is recorded as a moment: their words, the agent's
-last reply and its last 12 tool calls (Pi through the extension; Claude Code and Codex through a `UserPromptSubmit`
-hook that `sitra grimoire install` adds). Recording takes a few milliseconds (2.5 ms median, 11 ms worst, on a
-97 MB transcript). A detached `sitra grimoire learn` then does the rest in the background:
+Nobody has to remember to reflect. Every message the person types into Pi's interactive input is recorded as a moment,
+including text typed while the agent is busy; extension and RPC input is ignored. Claude Code and Codex use the
+`UserPromptSubmit` hook that `sitra grimoire install` adds. Each moment keeps the person's words, the agent's last
+reply and its last 12 tool calls. Recording takes a few milliseconds (2.5 ms median, 11 ms worst, on a 97 MB
+transcript). A detached `sitra grimoire learn` then does the rest in the background:
 
 1. asks a model whether the message corrects the agent (only a bare YES counts);
 2. if it does, drafts the missing rule from the person's own words, with a `when` trigger when the mistake happened at
@@ -145,6 +146,8 @@ their own `grimoire_propose` calls.
   rule for, which means the rule didn't reach the agent in time. `/grimoire` walks through repeats after proposals:
   dismiss one, or ask the agent how to make that rule land (a trigger, sharper wording, or the root).
 - **Off switch:** `"learn": false` in `~/.sitra/config.json` (or `SITRA_GRIMOIRE_LEARN=0`).
+- **Known gap:** the tower's first message to a spawned worker is still delivered to that worker as interactive input,
+  so it can still be recorded as if the person typed it.
 - **Privacy:** moments stay in `<grimoire>/.sitra/moments/`. A message judged not to be a correction keeps only its
   verdict. To decide and draft, the learner sends the message, the agent's last reply and (for corrections) its recent
   tool calls to the configured model, the same provider the person's agents already use.
