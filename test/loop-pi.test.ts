@@ -318,7 +318,7 @@ describe("loop state files", () => {
 
 describe("Pi wiring", () => {
 	const usage =
-		/usage: \/loop start \[--base <ref>\] <task> \| \/loop answer <answer> \| \/loop plan <plan> \| \/loop approve <summary> \| \/loop build \| \/loop record-build <json> \| \/loop resume \| \/loop abandon \[reason\] \| \/loop status/;
+		/usage: \/loop start \[--base <ref>\] <task> \| \/loop answer <answer> \| \/loop plan <plan> \| \/loop approve <summary> \| \/loop build \| \/loop record-build <json> \| \/loop resume \| \/loop abandon \[reason\] \| \/loop confirm-new-info \| \/loop deny-new-info \[reason\] \| \/loop status/;
 
 	test("/loop start is explicit, writes state, and asks for the first advisors", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
@@ -830,7 +830,7 @@ describe("Pi wiring", () => {
 			ctx(cwd),
 		);
 		const path = loopStatePath(profile, cwd, "feature");
-		expect(readLoopStateFile(path).stage).toBe("blocked");
+		expect(readLoopStateFile(path).stage).toBe("needs-person");
 		moveBase(cwd);
 		await commands.get("loop")?.handler("answer A1", ctx(cwd));
 		const stale = readLoopStateFile(path);

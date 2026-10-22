@@ -126,6 +126,8 @@ const Block = Type.Object(
 			Type.Literal("questions"),
 			Type.Literal("git"),
 			Type.Literal("new-information"),
+			Type.Literal("new-information-denied"),
+			Type.Literal("rework-learning"),
 			Type.Literal("same-rework-class"),
 			Type.Literal("second-rework"),
 		]),
@@ -230,7 +232,7 @@ export interface LoopProposal {
 
 export type AbandonedLoopState = LoopState & {
 	abandonedAt: string;
-	abandonReason: string;
+	abandonReason?: string;
 };
 
 export interface AdvisorDispatch {
@@ -244,7 +246,7 @@ export type LoopEffect =
 	| { type: "write-lead-plan"; brief: LoopBrief }
 	| { type: "brief-approved"; brief: LoopBrief }
 	| { type: "dispatch-verifier"; agent: "verifier"; task: string }
-	| { type: "write-grimoire-proposal"; reworkIndex: number; proposal: LoopProposal };
+	| { type: "write-grimoire-proposal"; reworkIndex: number };
 
 export function advisorKey(role: AdvisorRole | HelperReportRole): AdvisorKey {
 	if (role === "test-design") return "testDesign";
@@ -398,22 +400,32 @@ function tokenText(tokens: number): string {
 	return tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : String(tokens);
 }
 
-export function loopMetricsLine(state: LoopState | AbandonedLoopState): string {
-	const abandoned = "abandonedAt" in state;
-	const firstPass = !abandoned && state.stage === "done" && state.rework.length === 0 ? 1 : 0;
-	const context = state.rework.filter(
-		(entry) => entry.class === "context-missed" || entry.class === "context-missing",
+export function loopMetricsLine(
+	input: LoopState | AbandonedLoopState | readonly (LoopState | AbandonedLoopState)[],
+): string {
+	const states = Array.isArray(input) ? input : [input];
+	const firstPass = states.filter(
+		(state) => !("abandonedAt" in state) && state.stage === "done" && state.rework.length === 0,
 	).length;
-	const intent = state.rework.filter((entry) => entry.class === "wrong-intent").length;
-	const check = state.rework.filter((entry) => entry.class === "check-gap").length;
-	return `loops: first-pass ${firstPass}/1 · rounds ${state.rework.length + 1} · avoidable rework context ${context} intent ${intent} check ${check} · tokens ${tokenText(recordedTokens(state))}`;
+	const context = states
+		.flatMap((state) => state.rework)
+		.filter((entry) => entry.class === "context-missed" || entry.class === "context-missing").length;
+	const intent = states.flatMap((state) => state.rework).filter((entry) => entry.class === "wrong-intent").length;
+	const check = states.flatMap((state) => state.rework).filter((entry) => entry.class === "check-gap").length;
+	const rounds = states.reduce((sum, state) => sum + state.rework.length + 1, 0);
+	const tokens = states.reduce((sum, state) => sum + recordedTokens(state), 0);
+	return `loops: first-pass ${firstPass}/${states.length} · rounds ${rounds} · avoidable rework context ${context} intent ${intent} check ${check} · tokens ${tokenText(tokens)}`;
 }
 
 export function abandonLoop(
 	state: LoopState,
 	input: { abandonedAt: string; abandonReason: string },
 ): AbandonedLoopState {
-	return { ...state, abandonedAt: input.abandonedAt, abandonReason: input.abandonReason };
+	return {
+		...state,
+		abandonedAt: input.abandonedAt,
+		...(input.abandonReason ? { abandonReason: input.abandonReason } : {}),
+	};
 }
 
 function groupedQuestion(id: string, reason: string, questions: LoopQuestion[]): LoopQuestion {
@@ -472,9 +484,10 @@ function withBlock(
 	if (resumeStage === "blocked" || resumeStage === "needs-person") {
 		throw new Error(`invalid block resumeStage ${resumeStage}`);
 	}
+	const postApprovalBlock = resumeStage === "build" || resumeStage === "verify" || resumeStage === "classify";
 	const blocked: LoopState = {
 		...state,
-		stage: "blocked",
+		stage: input.kind === "questions" && !postApprovalBlock ? "needs-person" : "blocked",
 		block: {
 			kind: input.kind,
 			questionId: input.question.id,
@@ -622,11 +635,12 @@ function pendingProposalIndex(state: LoopState): number | undefined {
 	return index >= 0 ? index : undefined;
 }
 
-export function reworkProposal(state: LoopState, reworkIndex: number, date = new Date().toISOString()): LoopProposal {
+export function reworkProposal(state: LoopState, reworkIndex: number, date: string): LoopProposal {
 	const entry = state.rework[reworkIndex];
 	if (!entry) throw new Error(`rework entry ${reworkIndex} does not exist`);
 	const evidence = entry.evidence.length ? entry.evidence.join("\n") : undefined;
-	const summary = state.verification?.summary ?? "Verifier reported a miss.";
+	if (!state.verification) throw new Error("cannot draft a rework proposal without recorded verification");
+	const summary = state.verification.summary;
 	return {
 		kind: "lesson",
 		title: `LOOPS rework: ${entry.class}`,
@@ -648,8 +662,8 @@ export function reworkProposal(state: LoopState, reworkIndex: number, date = new
 	};
 }
 
-function proposalEffect(state: LoopState, reworkIndex: number): LoopEffect {
-	return { type: "write-grimoire-proposal", reworkIndex, proposal: reworkProposal(state, reworkIndex) };
+function proposalEffect(reworkIndex: number): LoopEffect {
+	return { type: "write-grimoire-proposal", reworkIndex };
 }
 
 export function nextLoopEffects(state: LoopState): LoopEffect[] {
@@ -661,7 +675,7 @@ export function nextLoopEffects(state: LoopState): LoopEffect[] {
 		return [{ type: "dispatch-verifier", agent: "verifier", task: state.verifierRequest.task }];
 	if (state.stage === "classify") {
 		const index = pendingProposalIndex(state);
-		return index === undefined ? [] : [proposalEffect(state, index)];
+		return index === undefined ? [] : [proposalEffect(index)];
 	}
 	return [];
 }
@@ -681,6 +695,35 @@ export function resumeLoop(state: LoopState): { state: LoopState; effects: LoopE
 		return dispatch(state, ["architecture"]);
 	}
 	return { state, effects: nextLoopEffects(state) };
+}
+
+export function confirmNewInformation(state: LoopState): { state: LoopState; effects: LoopEffect[] } {
+	if (state.stage !== "blocked" || state.block?.kind !== "new-information") {
+		throw new Error(`cannot confirm new information while stage is ${state.stage}`);
+	}
+	const next: LoopState = { ...state, stage: "classify", block: undefined, dispatchedAdvisors: [] };
+	return { state: next, effects: nextLoopEffects(next) };
+}
+
+export function denyNewInformation(state: LoopState, reason: string): { state: LoopState; effects: LoopEffect[] } {
+	if (state.stage !== "blocked" || state.block?.kind !== "new-information") {
+		throw new Error(`cannot deny new information while stage is ${state.stage}`);
+	}
+	const question = state.questions.find((item) => item.id === state.block?.questionId);
+	const questions = state.questions.map((item) =>
+		item.id === state.block?.questionId ? { ...item, answer: reason } : item,
+	);
+	const denied: LoopState = {
+		...state,
+		stage: "blocked",
+		block: { ...state.block, kind: "new-information-denied" },
+		questions,
+		dispatchedAdvisors: [],
+	};
+	return {
+		state: denied,
+		effects: question ? [{ type: "ask-person", reason: "new-information-denied", question }] : [],
+	};
 }
 
 export function applyAdvisorReport(
@@ -763,16 +806,9 @@ export function answerLoopQuestion(
 			: { state: next, effects: nextLoopEffects(next) };
 	}
 	if (state.block.kind === "new-information") {
-		const next: LoopState = {
-			...state,
-			stage: state.block.resumeStage,
-			block: undefined,
-			questions: answered,
-			dispatchedAdvisors: [],
-		};
-		return { state: next, effects: nextLoopEffects(next) };
+		return { state: { ...state, questions: answered }, effects: nextLoopEffects(state) };
 	}
-	if (state.block.kind === "same-rework-class" || state.block.kind === "second-rework") {
+	if (state.block.kind === "rework-learning") {
 		const next: LoopState = {
 			...state,
 			stage: state.block.resumeStage,
@@ -782,9 +818,27 @@ export function answerLoopQuestion(
 			verifierRequest: undefined,
 			dispatchedAdvisors: [],
 		};
-		return state.block.pendingAdvisors.length
-			? dispatch(next, state.block.pendingAdvisors)
-			: { state: next, effects: nextLoopEffects(next) };
+		return { state: next, effects: nextLoopEffects(next) };
+	}
+	if (state.block.kind === "same-rework-class" || state.block.kind === "second-rework") {
+		const roles = state.block.pendingAdvisors;
+		const advisorRuns = { ...state.advisorRuns };
+		for (const role of roles) delete advisorRuns[advisorKey(role)];
+		const next: LoopState = {
+			...state,
+			stage: state.block.resumeStage,
+			block: undefined,
+			questions: answered,
+			advisorRuns,
+			plan: undefined,
+			approval: undefined,
+			frozenBrief: undefined,
+			frozenBriefHash: undefined,
+			build: { testFiles: [], testHashes: [] },
+			verifierRequest: undefined,
+			dispatchedAdvisors: [],
+		};
+		return roles.length ? dispatch(next, roles) : { state: next, effects: nextLoopEffects(next) };
 	}
 	const roles = state.block.kind === "questions" ? state.block.pendingAdvisors : affectedAdvisors(state);
 	if (state.block.kind === "questions" && state.block.resumeStage === "classify") {
@@ -880,11 +934,19 @@ export function recordReworkProposal(
 	);
 	const recorded: LoopState = { ...state, rework };
 	if (recorded.block?.kind === "same-rework-class" || recorded.block?.kind === "second-rework") {
-		const question = recorded.questions.find((item) => item.id === recorded.block?.questionId);
-		return {
-			state: recorded,
-			effects: question ? [{ type: "ask-person", reason: recorded.block.kind, question }] : [],
-		};
+		return { state: recorded, effects: [] };
+	}
+	if (!recorded.block) {
+		return withBlock(recorded, {
+			kind: "rework-learning",
+			resumeStage: "brief-approved",
+			question: {
+				id: "rework-learning",
+				text: "The verifier found a miss and a Grimoire proposal was drafted. What specific learning or new information justifies one more build?",
+				recommended: "Answer with the concrete learning before starting the one allowed rework build.",
+				dependsOn: [],
+			},
+		});
 	}
 	const next: LoopState = {
 		...recorded,
@@ -1126,7 +1188,7 @@ function classifiedMiss(
 		const blocked = withBlock(classified, {
 			kind: "same-rework-class",
 			resumeStage: "advise",
-			pendingAdvisors: ["intent", "codebase"],
+			pendingAdvisors: ["intent", "codebase", "test-design"],
 			question: {
 				id: "same-rework-class",
 				text: `The verifier reported ${missClass} again in this task. What should change before the loop continues?`,
@@ -1134,13 +1196,13 @@ function classifiedMiss(
 				dependsOn: [],
 			},
 		});
-		return { state: blocked.state, effects: [proposalEffect(blocked.state, reworkIndex), ...blocked.effects] };
+		return { state: blocked.state, effects: [proposalEffect(reworkIndex), ...blocked.effects] };
 	}
 	if (state.rework.length > 0) {
 		const blocked = withBlock(classified, {
 			kind: "second-rework",
 			resumeStage: "advise",
-			pendingAdvisors: ["intent", "codebase"],
+			pendingAdvisors: ["intent", "codebase", "test-design"],
 			question: {
 				id: "second-rework",
 				text: `The verifier found another miss after one rework build (${missClass}). What new constraint or learning should restart intake?`,
@@ -1149,7 +1211,7 @@ function classifiedMiss(
 				dependsOn: [],
 			},
 		});
-		return { state: blocked.state, effects: [proposalEffect(blocked.state, reworkIndex), ...blocked.effects] };
+		return { state: blocked.state, effects: [proposalEffect(reworkIndex), ...blocked.effects] };
 	}
 	if (missClass === "new-information") {
 		return withBlock(classified, {
@@ -1163,7 +1225,7 @@ function classifiedMiss(
 			},
 		});
 	}
-	return { state: classified, effects: [proposalEffect(classified, reworkIndex)] };
+	return { state: classified, effects: [proposalEffect(reworkIndex)] };
 }
 
 function verifierBlocked(state: LoopState, report: HelperReport): { state: LoopState; effects: LoopEffect[] } {

@@ -20,6 +20,8 @@ import {
 	blockForGitFailure,
 	blockForStaleState,
 	blockForVerifierIntakeFailure,
+	confirmNewInformation,
+	denyNewInformation,
 	diffHash,
 	type LoopEffect,
 	type LoopState,
@@ -30,6 +32,7 @@ import {
 	recordReworkProposal,
 	replaceBlockWithStale,
 	resumeLoop,
+	reworkProposal,
 	roleForAgent,
 	staleReason,
 	staleReasonText,
@@ -38,9 +41,21 @@ import {
 	tokensFromSubagentResult,
 } from "./loop.ts";
 
-export { abandonLoopStateFile, loopStatePath, readLoopStateFile, writeLoopStateFile } from "./loop-state.ts";
+export {
+	abandonLoopStateFile,
+	loopStatePath,
+	readLoopMetricStateFiles,
+	readLoopStateFile,
+	writeLoopStateFile,
+} from "./loop-state.ts";
 
-import { abandonLoopStateFile, loopStatePath, readLoopStateFile, writeLoopStateFile } from "./loop-state.ts";
+import {
+	abandonLoopStateFile,
+	loopStatePath,
+	readLoopMetricStateFiles,
+	readLoopStateFile,
+	writeLoopStateFile,
+} from "./loop-state.ts";
 import { hashFiles, readRun, readRunHeader } from "./runs.ts";
 
 interface Ctx {
@@ -57,7 +72,7 @@ interface ToolResult {
 }
 
 const LOOP_USAGE =
-	"usage: /loop start [--base <ref>] <task> | /loop answer <answer> | /loop plan <plan> | /loop approve <summary> | /loop build | /loop record-build <json> | /loop resume | /loop abandon [reason] | /loop status";
+	"usage: /loop start [--base <ref>] <task> | /loop answer <answer> | /loop plan <plan> | /loop approve <summary> | /loop build | /loop record-build <json> | /loop resume | /loop abandon [reason] | /loop confirm-new-info | /loop deny-new-info [reason] | /loop status";
 const LOOP_VERBS = [
 	"start",
 	"answer",
@@ -67,6 +82,8 @@ const LOOP_VERBS = [
 	"record-build",
 	"resume",
 	"abandon",
+	"confirm-new-info",
+	"deny-new-info",
 	"status",
 ] as const;
 type LoopVerb = (typeof LOOP_VERBS)[number];
@@ -366,7 +383,10 @@ function materializeEffects(state: LoopState, effects: LoopEffect[]): { state: L
 			rendered.push(effect);
 			continue;
 		}
-		const proposalPath = writeProposal(grimoireDir(process.env), effect.proposal);
+		const proposalPath = writeProposal(
+			grimoireDir(process.env),
+			reworkProposal(current, effect.reworkIndex, new Date().toISOString()),
+		);
 		const recorded = recordReworkProposal(current, { reworkIndex: effect.reworkIndex, proposalPath });
 		current = recorded.state;
 		rendered.push(...recorded.effects);
@@ -414,7 +434,7 @@ function loopStatus(cwd: string, state: LoopState): ToolResult {
 				text: [
 					`stage: ${state.stage}`,
 					`goal: ${state.goal}`,
-					loopMetricsLine(state),
+					loopMetricsLine(readLoopMetricStateFiles(profileDir())),
 					...(stale ? [`stale: ${stale.kind === "test-hashes" ? "test hashes" : staleReasonText(stale)}`] : []),
 				].join("\n"),
 			},
@@ -518,6 +538,15 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 			return;
 		}
 		persistAndEmit(pi, path, resumeLoop(currentState));
+		return;
+	}
+	if (verb === "confirm-new-info") {
+		if (rest) throw new Error(LOOP_USAGE);
+		persistAndEmit(pi, path, confirmNewInformation(loadMutableState(gitState)));
+		return;
+	}
+	if (verb === "deny-new-info") {
+		persistAndEmit(pi, path, denyNewInformation(loadMutableState(gitState), rest));
 		return;
 	}
 	if (verb === "answer") {
@@ -669,7 +698,13 @@ async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<v
 			block(String(error));
 			return;
 		}
-		const next = persistAndEmit(pi, path, result);
+		let next: LoopState;
+		try {
+			next = persistAndEmit(pi, path, result);
+		} catch (error) {
+			block(`could not write Grimoire proposal: ${String(error)}`);
+			return;
+		}
 		if (next.stage === "done" || next.stage === "blocked" || next.stage === "brief-approved") {
 			pi.sendUserMessage(`LOOPS stage: ${next.stage}`, {
 				deliverAs: "followUp",
@@ -849,6 +884,5 @@ export default function sitraLoop(pi: Pi): void {
 		if (!result) return undefined;
 		return handleSubagentResult(pi, result, ctx);
 	};
-	pi.on("message_start", handlePossibleSubagentResult as never);
 	pi.on("message_end", handlePossibleSubagentResult as never);
 }

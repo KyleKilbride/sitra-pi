@@ -11,7 +11,9 @@ import {
 	blockForStaleState,
 	briefHash,
 	buildBrief,
+	confirmNewInformation,
 	createLoopState,
+	denyNewInformation,
 	nextLoopEffects,
 	recordBuildEvidence,
 	reworkProposal,
@@ -821,11 +823,6 @@ describe("build and verify slice", () => {
 			{
 				type: "write-grimoire-proposal",
 				reworkIndex: 0,
-				proposal: {
-					kind: "lesson",
-					proposedBy: "sitra-loops",
-					tags: ["loops", "rework", "execution-slip"],
-				},
 			},
 		]);
 	});
@@ -854,23 +851,28 @@ describe("build and verify slice", () => {
 		expect(classified.state.rework).toEqual([{ class: "new-information", evidence: ["test/loop.test.ts:12"] }]);
 		expect(classified.effects).toMatchObject([{ type: "ask-person", reason: "new-information" }]);
 
-		const answered = answerLoopQuestion(classified.state, {
-			answer: "This is real new information from the product owner.",
-			current: context,
-		});
+		const denied = denyNewInformation(classified.state, "not actually new");
+		expect(denied.state.stage).toBe("blocked");
+		expect(denied.state.block).toMatchObject({ kind: "new-information-denied" });
+		expect(denied.effects).toMatchObject([{ type: "ask-person", reason: "new-information-denied" }]);
+
+		const answered = confirmNewInformation(classified.state);
 		expect(answered.state.stage).toBe("classify");
 		expect(answered.state.block).toBeUndefined();
 		expect(answered.effects).toMatchObject([
 			{
 				type: "write-grimoire-proposal",
 				reworkIndex: 0,
-				proposal: { tags: ["loops", "rework", "new-information"] },
 			},
 		]);
 	});
 
 	test("rework proposals require recorded verification summary", () => {
-		const state = { ...verifiedState(), verification: undefined, rework: [{ class: "check-gap" as const, evidence: [] }] };
+		const state = {
+			...verifiedState(),
+			verification: undefined,
+			rework: [{ class: "check-gap" as const, evidence: [] }],
+		};
 		expect(() => reworkProposal(state, 0, "2026-10-22T00:00:00.000Z")).toThrow(/verification/);
 	});
 
@@ -897,7 +899,9 @@ describe("build and verify slice", () => {
 		expect(answered.state.frozenBriefHash).toBeUndefined();
 		expect(answered.state.build.testHashes).toEqual([]);
 		expect(answered.state.verifierRequest).toBeUndefined();
-		expect(answered.effects).toMatchObject([{ type: "dispatch-advisors", roles: ["intent", "codebase", "test-design"] }]);
+		expect(answered.effects).toMatchObject([
+			{ type: "dispatch-advisors", roles: ["intent", "codebase", "test-design"] },
+		]);
 	});
 
 	test("rejects verifier reports that accept logs not tied to the exact commit and test hashes", () => {

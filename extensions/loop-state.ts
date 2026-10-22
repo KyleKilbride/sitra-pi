@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import type { LoopState } from "./loop.ts";
+import type { AbandonedLoopState, LoopState } from "./loop.ts";
 import { abandonLoop, validateLoopState } from "./loop.ts";
 
 export function loopStatePath(profile: string, worktree: string, branch: string): string {
@@ -42,4 +42,24 @@ export function abandonLoopStateFile(path: string, state: LoopState, reason: str
 	writeFileSync(target, `${JSON.stringify(abandonLoop(state, { abandonedAt, abandonReason: reason }), null, "\t")}\n`);
 	unlinkSync(path);
 	return target;
+}
+
+export function readLoopMetricStateFiles(profile: string): (LoopState | AbandonedLoopState)[] {
+	const dir = join(profile, "loops");
+	if (!existsSync(dir)) return [];
+	const readJson = (path: string): unknown => JSON.parse(readFileSync(path, "utf8"));
+	const active = readdirSync(dir)
+		.filter((file) => file.endsWith(".json"))
+		.flatMap((file) => {
+			const parsed = readJson(join(dir, file));
+			const valid = validateLoopState(parsed);
+			return valid.ok ? [valid.state] : [];
+		});
+	const abandonedDir = join(dir, "abandoned");
+	const abandoned = existsSync(abandonedDir)
+		? readdirSync(abandonedDir)
+				.filter((file) => file.endsWith(".json"))
+				.map((file) => readJson(join(abandonedDir, file)) as AbandonedLoopState)
+		: [];
+	return [...active, ...abandoned];
 }
