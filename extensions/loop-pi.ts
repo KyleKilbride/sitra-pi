@@ -13,20 +13,28 @@ import {
 	answerLoopQuestion,
 	applyAdvisorReport,
 	applyLeadPlan,
+	applyVerifierReport,
 	approveBrief,
 	blockForAdvisorIntakeFailure,
 	blockForGitFailure,
 	blockForStaleState,
+	blockForVerifierIntakeFailure,
+	diffHash,
 	type LoopEffect,
+	LOOP_RUN_MARKER,
 	type LoopState,
+	type LoopTestHash,
+	recordBuildEvidence,
 	recordBlockAnswer,
 	replaceBlockWithStale,
 	roleForAgent,
 	staleReason,
+	startBuild,
 	startLoop,
 	tokensFromSubagentResult,
 	validateLoopState,
 } from "./loop.ts";
+import { readRun } from "./runs.ts";
 
 interface Ctx {
 	cwd: string;
@@ -42,8 +50,8 @@ interface ToolResult {
 }
 
 const LOOP_USAGE =
-	"usage: /loop start [--base <ref>] <task> | /loop answer <answer> | /loop plan <plan> | /loop approve <summary> | /loop status";
-const LOOP_VERBS = ["start", "answer", "plan", "approve", "status"] as const;
+	"usage: /loop start [--base <ref>] <task> | /loop answer <answer> | /loop plan <plan> | /loop approve <summary> | /loop build | /loop status";
+const LOOP_VERBS = ["start", "answer", "plan", "approve", "build", "status"] as const;
 type LoopVerb = (typeof LOOP_VERBS)[number];
 
 interface Pi {
@@ -113,6 +121,70 @@ function git(cwd: string, args: string[]): string {
 	} catch (error) {
 		throw new Error(`git ${args.join(" ")} failed in ${cwd}: ${String(error)}`);
 	}
+}
+
+function fileSha256(path: string): string {
+	return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function resolveWorktreePath(cwd: string, file: string): string {
+	if (!file.trim()) throw new Error("test file path is empty");
+	if (file.startsWith("/")) return file;
+	const worktree = git(cwd, ["rev-parse", "--show-toplevel"]);
+	return join(worktree, file);
+}
+
+function testHashes(cwd: string, files: string[]): LoopTestHash[] {
+	return files.map((file) => ({ file, sha256: fileSha256(resolveWorktreePath(cwd, file)) }));
+}
+
+function currentCommit(cwd: string): string {
+	return git(cwd, ["rev-parse", "HEAD"]);
+}
+
+function diffAgainstBase(cwd: string, state: LoopState): string {
+	return execFileSync("git", ["diff", "--no-ext-diff", `${state.baseRef}...HEAD`], {
+		cwd,
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+}
+
+function parseLoopRunLog(log: string): {
+	log: string;
+	done: boolean;
+	exitCode?: number;
+	loop?: { commit: string; testHashes: LoopTestHash[] };
+} {
+	const raw = readFileSync(log, "utf8");
+	const status = readRun(raw);
+	let loop: { commit: string; testHashes: LoopTestHash[] } | undefined;
+	for (const line of raw.split("\n")) {
+		if (!line.startsWith(LOOP_RUN_MARKER)) continue;
+		const parsed = JSON.parse(line.slice(LOOP_RUN_MARKER.length)) as {
+			commit?: unknown;
+			testHashes?: unknown;
+		};
+		if (
+			typeof parsed.commit === "string" &&
+			Array.isArray(parsed.testHashes) &&
+			parsed.testHashes.every(
+				(item) =>
+					item &&
+					typeof item === "object" &&
+					typeof (item as { file?: unknown }).file === "string" &&
+					typeof (item as { sha256?: unknown }).sha256 === "string",
+			)
+		) {
+			loop = { commit: parsed.commit, testHashes: parsed.testHashes as LoopTestHash[] };
+		}
+	}
+	return {
+		log,
+		done: status.done,
+		...(status.exitCode !== undefined ? { exitCode: status.exitCode } : {}),
+		...(loop ? { loop } : {}),
+	};
 }
 
 interface GitState {
@@ -198,6 +270,26 @@ function loadMutableState(gitState: GitState): LoopState {
 	throw new Error(`loop state is stale: ${reason}`);
 }
 
+function blockIfBuildOrVerifyStale(
+	cwd: string,
+	path: string,
+	state: LoopState,
+	gitState: GitState,
+): { state: LoopState; effects: LoopEffect[] } | undefined {
+	if (state.build.testFiles.length === 0 && !state.verifierRequest) return undefined;
+	const current = {
+		branch: gitState.branch,
+		baseHead: gitState.baseHead,
+		...(state.build.testFiles.length > 0 ? { testHashes: testHashes(cwd, state.build.testFiles) } : {}),
+		...(state.verifierRequest ? { diffHash: diffHash(diffAgainstBase(cwd, state)) } : {}),
+	};
+	const reason = staleReason(state, current);
+	if (!reason) return undefined;
+	const blocked = blockForStaleState(state, current);
+	writeLoopStateFile(path, blocked.state);
+	return blocked;
+}
+
 function advisorName(role: AdvisorRole): string {
 	return role === "intent"
 		? "intent-advisor"
@@ -225,6 +317,12 @@ function renderEffect(state: LoopState, effect: LoopEffect): string {
 		].join("\n\n");
 	if (effect.type === "write-lead-plan")
 		return "LOOPS advisors are complete. Write the high-level lead plan, then run `/loop plan <plan>`.";
+	if (effect.type === "dispatch-verifier")
+		return [
+			"LOOPS runner dispatch for stage verify:",
+			"Start verifier in a fresh context with this exact task. Do not add the builder transcript or any helper brief.",
+			effect.task,
+		].join("\n");
 	return `LOOPS stage: brief-approved\nFrozen brief hash: ${state.frozenBriefHash ?? "(missing)"}`;
 }
 
@@ -347,6 +445,16 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 		emitEffects(pi, result.state, result.effects);
 		return;
 	}
+	if (verb === "build") {
+		if (rest) throw new Error(LOOP_USAGE);
+		const result = startBuild(loadMutableState(gitState));
+		writeLoopStateFile(path, result.state);
+		pi.sendUserMessage(
+			"LOOPS stage: build\nMaterialize the agreed tests, run red then green checks, and record evidence with loop_record_build.",
+			{ deliverAs: "followUp", streamingBehavior: "followUp" },
+		);
+		return;
+	}
 }
 
 async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<void> {
@@ -361,6 +469,58 @@ async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<v
 	if (!existsSync(path)) return;
 	const state = readLoopStateFile(path);
 	const raw = event as Record<string, unknown>;
+	if (raw.agent === "verifier") {
+		if (state.stage !== "verify") return;
+		let gitState: GitState;
+		try {
+			gitState = currentGitForState(ctx.cwd, state);
+		} catch (error) {
+			const blocked = blockForGitFailure(state, String(error));
+			writeLoopStateFile(path, blocked.state);
+			emitEffects(pi, blocked.state, blocked.effects);
+			return;
+		}
+		const stale = blockIfBuildOrVerifyStale(ctx.cwd, path, state, gitState);
+		if (stale) {
+			emitEffects(pi, stale.state, stale.effects);
+			return;
+		}
+		const block = (reason: string) => {
+			const blocked = blockForVerifierIntakeFailure(state, reason);
+			writeLoopStateFile(path, blocked.state);
+			emitEffects(pi, blocked.state, blocked.effects);
+		};
+		if (typeof raw.sessionFile !== "string" || !raw.sessionFile) {
+			block("subagent_result is missing sessionFile");
+			return;
+		}
+		let report: unknown;
+		try {
+			report = readHelperReport(raw.sessionFile);
+		} catch (error) {
+			block(String(error));
+			return;
+		}
+		const valid = validateHelperReport(report);
+		if (!valid.ok) {
+			block(`invalid helper_report from ${raw.sessionFile}: ${valid.reason}`);
+			return;
+		}
+		let result: { state: LoopState; effects: LoopEffect[] };
+		try {
+			const details = valid.report.details as { acceptedLogs?: { log?: unknown }[] } | undefined;
+			const acceptedLogs = (details?.acceptedLogs ?? [])
+				.filter((entry): entry is { log: string } => typeof entry.log === "string")
+				.map((entry) => parseLoopRunLog(entry.log));
+			result = applyVerifierReport(state, valid.report, { acceptedLogs });
+		} catch (error) {
+			block(String(error));
+			return;
+		}
+		writeLoopStateFile(path, result.state);
+		emitEffects(pi, result.state, result.effects);
+		return;
+	}
 	const role = roleForAgent(raw.agent);
 	if (!role || !state.dispatchedAdvisors.includes(role)) return;
 	if (state.stage !== "advise" && state.stage !== "architecture-review") return;
@@ -462,8 +622,59 @@ function subagentResultFromMessageEnd(event: unknown): unknown | undefined {
 
 export default function sitraLoop(pi: Pi): void {
 	pi.registerCommand("loop", {
-		description: "Start and advance an explicit LOOPS graph: start, answer, plan, approve",
+		description: "Start and advance an explicit LOOPS graph: start, answer, plan, approve, build",
 		handler: async (args, ctx) => handleLoopCommand(pi, args, ctx),
+	});
+
+	pi.registerTool({
+		name: "loop_record_build",
+		label: "Record loop build evidence",
+		description:
+			"Record LOOPS build evidence after explicit /loop build: test files, red run log, green run log, and optional verifier rerun budget.",
+		promptSnippet:
+			"loop_record_build: after /loop build, record testFiles plus redRunLog and greenRunLog from red-then-green checks",
+		parameters: Type.Object(
+			{
+				testFiles: Type.Array(Type.String({ minLength: 1 })),
+				redRunLog: Type.String({ minLength: 1 }),
+				greenRunLog: Type.String({ minLength: 1 }),
+				maxVerifierRerunMs: Type.Optional(Type.Number()),
+			},
+			{ additionalProperties: false },
+		),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const checkout = checkoutGit(ctx.cwd);
+			const path = statePathFor({ ...checkout, baseRef: "", baseHead: "" });
+			const state = readLoopStateFile(path);
+			const gitState = currentGitForState(ctx.cwd, state);
+			const stale = blockIfBuildOrVerifyStale(ctx.cwd, path, state, gitState);
+			if (stale) {
+				emitEffects(pi, stale.state, stale.effects);
+				return { content: [{ type: "text", text: `stage: ${stale.state.stage}\nstale block recorded` }], details: stale.state };
+			}
+			const p = params as {
+				testFiles: string[];
+				redRunLog: string;
+				greenRunLog: string;
+				maxVerifierRerunMs?: number;
+			};
+			const hashes = testHashes(ctx.cwd, p.testFiles);
+			const result = recordBuildEvidence(state, {
+				commit: currentCommit(ctx.cwd),
+				diff: diffAgainstBase(ctx.cwd, state),
+				testFiles: p.testFiles,
+				testHashes: hashes,
+				redRun: parseLoopRunLog(p.redRunLog),
+				greenRun: parseLoopRunLog(p.greenRunLog),
+				maxVerifierRerunMs: p.maxVerifierRerunMs ?? 120_000,
+			});
+			writeLoopStateFile(path, result.state);
+			emitEffects(pi, result.state, result.effects);
+			return {
+				content: [{ type: "text", text: `stage: ${result.state.stage}` }],
+				details: result.state,
+			};
+		},
 	});
 
 	pi.registerTool({
