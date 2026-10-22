@@ -59,6 +59,10 @@ interface ToolResult {
 
 interface Pi {
 	on(event: "session_start", handler: (event: unknown, ctx: Ctx) => void): void;
+	on(
+		event: "input",
+		handler: (event: { type: "input"; text: string; source: "interactive" | "rpc" | "extension" }, ctx: Ctx) => void,
+	): void;
 	on(event: "tool_call", handler: (event: ToolCall, ctx: Ctx) => { block: true; reason: string } | undefined): void;
 	on(
 		event: "before_agent_start",
@@ -349,25 +353,26 @@ export default function sitraKnowledge(pi: Pi): void {
 		status(ctx);
 	});
 
+	pi.on("input", (event, ctx) => {
+		if (process.env.PI_SUBAGENT_NAME || event.source !== "interactive" || !learningOn(process.env)) return;
+		try {
+			const file = ctx?.sessionManager?.getSessionFile?.();
+			captureMoment(dir(), process.env, {
+				harness: "pi",
+				cwd: ctx?.cwd ?? process.cwd(),
+				message: event.text,
+				transcript: file ? readLastLines(file, 400, { maxBytes: 1_000_000 }) : "",
+			});
+		} catch {
+			// Learning never gets in the way of the turn.
+		}
+	});
+
 	pi.on("before_agent_start", (event, ctx) => {
 		// Nothing here may stop a turn: each step fails on its own.
 		const e = event as { messageType?: string; prompt?: string };
-		const person = !process.env.PI_SUBAGENT_NAME && e.messageType === "user" && typeof e.prompt === "string";
-		if (person && learningOn(process.env)) {
-			// Every message the person sends is a moment Grimoire may learn from; a detached learner decides it.
-			try {
-				const file = ctx?.sessionManager?.getSessionFile?.();
-				captureMoment(dir(), process.env, {
-					harness: "pi",
-					cwd: ctx?.cwd ?? process.cwd(),
-					message: e.prompt as string,
-					transcript: file ? readLastLines(file, 400, { maxBytes: 1_000_000 }) : "",
-				});
-			} catch {
-				// Learning never gets in the way of the turn.
-			}
-		}
-		if (person && ctx?.ui) {
+		const userRun = !process.env.PI_SUBAGENT_NAME && e.messageType === "user" && typeof e.prompt === "string";
+		if (userRun && ctx?.ui) {
 			// Background learning and other sessions write proposals; keep the review count current.
 			try {
 				status(ctx);

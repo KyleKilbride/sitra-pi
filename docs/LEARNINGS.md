@@ -39,3 +39,7 @@ how agents run, hand back, or wait.
 - **Background checks should pick accuracy over speed.** To spot when the person corrects an agent, a mid-size model
   (4.7 s) caught 54 of 59 real corrections with 1 false alarm, where fast decision models (0.1-0.2 s) caught about 40.
   The check runs after the message, in the background, so its speed costs nothing.
+- **Learner moments come only from Pi interactive input.** Extension-sent prompts (`sendUserMessage`, `/grimoire-reflect`,
+  loop dispatches and stage notices) are not the person talking. Text the person types while the agent is busy still has
+  `source: "interactive"` and is now captured. Known gap: a spawned worker's first message is written by the tower but
+  Pi's interactive mode still marks it interactive, so it can still look like the person typed it.
