@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -169,6 +169,9 @@ describe("loop state files", () => {
 });
 
 describe("Pi wiring", () => {
+	const usage =
+		/usage: \/loop start \[--base <ref>\] <task> \| \/loop answer <answer> \| \/loop plan <plan> \| \/loop approve <summary> \| \/loop status/;
+
 	test("/loop start is explicit, writes state, and asks for the first advisors", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
@@ -202,6 +205,68 @@ describe("Pi wiring", () => {
 		const { cwd } = gitWorktree();
 		execFileSync("git", ["checkout", "main"], { cwd, stdio: "ignore" });
 		await expect(commands.get("loop")?.handler("start Add the runner", ctx(cwd))).rejects.toThrow(/base branch/);
+	});
+
+	test("bare /loop reports usage before reading state", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands } = fakePi();
+		const { cwd } = gitWorktree();
+		mkdirSync(join(profile, "loops"), { recursive: true });
+		writeFileSync(loopStatePath(profile, cwd, "feature"), "{");
+
+		await expect(commands.get("loop")?.handler("", ctx(cwd))).rejects.toThrow(usage);
+	});
+
+	test("unknown /loop verbs report usage without reading state", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands } = fakePi();
+		const { cwd } = gitWorktree();
+		mkdirSync(join(profile, "loops"), { recursive: true });
+		writeFileSync(loopStatePath(profile, cwd, "feature"), "{");
+
+		await expect(commands.get("loop")?.handler("fix the uploader", ctx(cwd))).rejects.toThrow(usage);
+	});
+
+	test("/loop answer reports a clear no-loop error before reading missing state", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands } = fakePi();
+		const { cwd } = gitWorktree();
+
+		await expect(commands.get("loop")?.handler("answer yes", ctx(cwd))).rejects.toThrow(
+			`no loop on feature in ${cwd}; start one with /loop start <task>`,
+		);
+	});
+
+	test("/loop status reports a clear no-loop error without writing", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands } = fakePi();
+		const { cwd } = gitWorktree();
+
+		await expect(commands.get("loop")?.handler("status", ctx(cwd))).rejects.toThrow(
+			`no loop on feature in ${cwd}; start one with /loop start <task>`,
+		);
+		expect(existsSync(join(profile, "loops"))).toBe(false);
+	});
+
+	test("/loop status prints the read-only loop_status summary", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, tools, userMessages } = fakePi();
+		const { cwd } = gitWorktree();
+		await commands.get("loop")?.handler("start Add the runner", ctx(cwd));
+		const path = loopStatePath(profile, cwd, "feature");
+		const before = readFileSync(path, "utf8");
+		const toolStatus = await tools.get("loop_status")?.execute("1", {}, undefined, undefined, ctx(cwd));
+		userMessages.length = 0;
+
+		await commands.get("loop")?.handler("status", ctx(cwd));
+
+		expect(userMessages).toEqual([toolStatus?.content[0]?.text]);
+		expect(readFileSync(path, "utf8")).toBe(before);
 	});
 
 	test("loop_status is read-only and reports staleness without writing", async () => {
