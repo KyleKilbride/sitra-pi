@@ -358,6 +358,29 @@ export function removeSession(profileDir: string, id: string): void {
 	rmSync(recordPath(profileDir, id), { force: true });
 }
 
+export function pruneEndedSessions(
+	profileDir: string,
+	isPidAlive: (pid: number) => boolean = defaultPidAlive,
+	folderExists: (path: string) => boolean = existsSync,
+): string[] {
+	const dir = sessionsDir(profileDir);
+	if (!existsSync(dir)) return [];
+	const removed: string[] = [];
+	for (const file of readdirSync(dir)) {
+		if (!file.endsWith(".json")) continue;
+		const fullPath = join(dir, file);
+		try {
+			const record = JSON.parse(readFileSync(fullPath, "utf8")) as SessionRecord;
+			if (isPidAlive(record.pid) || folderExists(record.cwd)) continue;
+			rmSync(fullPath, { force: true });
+			removed.push(record.id);
+		} catch {
+			// Skip unreadable or mid-cleanup files.
+		}
+	}
+	return removed;
+}
+
 export function listSessions(
 	profileDir: string,
 	isPidAlive: (pid: number) => boolean = defaultPidAlive,

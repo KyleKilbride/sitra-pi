@@ -23,6 +23,7 @@ import {
 	groupWorkerSessions,
 	listSessions,
 	prepareWorktree,
+	pruneEndedSessions,
 	readGitHeadBranch,
 	readLastLines,
 	readTranscriptTail,
@@ -496,6 +497,101 @@ function startSession(env: Record<string, string | undefined>) {
 	});
 	return { handlers, tools, messages, restore, ctxFor };
 }
+
+describe("ended sessions leave the registry", () => {
+	test("a stopped lead whose worktree is gone is removed and raises no alert", () => {
+		const profile = tmp();
+		writeSession(profile, { ...baseLead, cwd: join(profile, "gone"), pid: 2_147_483_000 });
+
+		expect(pruneEndedSessions(profile, () => false)).toEqual(["lead-flights"]);
+		const listed = listSessions(profile, () => false);
+		expect(listed).toEqual([]);
+		expect(detectSessionAlerts(listed)).toEqual([]);
+	});
+
+	test("a stopped lead whose worktree still exists is kept and still alerts", () => {
+		const profile = tmp();
+		const cwd = join(profile, "checkout");
+		mkdirSync(cwd);
+		writeSession(profile, { ...baseLead, cwd, pid: 2_147_483_000 });
+
+		expect(pruneEndedSessions(profile, () => false)).toEqual([]);
+		const listed = listSessions(profile, () => false);
+		expect(listed[0]?.status).toBe("stopped");
+		expect(detectSessionAlerts(listed).map((a) => a.kind)).toEqual(["stopped"]);
+	});
+
+	test("a running session is never removed, even if its folder is gone", () => {
+		const profile = tmp();
+		writeSession(profile, { ...baseLead, cwd: join(profile, "gone"), pid: process.pid });
+
+		expect(pruneEndedSessions(profile, () => true)).toEqual([]);
+		expect(listSessions(profile, () => true).map((s) => s.id)).toEqual(["lead-flights"]);
+	});
+
+	test("a restarted tower does not re-alert a stopped lead whose worktree was removed", () => {
+		const profile = tmp();
+		writeSession(profile, { ...baseLead, cwd: join(profile, "gone"), pid: 2_147_483_000 });
+		const saved = {
+			PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
+			SITRA_ROLE: process.env.SITRA_ROLE,
+			SITRA_NO_RADAR: process.env.SITRA_NO_RADAR,
+		};
+		process.env.PI_CODING_AGENT_DIR = profile;
+		process.env.SITRA_ROLE = "tower";
+		process.env.SITRA_NO_RADAR = "1";
+		vi.useFakeTimers();
+		const sent: string[] = [];
+		try {
+			for (let i = 0; i < 2; i++) {
+				const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
+				sitraTower({
+					on: (ev, fn) => handlers.set(ev, fn as never),
+					registerTool: () => {},
+					events: { on: () => {} },
+					sendMessage: (m) => sent.push(m.content),
+				});
+				vi.advanceTimersByTime(2_000);
+				handlers.get("session_shutdown")?.({}, { cwd: "/work" });
+			}
+			expect(sent.filter((m) => m.includes("stopped unexpectedly"))).toEqual([]);
+		} finally {
+			vi.useRealTimers();
+			for (const [k, v] of Object.entries(saved)) {
+				if (v === undefined) delete process.env[k];
+				else process.env[k] = v;
+			}
+		}
+	});
+
+	test("forget_session removes a stopped session and refuses a running one", async () => {
+		const profile = tmp();
+		const stoppedCwd = join(profile, "stopped");
+		const runningCwd = join(profile, "running");
+		mkdirSync(stoppedCwd);
+		mkdirSync(runningCwd);
+		writeSession(profile, { ...baseLead, id: "stopped-lead", cwd: stoppedCwd, pid: 2_147_483_000 });
+		writeSession(profile, { ...baseLead, id: "running-lead", cwd: runningCwd, pid: process.pid });
+		const s = startSession({ PI_CODING_AGENT_DIR: profile, SITRA_ROLE: "tower", SITRA_NO_RADAR: "1" });
+		try {
+			const forget = s.tools.get("forget_session");
+			expect(forget).toBeDefined();
+
+			const removed = await forget?.execute("1", { id: "stopped-lead" }, undefined, undefined, s.ctxFor("tower-1"));
+			expect(removed?.content[0]?.text).toContain("Removed stopped session stopped-lead");
+			expect(removed?.content[0]?.text).toContain("Transcript kept");
+			expect((removed?.details as { removed?: string } | undefined)?.removed).toBe("stopped-lead");
+			expect(listSessions(profile, () => true).map((session) => session.id)).toEqual(["running-lead"]);
+
+			const refused = await forget?.execute("2", { id: "running-lead" }, undefined, undefined, s.ctxFor("tower-1"));
+			expect(refused?.content[0]?.text).toContain("running-lead is still running");
+			expect((refused?.details as { removed?: string; reason?: string } | undefined)?.reason).toBe("running");
+			expect(listSessions(profile, () => true).map((session) => session.id)).toEqual(["running-lead"]);
+		} finally {
+			s.restore();
+		}
+	});
+});
 
 describe("tower edge cases", () => {
 	test("labels extra grounding instructions as a tower brief", () => {

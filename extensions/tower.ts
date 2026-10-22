@@ -21,6 +21,7 @@ import {
 	mainCheckout,
 	moveInbox,
 	prepareWorktree,
+	pruneEndedSessions,
 	readLastLines,
 	readTranscriptTail,
 	removeSession,
@@ -135,6 +136,14 @@ export default function sitraTower(pi: Pi): void {
 
 	const herdr = (args: string[]) =>
 		execFileSync("herdr", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+	const isPidAlive = (pid: number): boolean => {
+		try {
+			process.kill(pid, 0);
+			return true;
+		} catch {
+			return false;
+		}
+	};
 	const inspectPane = (id: string): { alive: boolean; runningRadar: boolean } => {
 		try {
 			const info = herdr(["pane", "get", id]);
@@ -305,6 +314,7 @@ export default function sitraTower(pi: Pi): void {
 			return;
 		}
 		if (role === "tower") {
+			pruneEndedSessions(profileDir);
 			const alerts = detectSessionAlerts(listSessions(profileDir), readFileTail);
 			const fresh = alerts.filter((a) => !seenAlerts.has(a.key));
 			if (fresh.length === 0) return;
@@ -351,6 +361,7 @@ export default function sitraTower(pi: Pi): void {
 					"list_sessions",
 					"read_session",
 					"message_session",
+					"forget_session",
 					"audit_sessions",
 					"spawn_session",
 					"update_radar_status",
@@ -449,6 +460,7 @@ export default function sitraTower(pi: Pi): void {
 		promptSnippet: "list_sessions: list all running sitra worker sessions and their status",
 		parameters: Type.Object({}),
 		async execute() {
+			pruneEndedSessions(profileDir);
 			const sessions = allSessions();
 			const alerts = detectSessionAlerts(sessions, readFileTail);
 			for (const a of alerts) seenAlerts.add(a.key);
@@ -458,6 +470,49 @@ export default function sitraTower(pi: Pi): void {
 			return {
 				content: [{ type: "text", text: `${report}${alertSection}` }],
 				details: { sessions, alerts },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "forget_session",
+		label: "Forget a stopped sitra session",
+		description: "Remove a stopped session from the tower's registry by session id. Running sessions are refused.",
+		promptSnippet: "forget_session: remove a stopped session record by id",
+		parameters: Type.Object({
+			id: Type.String({ description: "Exact session id to remove." }),
+		}),
+		async execute(_id, params) {
+			const sessionId = String(params.id ?? "").trim();
+			const match = listSessions(profileDir).find((s) => s.id === sessionId);
+			if (!match) {
+				return {
+					content: [{ type: "text", text: `No sitra session record has id "${sessionId}".` }],
+					details: { removed: undefined, reason: "not_found" },
+				};
+			}
+			if (isPidAlive(match.pid)) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `${match.id} is still running (process ${match.pid}). I did not remove it.`,
+						},
+					],
+					details: { removed: undefined, reason: "running", session: match },
+				};
+			}
+			removeSession(profileDir, match.id);
+			return {
+				content: [
+					{
+						type: "text",
+						text: `Removed stopped session ${match.id} from the tower registry. Transcript kept${
+							match.sessionFile ? ` at ${match.sessionFile}` : "."
+						}`,
+					},
+				],
+				details: { removed: match.id, session: match },
 			};
 		},
 	});
