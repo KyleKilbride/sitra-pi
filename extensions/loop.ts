@@ -778,7 +778,10 @@ function buildBlock(state: LoopState, problem: string): { state: LoopState; effe
 	});
 }
 
-export function blockForBuildEvidenceFailure(state: LoopState, problem: string): { state: LoopState; effects: LoopEffect[] } {
+export function blockForBuildEvidenceFailure(
+	state: LoopState,
+	problem: string,
+): { state: LoopState; effects: LoopEffect[] } {
 	return buildBlock(state, problem);
 }
 

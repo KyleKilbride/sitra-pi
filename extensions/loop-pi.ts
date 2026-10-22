@@ -143,11 +143,13 @@ function currentCommit(cwd: string): string {
 }
 
 function worktreeClean(cwd: string): boolean {
-	return execFileSync("git", ["status", "--porcelain"], {
-		cwd,
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "pipe"],
-	}).trim() === "";
+	return (
+		execFileSync("git", ["status", "--porcelain"], {
+			cwd,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "pipe"],
+		}).trim() === ""
+	);
 }
 
 function diffAgainstBase(cwd: string, state: LoopState): string {
@@ -158,7 +160,12 @@ function diffAgainstBase(cwd: string, state: LoopState): string {
 	});
 }
 
-function testsOnlyAncestorProblem(cwd: string, state: LoopState, testFiles: string[], redCommit: string): string | undefined {
+function testsOnlyAncestorProblem(
+	cwd: string,
+	state: LoopState,
+	testFiles: string[],
+	redCommit: string,
+): string | undefined {
 	try {
 		execFileSync("git", ["merge-base", "--is-ancestor", redCommit, "HEAD"], { cwd, stdio: "ignore" });
 	} catch {

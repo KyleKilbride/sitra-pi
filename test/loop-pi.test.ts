@@ -3,13 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import {
-	briefHash,
-	buildBrief,
-	createLoopState,
-	type LoopState,
-	staleReason,
-} from "../extensions/loop.ts";
+import { briefHash, buildBrief, createLoopState, type LoopState, staleReason } from "../extensions/loop.ts";
 import sitraLoop, { loopStatePath, readLoopStateFile, writeLoopStateFile } from "../extensions/loop-pi.ts";
 import { EXIT_MARKER, HEADER_MARKER } from "../extensions/runs.ts";
 
@@ -678,7 +672,11 @@ describe("Pi wiring", () => {
 		expect(hashBefore).toEqual([]);
 
 		const expectedHash = sha256sum(cwd, "loop.test.ts");
-		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: expectedHash }], exitCode: 1 });
+		writeHeaderLoopLog(redLog, {
+			commit: redCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: expectedHash }],
+			exitCode: 1,
+		});
 		writeHeaderLoopLog(greenLog, {
 			commit: greenCommit,
 			testHashes: [{ file: "loop.test.ts", sha256: expectedHash }],
@@ -716,8 +714,16 @@ describe("Pi wiring", () => {
 		const hash = sha256sum(cwd, "loop.test.ts");
 		const redLog = join(profile, "red.log");
 		const greenLog = join(profile, "green.log");
-		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
-		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		writeHeaderLoopLog(redLog, {
+			commit: redCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 1,
+		});
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 0,
+		});
 		await tools
 			.get("loop_record_build")
 			?.execute(
@@ -761,8 +767,16 @@ describe("Pi wiring", () => {
 		const hash = sha256sum(cwd, "loop.test.ts");
 		const redLog = join(profile, "red.log");
 		const greenLog = join(profile, "green.log");
-		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
-		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		writeHeaderLoopLog(redLog, {
+			commit: redCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 1,
+		});
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 0,
+		});
 		writeFileSync(join(cwd, "impl.ts"), "dirty\n");
 		await tools
 			.get("loop_record_build")
@@ -779,7 +793,11 @@ describe("Pi wiring", () => {
 		approvedLoop(profile, cwd);
 		await commands.get("loop")?.handler("build", ctx(cwd));
 		const badRedCommit = greenCommit;
-		writeHeaderLoopLog(redLog, { commit: badRedCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
+		writeHeaderLoopLog(redLog, {
+			commit: badRedCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 1,
+		});
 		await tools
 			.get("loop_record_build")
 			?.execute(
@@ -809,7 +827,11 @@ describe("Pi wiring", () => {
 		const originalHash = sha256sum(cwd, "loop.test.ts");
 		const redLog = join(profile, "red.log");
 		const greenLog = join(profile, "green.log");
-		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: originalHash }], exitCode: 1 });
+		writeHeaderLoopLog(redLog, {
+			commit: redCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: originalHash }],
+			exitCode: 1,
+		});
 		writeHeaderLoopLog(greenLog, {
 			commit: greenCommit,
 			testHashes: [{ file: "loop.test.ts", sha256: originalHash }],
@@ -845,8 +867,16 @@ describe("Pi wiring", () => {
 		const hash = sha256sum(cwd, "loop.test.ts");
 		const redLog = join(profile, "red.log");
 		const greenLog = join(profile, "green.log");
-		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
-		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		writeHeaderLoopLog(redLog, {
+			commit: redCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 1,
+		});
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 0,
+		});
 		await tools
 			.get("loop_record_build")
 			?.execute(
@@ -885,7 +915,11 @@ describe("Pi wiring", () => {
 				undefined,
 				ctx(cwd),
 			);
-		writeHeaderLoopLog(greenLog, { commit: "stale", testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		writeHeaderLoopLog(greenLog, {
+			commit: "stale",
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 0,
+		});
 		await handlers.get("message_end")?.(
 			subagentResult(
 				"verifier",
@@ -907,7 +941,11 @@ describe("Pi wiring", () => {
 
 		approvedLoop(profile, cwd);
 		await commands.get("loop")?.handler("build", ctx(cwd));
-		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 0,
+		});
 		await tools
 			.get("loop_record_build")
 			?.execute(
@@ -954,8 +992,16 @@ describe("Pi wiring", () => {
 		const hash = sha256sum(cwd, "loop.test.ts");
 		const redLog = join(profile, "red.log");
 		const greenLog = join(profile, "green.log");
-		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
-		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		writeHeaderLoopLog(redLog, {
+			commit: redCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 1,
+		});
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 0,
+		});
 		await tools
 			.get("loop_record_build")
 			?.execute(
@@ -1025,12 +1071,22 @@ describe("Pi wiring", () => {
 		const hash = sha256sum(cwd, "loop.test.ts");
 		const redLog = join(profile, "red.log");
 		const greenLog = join(profile, "green.log");
-		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
-		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
-		await commands.get("loop")?.handler(
-			`record-build ${JSON.stringify({ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog })}`,
-			ctx(cwd),
-		);
+		writeHeaderLoopLog(redLog, {
+			commit: redCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 1,
+		});
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 0,
+		});
+		await commands
+			.get("loop")
+			?.handler(
+				`record-build ${JSON.stringify({ testFiles: ["loop.test.ts"], redRunLog: redLog, greenRunLog: greenLog })}`,
+				ctx(cwd),
+			);
 		const path = loopStatePath(profile, cwd, "feature");
 		writeFileSync(join(cwd, "loop.test.ts"), "changed\n");
 		const before = readFileSync(path, "utf8");

@@ -653,7 +653,10 @@ describe("build and verify slice", () => {
 		expect(blocked.frozenBriefHash).toBe(originalHash);
 		expect(staleReason(blocked, context)).toBeUndefined();
 		const stale = blockForStaleState(blocked, { ...context, baseHead: "base-b" }).state;
-		const answered = answerLoopQuestion(stale, { answer: "Continue.", current: { ...context, baseHead: "base-b" } }).state;
+		const answered = answerLoopQuestion(stale, {
+			answer: "Continue.",
+			current: { ...context, baseHead: "base-b" },
+		}).state;
 		expect(answered.frozenBriefHash).toBe(originalHash);
 	});
 
