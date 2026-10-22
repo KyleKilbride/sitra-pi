@@ -70,6 +70,7 @@ const AdvisorRun = Type.Object(
 		openQuestions: Type.Array(Question),
 		assumptions: Type.Array(Type.String()),
 		acceptanceTestFiles: Type.Optional(Type.Array(Type.String())),
+		acceptanceTestCommands: Type.Optional(Type.Array(Type.String())),
 		outputTokens: Type.Optional(Type.Number()),
 		contextTokens: Type.Optional(Type.Number()),
 	},
@@ -78,6 +79,18 @@ const AdvisorRun = Type.Object(
 
 const TestHash = Type.Object(
 	{ file: Type.String(), sha256: Type.Optional(Type.String()), missing: Type.Optional(Type.Boolean()) },
+	{ additionalProperties: false },
+);
+
+const EvidenceRecord = Type.Object(
+	{
+		runId: Type.String({ minLength: 1 }),
+		sha256: Type.String({ minLength: 1 }),
+		phase: Type.Union([Type.Literal("red"), Type.Literal("green")]),
+		commit: Type.String({ minLength: 1 }),
+		command: Type.String({ minLength: 1 }),
+		log: Type.String({ minLength: 1 }),
+	},
 	{ additionalProperties: false },
 );
 
@@ -91,6 +104,7 @@ const BuildState = Type.Object(
 		greenRunLog: Type.Optional(Type.String()),
 		redRunCommand: Type.Optional(Type.String()),
 		greenRunCommand: Type.Optional(Type.String()),
+		evidence: Type.Optional(Type.Array(EvidenceRecord)),
 	},
 	{ additionalProperties: false },
 );
@@ -140,6 +154,7 @@ const Block = Type.Object(
 			Type.Literal("grimoire-unreadable"),
 			Type.Literal("intake-failed"),
 			Type.Literal("questions"),
+			Type.Literal("build-evidence"),
 			Type.Literal("git"),
 			Type.Literal("new-information"),
 			Type.Literal("new-information-denied"),
@@ -150,6 +165,17 @@ const Block = Type.Object(
 		questionId: Type.String({ minLength: 1 }),
 		resumeStage: LoopStageSchema,
 		pendingAdvisors: Type.Array(AdvisorRoleSchema),
+		problems: Type.Optional(
+			Type.Array(
+				Type.Object(
+					{
+						reason: Type.String({ minLength: 1 }),
+						satisfy: Type.String({ minLength: 1 }),
+					},
+					{ additionalProperties: false },
+				),
+			),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -193,6 +219,8 @@ export const LOOP_STATE_SCHEMA = Type.Object(
 		baseHead: Type.String(),
 		stage: LoopStageSchema,
 		block: Type.Optional(Block),
+		deferredBlock: Type.Optional(Type.Unknown()),
+		deferredStage: Type.Optional(LoopStageSchema),
 		goal: Type.String(),
 		limits: Type.Array(Type.String()),
 		done: Type.Array(Type.String()),
@@ -556,6 +584,16 @@ function pendingAdvisorsForResume(state: LoopState): AdvisorRole[] {
 	return [];
 }
 
+function isDecisionBlockKind(kind: NonNullable<LoopState["block"]>["kind"]): boolean {
+	return (
+		kind === "new-information" ||
+		kind === "new-information-denied" ||
+		kind === "rework-learning" ||
+		kind === "same-rework-class" ||
+		kind === "second-rework"
+	);
+}
+
 function withBlock(
 	state: LoopState,
 	input: {
@@ -563,9 +601,49 @@ function withBlock(
 		question: LoopQuestion;
 		pendingAdvisors?: AdvisorRole[];
 		resumeStage?: LoopStage;
+		problems?: NonNullable<LoopState["block"]>["problems"];
 	},
 ): { state: LoopState; effects: LoopEffect[] } {
 	if (state.block) {
+		if (
+			((input.kind === "stale" || input.kind === "git") && isDecisionBlockKind(state.block.kind)) ||
+			(input.kind === "git" && state.block.kind === "questions")
+		) {
+			const blocked: LoopState = {
+				...state,
+				stage: "blocked",
+				block: {
+					kind: input.kind,
+					questionId: input.question.id,
+					resumeStage: input.resumeStage ?? state.stage,
+					pendingAdvisors: input.pendingAdvisors ?? [],
+					...(input.problems ? { problems: input.problems } : {}),
+				},
+				deferredBlock: state.block,
+				deferredStage: state.stage,
+				questions: [...state.questions, input.question],
+				dispatchedAdvisors: [],
+				startedAdvisors: [],
+			};
+			return { state: blocked, effects: [{ type: "ask-person", reason: input.kind, question: input.question }] };
+		}
+		if (state.block.kind === "build-evidence" && state.block.kind !== input.kind) {
+			const blocked: LoopState = {
+				...state,
+				stage: input.kind === "questions" ? "needs-person" : "blocked",
+				block: {
+					kind: input.kind,
+					questionId: input.question.id,
+					resumeStage: input.resumeStage ?? state.block.resumeStage,
+					pendingAdvisors: input.pendingAdvisors ?? state.block.pendingAdvisors,
+					...(input.problems ? { problems: input.problems } : {}),
+				},
+				questions: [...state.questions, input.question],
+				dispatchedAdvisors: [],
+				startedAdvisors: [],
+			};
+			return { state: blocked, effects: [{ type: "ask-person", reason: input.kind, question: input.question }] };
+		}
 		if (state.block.questionId === input.question.id) {
 			const current = state.questions.find((question) => question.id === state.block?.questionId) ?? input.question;
 			return {
@@ -597,6 +675,7 @@ function withBlock(
 			questionId: input.question.id,
 			resumeStage,
 			pendingAdvisors: input.pendingAdvisors ?? pendingAdvisorsForResume(state),
+			...(input.problems ? { problems: input.problems } : {}),
 		},
 		questions: [...state.questions, input.question],
 		dispatchedAdvisors: [],
@@ -678,6 +757,9 @@ function toAdvisorRun(
 			? {
 					acceptanceTestFiles: (report.details as { acceptanceTests: { targetFile: string }[] }).acceptanceTests.map(
 						(test) => test.targetFile,
+					),
+					acceptanceTestCommands: (report.details as { acceptanceTests: { command: string }[] }).acceptanceTests.map(
+						(test) => test.command,
 					),
 				}
 			: {}),
@@ -877,7 +959,27 @@ export function answerLoopQuestion(
 		question.answer || question.id !== state.block?.questionId ? question : { ...question, answer: input.answer },
 	);
 	if (!state.block) throw new Error("blocked state is missing block details");
+	const deferredBlock = state.deferredBlock as LoopState["block"] | undefined;
 	if (state.block.kind === "stale") {
+		if (deferredBlock) {
+			const restored: LoopState = {
+				...state,
+				stage: state.deferredStage ?? "blocked",
+				block: deferredBlock,
+				deferredBlock: undefined,
+				deferredStage: undefined,
+				branch: input.current.branch,
+				baseHead: input.current.baseHead,
+				questions: answered,
+				dispatchedAdvisors: [],
+			};
+			const block = restored.block;
+			const question = restored.questions.find((item) => item.id === block?.questionId);
+			return {
+				state: restored,
+				effects: question && block ? [{ type: "ask-person", reason: block.kind, question }] : [],
+			};
+		}
 		const nextStage = state.block.resumeStage;
 		const updated: LoopState = {
 			...state,
@@ -903,6 +1005,23 @@ export function answerLoopQuestion(
 		state.block.kind === "grimoire-unreadable" ||
 		state.block.kind === "git"
 	) {
+		if (state.block.kind === "git" && deferredBlock) {
+			const restored: LoopState = {
+				...state,
+				stage: state.deferredStage ?? "blocked",
+				block: deferredBlock,
+				deferredBlock: undefined,
+				deferredStage: undefined,
+				questions: answered,
+				dispatchedAdvisors: [],
+			};
+			const block = restored.block;
+			const question = restored.questions.find((item) => item.id === block?.questionId);
+			return {
+				state: restored,
+				effects: question && block ? [{ type: "ask-person", reason: block.kind, question }] : [],
+			};
+		}
 		const verifierRequest =
 			state.block.kind === "intake-failed" && state.block.resumeStage === "verify" && state.verifierRequest
 				? {
@@ -975,6 +1094,18 @@ export function answerLoopQuestion(
 		};
 		return roles.length ? dispatch(next, roles) : { state: next, effects: nextLoopEffects(next) };
 	}
+	if (state.block.kind === "build-evidence") {
+		const next: LoopState = {
+			...state,
+			stage: state.block.resumeStage,
+			block: undefined,
+			questions: answered,
+			build: { testFiles: [], testHashes: [] },
+			verifierRequest: undefined,
+			dispatchedAdvisors: [],
+		};
+		return { state: next, effects: nextLoopEffects(next) };
+	}
 	const roles = state.block.kind === "questions" ? state.block.pendingAdvisors : affectedAdvisors(state);
 	if (state.block.kind === "questions" && state.block.resumeStage === "classify") {
 		const next: LoopState = { ...state, stage: state.block.resumeStage, block: undefined, questions: answered };
@@ -1017,6 +1148,23 @@ export function replaceBlockWithStale(
 		recommended: "Answer how to proceed before the runner dispatches more work.",
 		dependsOn: [],
 	};
+	if (isDecisionBlockKind(state.block.kind)) {
+		const blocked: LoopState = {
+			...state,
+			stage: "blocked",
+			block: {
+				kind: "stale",
+				questionId: question.id,
+				resumeStage: state.stage,
+				pendingAdvisors: [],
+			},
+			deferredBlock: state.block,
+			deferredStage: state.stage,
+			questions: [...state.questions, question],
+			dispatchedAdvisors: [],
+		};
+		return { state: blocked, effects: [{ type: "ask-person", reason: "stale", question }] };
+	}
 	const blocked: LoopState = {
 		...state,
 		stage: "blocked",
@@ -1102,6 +1250,15 @@ export interface LoopRunEvidence {
 	loop?: { commit: string; testHashes: LoopTestHash[] };
 }
 
+interface BuildEvidenceProblem {
+	reason: string;
+	satisfy: string;
+}
+
+function evidenceProblem(reason: string, satisfy: string): BuildEvidenceProblem {
+	return { reason, satisfy };
+}
+
 function sameHashes(a: LoopTestHash[], b: LoopTestHash[]): boolean {
 	if (a.some((item) => item.missing) || b.some((item) => item.missing)) return false;
 	return (
@@ -1122,14 +1279,27 @@ function redRunProblem(
 	redRun: LoopRunEvidence | undefined,
 	commit: string,
 	testHashes: LoopTestHash[],
-): string | undefined {
-	if (!redRun) return "red run is missing";
-	if (!redRun.done) return "red run has not finished";
-	if (redRun.exitCode === undefined || Number.isNaN(redRun.exitCode)) return "red run has no exit code";
-	if (redRun.exitCode === 0) return "red run passed; it must fail before implementation";
+): BuildEvidenceProblem | undefined {
+	if (!redRun) return evidenceProblem("red run is missing", "Run red evidence at the tests-only commit.");
+	if (!redRun.done) return evidenceProblem("red run has not finished", "Wait for the red evidence run to finish.");
+	if (redRun.exitCode === undefined || Number.isNaN(redRun.exitCode))
+		return evidenceProblem("red run has no exit code", "Rerun red evidence so the log records a structured exit code.");
+	if (redRun.exitCode === 0)
+		return evidenceProblem(
+			"red run passed; it must fail before implementation",
+			"Run the agreed command at the tests-only commit before implementation; it must exit non-zero.",
+		);
 	const tie = runTieProblem(redRun, testHashes);
-	if (tie) return `red run is invalid because ${tie}`;
-	if (redRun.loop?.commit === commit) return "red run must be tied to a tests-only ancestor commit, not HEAD";
+	if (tie)
+		return evidenceProblem(
+			`red run is invalid because ${tie}`,
+			"Use loop_run_evidence for the red phase at the tests-only commit so the log is stamped with the frozen test hashes.",
+		);
+	if (redRun.loop?.commit === commit)
+		return evidenceProblem(
+			"red run commit is HEAD, not a tests-only ancestor",
+			"Use the tests-only commit for red evidence, not the build commit.",
+		);
 	return undefined;
 }
 
@@ -1137,25 +1307,48 @@ function greenRunProblem(
 	greenRun: LoopRunEvidence | undefined,
 	commit: string,
 	testHashes: LoopTestHash[],
-): string | undefined {
-	if (!greenRun) return "green run is missing";
-	if (!greenRun.done) return "green run has not finished";
-	if (greenRun.exitCode !== 0) return `green run did not pass (exit ${greenRun.exitCode ?? "unknown"})`;
+): BuildEvidenceProblem | undefined {
+	if (!greenRun) return evidenceProblem("green run is missing", "Run green evidence at the current build commit.");
+	if (!greenRun.done)
+		return evidenceProblem("green run has not finished", "Wait for the green evidence run to finish.");
+	if (greenRun.exitCode !== 0)
+		return evidenceProblem(
+			`green run did not pass (exit ${greenRun.exitCode ?? "unknown"})`,
+			"Fix the implementation or agreed command, then rerun green evidence at the current build commit.",
+		);
 	const tie = runTieProblem(greenRun, testHashes);
-	if (tie) return `green run is invalid because ${tie}`;
-	if (greenRun.loop?.commit !== commit) return `green run is tied to commit ${greenRun.loop?.commit}, not ${commit}`;
+	if (tie)
+		return evidenceProblem(
+			`green run is invalid because ${tie}`,
+			"Use loop_run_evidence for the green phase at the current build commit so the log is stamped with the frozen test hashes.",
+		);
+	if (greenRun.loop?.commit !== commit)
+		return evidenceProblem(
+			`green run is tied to commit ${greenRun.loop?.commit}, not ${commit}`,
+			"Rerun green evidence at the current build commit.",
+		);
 	return undefined;
 }
 
-function buildBlock(state: LoopState, problem: string): { state: LoopState; effects: LoopEffect[] } {
+function buildBlock(
+	state: LoopState,
+	problem: string | BuildEvidenceProblem,
+): { state: LoopState; effects: LoopEffect[] } {
+	const structured =
+		typeof problem === "string"
+			? evidenceProblem(
+					problem,
+					"Record valid red evidence at the tests-only commit and green evidence at the current build commit.",
+				)
+			: problem;
 	return withBlock(state, {
-		kind: "questions",
+		kind: "build-evidence",
 		resumeStage: "build",
+		problems: [structured],
 		question: {
 			id: "build-evidence",
-			text: `Build evidence is not ready for verification: ${problem}. Record a valid red run and green run tied to the current commit and test hashes.`,
-			recommended:
-				"Run the agreed test so it fails before implementation, then passes after implementation, and record both run logs.",
+			text: `Build evidence is not ready for verification: ${structured.reason}. Record a valid red run and green run tied to the current commit and test hashes.`,
+			recommended: structured.satisfy,
 			dependsOn: [],
 		},
 	});
@@ -1163,7 +1356,7 @@ function buildBlock(state: LoopState, problem: string): { state: LoopState; effe
 
 export function blockForBuildEvidenceFailure(
 	state: LoopState,
-	problem: string,
+	problem: string | BuildEvidenceProblem,
 ): { state: LoopState; effects: LoopEffect[] } {
 	return buildBlock(state, problem);
 }

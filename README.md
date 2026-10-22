@@ -146,8 +146,13 @@ questions into one `/loop answer <answer>` round, and shows pending advisor role
 `/loop status` and `loop_status`.
 
 When advisors are done, the lead submits its plan with `loop_submit_plan`. Approval stays human-only: type
-`/loop approve <summary>` yourself when the plan and architecture review are acceptable. Then use `/loop build`, run
-red and green checks with `run_in_pane`, and have the lead record them with `loop_record_build`.
+`/loop approve <summary>` yourself when the plan and architecture review are acceptable. Then use `/loop build` and
+follow the evidence recipe the runner prints: commit the acceptance tests alone, run red evidence at that commit with
+`loop_run_evidence`, implement, then run green evidence at the build commit with `loop_run_evidence`. Have the lead
+pass both returned run ids to `loop_record_build`. If evidence is blocked, the tool returns the exact reason and what
+would satisfy it; build-evidence-only blocks can be retried without another person touch. `loop_run_evidence` only
+runs commands that exactly match the frozen test-design commands, and `loop_record_build` accepts only the run ids that
+`loop_run_evidence` recorded with matching log hashes.
 
 **Grimoire** (`/grimoire`): see below.
 

@@ -34,10 +34,16 @@ answers are included in later advisor tasks and in the frozen brief.
 
 When advisors are complete, the lead submits the plan with `loop_submit_plan` (the same transition and validation as
 `/loop plan <plan>`). Approval is the human gate: `/loop approve <summary>` is accepted only as the person's typed slash
-command, not through a tool or agent message. After approval, use `/loop build`, run the agreed red and green checks
-with `run_in_pane`, then record their run ids with `loop_record_build` or `/loop record-build <json>`. When a
-`/loop answer` unblocks a stage, the runner tells the lead the resumed stage, the answer it recorded, and the next
-expected action.
+command, not through a tool or agent message. After approval, use `/loop build`. The runner tells the lead the evidence
+recipe up front: commit the acceptance tests alone, run red evidence at that commit with `loop_run_evidence`, implement,
+then run green evidence at the build commit with `loop_run_evidence`. Record both returned run ids with
+`loop_record_build` or `/loop record-build <json>`. `loop_run_evidence` rejects any command that is not an exact
+frozen test-design command, and `loop_record_build` accepts only those runner-recorded run ids while checking their log
+hashes. When a `/loop answer` unblocks a stage, the runner tells the lead the resumed stage, the answer it recorded,
+and the next expected action.
+
+Anything the lead's shell can write, including the loop state file, can still be forged; the verifier remains the
+independent check on the frozen brief, diff, hashes and logs.
 
 Other useful verbs:
 
@@ -46,8 +52,9 @@ Other useful verbs:
 | `/loop answer <answer>` | person | Records the answer to the current runner question and resumes the blocked stage. |
 | `loop_submit_plan` | lead | Submits the lead plan after advisor intake, using `/loop plan` validation. |
 | `/loop approve <summary>` | person only | Freezes the brief after architecture review. No tool or agent-message path approves. |
-| `/loop build` | person only after approval | Enters build so run metadata can be stamped for red/green checks. |
-| `loop_record_build` | lead | Records red and green `run_in_pane` ids and dispatches the verifier when evidence is valid. |
+| `/loop build` | person only after approval | Enters build and prints the tests-only red commit -> implementation green commit evidence recipe. |
+| `loop_run_evidence` | lead | Runs an exact frozen test-design command in a temporary worktree at a named commit and records the run id plus log hash. Red should name the tests-only commit; green should name the current build commit. |
+| `loop_record_build` | lead | Records red and green runner-recorded run ids and dispatches the verifier when evidence is valid. If the only active block is build evidence, the lead can retry this without a person answer; stale, git, verifier and decision blocks still need the person. |
 | `/loop resume` | person | Re-emits the current runner effect; it can write a stale block if the saved state no longer matches the checkout. |
 | `/loop abandon [reason]` | person | Archives the active loop state for this worktree and branch. |
 
@@ -65,7 +72,7 @@ Other useful verbs:
 
 ## What exists today
 
-Verified against `main` at `997e0e5`:
+Verified against the current runner shape on `main`:
 
 - **Lead and teammates.** `extensions/lead.ts` gives only the lead the lead rules. The teammate profiles in
   `templates/profile/agents/` include scout, builder, reviewer, and app-tester. Scout and reviewer are read-only.
@@ -91,7 +98,7 @@ Verified against `main` at `997e0e5`:
 
 Keep pure logic separate from Pi wiring:
 
-- This first profile slice does not add the runner, loop state file, or a `loop-pi.ts` extension yet.
+- The runner and state file live in `extensions/loop.ts`, `extensions/loop-pi.ts` and `extensions/loop-state.ts`.
 - `extensions/helper-report.ts`: pure TypeBox validation for base helper reports and role-specific advisor/verifier
   details.
 - `extensions/sharpen-pi.ts`: Pi wiring only; verifier subagent calls skip the automatic helper brief by checking the

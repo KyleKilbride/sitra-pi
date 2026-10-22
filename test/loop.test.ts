@@ -8,6 +8,7 @@ import {
 	applyVerifierReport,
 	approveBrief,
 	blockForAdvisorIntakeFailure,
+	blockForGitFailure,
 	blockForStaleState,
 	blockForVerifierIntakeFailure,
 	briefHash,
@@ -740,15 +741,20 @@ describe("stale state and validation", () => {
 		expect(blocked.questions.at(-1)?.id).toBe("stale-state");
 	});
 
-	test("an existing block is structural and is not overwritten by later problems", () => {
+	test("non-build-evidence structural blocks are not overwritten by later problems", () => {
 		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
 		state = applyAdvisorReport(state, report("intent"), { outputTokens: 1, contextTokens: 0 }).state;
 		const blocked = blockForStaleState(state, { ...context, baseHead: "base-b" }).state;
 		const stacked = blockForAdvisorIntakeFailure(blocked, "codebase", "helper report missing").state;
-		expect(stacked.block).toMatchObject({ kind: "stale", resumeStage: "advise", pendingAdvisors: ["codebase"] });
+		expect(stacked.block).toMatchObject({
+			kind: "stale",
+			resumeStage: "advise",
+			pendingAdvisors: ["codebase"],
+		});
 		expect(stacked.block?.resumeStage).not.toBe("blocked");
 		expect(stacked.block?.resumeStage).not.toBe("needs-person");
 		expect(stacked.questions.at(-1)?.text).toContain("Additional problem");
+		expect(stacked.questions.at(-1)?.text).toContain("helper report missing");
 		const answered = answerLoopQuestion(stacked, {
 			answer: "Continue.",
 			current: { ...context, baseHead: "base-b" },
@@ -772,6 +778,9 @@ describe("stale state and validation", () => {
 describe("build and verify slice", () => {
 	test("starts build only after brief approval, records runner-computed test hashes, and writes an isolated verifier task", () => {
 		let state = approvedState();
+		expect(state.frozenBrief?.advisorRuns.testDesign?.acceptanceTestCommands).toEqual([
+			"pnpm vitest run test/loop.test.ts",
+		]);
 		const started = startBuild(state);
 		state = started.state;
 		expect(state.stage).toBe("build");
@@ -1317,6 +1326,34 @@ describe("build and verify slice", () => {
 				reworkIndex: 0,
 			},
 		]);
+	});
+
+	test("git and stale problems do not erase a pending new-information decision block", () => {
+		const classified = applyVerifierReport(verifiedState(), verifierMiss("new-information"), {
+			acceptedLogs: [],
+		}).state;
+		const gitBlocked = blockForGitFailure(classified, "missing origin/main").state;
+		expect(gitBlocked.block).toMatchObject({ kind: "git", resumeStage: "blocked" });
+		expect(gitBlocked.deferredBlock).toMatchObject({ kind: "new-information", resumeStage: "classify" });
+		expect(gitBlocked.questions.at(-1)?.text).toContain("missing origin/main");
+		const gitAnswered = answerLoopQuestion(gitBlocked, { answer: "fixed git", current: context });
+		expect(gitAnswered.state.stage).toBe("blocked");
+		expect(gitAnswered.state.block).toMatchObject({ kind: "new-information", resumeStage: "classify" });
+		expect(gitAnswered.state.questions.find((question) => question.id === "new-information")?.answer).toBeUndefined();
+		expect(gitAnswered.effects).toMatchObject([{ type: "ask-person", reason: "new-information" }]);
+
+		const staleBlocked = blockForStaleState(classified, { ...context, baseHead: "base-b" }).state;
+		expect(staleBlocked.block).toMatchObject({ kind: "stale", resumeStage: "blocked" });
+		expect(staleBlocked.deferredBlock).toMatchObject({ kind: "new-information", resumeStage: "classify" });
+		expect(staleBlocked.questions.at(-1)?.text).toContain("base head changed");
+		const staleAnswered = answerLoopQuestion(staleBlocked, {
+			answer: "fixed stale",
+			current: { ...context, baseHead: "base-b" },
+		});
+		expect(staleAnswered.state.stage).toBe("blocked");
+		expect(staleAnswered.state.block).toMatchObject({ kind: "new-information", resumeStage: "classify" });
+		expect(staleAnswered.state.questions.find((question) => question.id === "new-information")?.answer).toBeUndefined();
+		expect(staleAnswered.effects).toMatchObject([{ type: "ask-person", reason: "new-information" }]);
 	});
 
 	test("rework proposals require recorded verification summary", () => {
