@@ -9,6 +9,7 @@ import {
 	approveBrief,
 	blockForAdvisorIntakeFailure,
 	blockForStaleState,
+	blockForVerifierIntakeFailure,
 	briefHash,
 	buildBrief,
 	confirmNewInformation,
@@ -583,6 +584,7 @@ describe("build and verify slice", () => {
 		expect(task).toContain('"sha256": "abc123"');
 		expect(task).toContain("/tmp/red.log");
 		expect(task).toContain("/tmp/green.log");
+		expect(task).toContain("Red commit: tests-only");
 		expect(task).toContain("maxVerifierRerunMs: 120000");
 		expect(task).not.toContain("builder transcript");
 		expect(task).not.toContain("## Context from the lead's conversation");
@@ -626,6 +628,35 @@ describe("build and verify slice", () => {
 		});
 		expect(result.state.stage).toBe("verify");
 		expect(result.state.build).toMatchObject({ commit: "impl-head", redCommit: "tests-only" });
+	});
+
+	test("does not persist rejected build evidence, and a corrected record can still succeed", () => {
+		const state = startBuild(approvedState()).state;
+		const rejected = recordBuildEvidence(state, {
+			commit: "commit-a",
+			diff: "diff",
+			testFiles: ["test/loop.test.ts"],
+			testHashes,
+			redRun: run({ log: "/tmp/red.log", exitCode: 0, commit: "tests-only" }),
+			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+			dispatchId: "dispatch",
+			maxVerifierRerunMs: 120_000,
+		});
+		expect(rejected.state.stage).toBe("blocked");
+		expect(rejected.state.build).toEqual({ testFiles: [], testHashes: [] });
+
+		const corrected = recordBuildEvidence(state, {
+			commit: "commit-a",
+			diff: "diff",
+			testFiles: ["test/loop.test.ts"],
+			testHashes,
+			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
+			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+			dispatchId: "dispatch",
+			maxVerifierRerunMs: 120_000,
+		});
+		expect(corrected.state.stage).toBe("verify");
+		expect(corrected.state.build.testHashes).toEqual(testHashes);
 	});
 
 	test("blocks build evidence when test files are empty or not in the frozen test-design brief", () => {
@@ -813,6 +844,200 @@ describe("build and verify slice", () => {
 		expect(blocked.verification).toMatchObject({ status: "blocked" });
 	});
 
+	test("accepts verifier reports that accept the red log at the recorded red commit and green log at the build commit", () => {
+		const state = recordBuildEvidence(startBuild(approvedState()).state, {
+			commit: "impl-head",
+			diff: "diff",
+			testFiles: ["test/loop.test.ts"],
+			testHashes,
+			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
+			greenRun: run({ log: "/tmp/green.log", exitCode: 0, commit: "impl-head" }),
+			dispatchId: "dispatch",
+			maxVerifierRerunMs: 120_000,
+		}).state;
+		const result = applyVerifierReport(
+			state,
+			{
+				status: "done",
+				role: "verifier",
+				dispatchId: "dispatch",
+				summary: "Verified red and green evidence.",
+				evidence: [],
+				openQuestions: [],
+				assumptions: [],
+				details: {
+					checksRun: [],
+					rerunChecks: [],
+					acceptedLogs: [
+						{ log: "/tmp/red.log", reason: "red log is tied to the recorded red commit and hashes" },
+						{ log: "/tmp/green.log", reason: "green log is tied to the build commit and hashes" },
+					],
+					testHashesChecked: ["test/loop.test.ts"],
+					goalMatched: true,
+				},
+			},
+			{
+				acceptedLogs: [
+					run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
+					run({ log: "/tmp/green.log", exitCode: 0, commit: "impl-head" }),
+				],
+			},
+		);
+		expect(result.state.stage).toBe("done");
+	});
+
+	test("rejects accepted red logs when the recorded red commit is missing", () => {
+		const state = recordBuildEvidence(startBuild(approvedState()).state, {
+			commit: "impl-head",
+			diff: "diff",
+			testFiles: ["test/loop.test.ts"],
+			testHashes,
+			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
+			greenRun: run({ log: "/tmp/green.log", exitCode: 0, commit: "impl-head" }),
+			dispatchId: "dispatch",
+			maxVerifierRerunMs: 120_000,
+		}).state;
+		const missingRedCommit = { ...state, build: { ...state.build, redCommit: undefined } };
+		const result = applyVerifierReport(
+			missingRedCommit,
+			{
+				status: "done",
+				role: "verifier",
+				dispatchId: "dispatch",
+				summary: "Accepted red without a recorded red commit.",
+				evidence: [],
+				openQuestions: [],
+				assumptions: [],
+				details: {
+					checksRun: [],
+					rerunChecks: [],
+					acceptedLogs: [{ log: "/tmp/red.log", reason: "looked red" }],
+					testHashesChecked: ["test/loop.test.ts"],
+					goalMatched: true,
+				},
+			},
+			{ acceptedLogs: [run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" })] },
+		);
+		expect(result.state.stage).toBe("blocked");
+		expect(result.state.questions.at(-1)?.text).toContain("recorded red commit is missing");
+		expect(result.state.rejectedVerifierReports?.[0]?.reason).toContain("recorded red commit is missing");
+	});
+
+	test("answering verifier intake includes the person's answer in the re-dispatched verifier task", () => {
+		const state = recordBuildEvidence(startBuild(approvedState()).state, {
+			commit: "commit-a",
+			diff: "diff",
+			testFiles: ["test/loop.test.ts"],
+			testHashes,
+			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
+			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+			dispatchId: "dispatch",
+			maxVerifierRerunMs: 120_000,
+		}).state;
+		const blocked = applyVerifierReport(
+			state,
+			{
+				status: "done",
+				role: "verifier",
+				dispatchId: "dispatch",
+				summary: "Accepted stale log.",
+				evidence: [],
+				openQuestions: [],
+				assumptions: [],
+				details: {
+					checksRun: [],
+					rerunChecks: [],
+					acceptedLogs: [{ log: "/tmp/green.log", reason: "looks green" }],
+					testHashesChecked: ["test/loop.test.ts"],
+					goalMatched: true,
+				},
+			},
+			{ acceptedLogs: [run({ log: "/tmp/green.log", exitCode: 0, commit: "other" })] },
+		).state;
+
+		const answered = answerLoopQuestion(blocked, {
+			answer: "Ask for a fresh verifier report and remind it that red is tied to tests-only.",
+			current: context,
+		});
+		const task = answered.effects[0]?.type === "dispatch-verifier" ? answered.effects[0].task : "";
+		expect(task).toContain("Ask for a fresh verifier report");
+		expect(task).toContain("red is tied to tests-only");
+	});
+
+	test("repeated verifier intake answers replace the previous retry answer in the verifier task", () => {
+		const state = recordBuildEvidence(startBuild(approvedState()).state, {
+			commit: "commit-a",
+			diff: "diff",
+			testFiles: ["test/loop.test.ts"],
+			testHashes,
+			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
+			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+			dispatchId: "dispatch",
+			maxVerifierRerunMs: 120_000,
+		}).state;
+		const blocked = applyVerifierReport(
+			state,
+			{
+				status: "done",
+				role: "verifier",
+				dispatchId: "dispatch",
+				summary: "Accepted stale log.",
+				evidence: [],
+				openQuestions: [],
+				assumptions: [],
+				details: {
+					checksRun: [],
+					rerunChecks: [],
+					acceptedLogs: [{ log: "/tmp/green.log", reason: "looks green" }],
+					testHashesChecked: ["test/loop.test.ts"],
+					goalMatched: true,
+				},
+			},
+			{ acceptedLogs: [run({ log: "/tmp/green.log", exitCode: 0, commit: "other" })] },
+		).state;
+		const first = answerLoopQuestion(blocked, { answer: "First retry instruction.", current: context }).state;
+		const blockedAgain = blockForVerifierIntakeFailure(first, "second rejected report").state;
+		const second = answerLoopQuestion(blockedAgain, { answer: "Second retry instruction.", current: context });
+		const task = second.effects[0]?.type === "dispatch-verifier" ? second.effects[0].task : "";
+		expect(task).not.toContain("First retry instruction.");
+		expect(task).toContain("Second retry instruction.");
+	});
+
+	test("verifier retry answers do not parse or truncate matching text inside the base verifier task", () => {
+		const state = recordBuildEvidence(startBuild(approvedState()).state, {
+			commit: "commit-a",
+			diff: "diff",
+			testFiles: ["test/loop.test.ts"],
+			testHashes,
+			redRun: run({ log: "/tmp/red.log", exitCode: 1, commit: "tests-only" }),
+			greenRun: run({ log: "/tmp/green.log", exitCode: 0 }),
+			dispatchId: "dispatch",
+			maxVerifierRerunMs: 120_000,
+		}).state;
+		const baseTask = [
+			"FRONT-OF-TASK",
+			"Frozen brief text mentions:",
+			"",
+			"Person answer for this verifier retry:",
+			"BACK-OF-TASK",
+		].join("\n");
+		const blocked = blockForVerifierIntakeFailure(
+			{
+				...state,
+				verifierRequest: state.verifierRequest ? { ...state.verifierRequest, task: baseTask } : undefined,
+			},
+			"needs retry",
+		).state;
+
+		const answered = answerLoopQuestion(blocked, { answer: "NEW", current: context });
+		const task = answered.effects[0]?.type === "dispatch-verifier" ? answered.effects[0].task : "";
+		expect(task).toContain("FRONT-OF-TASK");
+		expect(task).toContain("Frozen brief text mentions:");
+		expect(task).toContain("Person answer for this verifier retry:");
+		expect(task).toContain("BACK-OF-TASK");
+		expect(task).toContain("NEW");
+	});
+
 	test("classifies a verifier miss, drafts one Grimoire proposal effect, and allows one rework build", () => {
 		const state = verifiedState();
 		const result = applyVerifierReport(state, verifierMiss("execution-slip"), { acceptedLogs: [] });
@@ -946,6 +1171,12 @@ describe("build and verify slice", () => {
 		expect(result.state.stage).toBe("blocked");
 		expect(result.state.block).toMatchObject({ kind: "intake-failed", resumeStage: "verify" });
 		expect(result.effects[0]).toMatchObject({ type: "ask-person", reason: "intake-failed" });
+		expect(result.state.rejectedVerifierReports).toEqual([
+			expect.objectContaining({
+				reason: expect.stringContaining("tied to commit other"),
+				summary: "Accepted stale log.",
+			}),
+		]);
 
 		const accepted = applyVerifierReport(
 			result.state,

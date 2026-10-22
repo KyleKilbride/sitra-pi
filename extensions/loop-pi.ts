@@ -6,8 +6,9 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Type } from "typebox";
+import { worktreeClean } from "./git-status.ts";
 import { grimoireDir, grimoireStoreStatus, writeProposal } from "./grimoire.ts";
-import { validateHelperReport } from "./helper-report.ts";
+import { type HelperReport, validateHelperReport } from "./helper-report.ts";
 import {
 	type AdvisorRole,
 	answerLoopQuestion,
@@ -133,16 +134,6 @@ function testHashes(cwd: string, files: string[]): LoopTestHash[] {
 
 function currentCommit(cwd: string): string {
 	return git(cwd, ["rev-parse", "HEAD"]);
-}
-
-function worktreeClean(cwd: string): boolean {
-	return (
-		execFileSync("git", ["status", "--porcelain"], {
-			cwd,
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "pipe"],
-		}).trim() === ""
-	);
 }
 
 function diffAgainstBase(cwd: string, state: LoopState): string {
@@ -428,6 +419,7 @@ function loopStatus(cwd: string, state: LoopState): ToolResult {
 		}
 	}
 	const metrics = readLoopMetricStateFiles(profileDir());
+	const rejectedVerifierReports = state.rejectedVerifierReports ?? [];
 	return {
 		content: [
 			{
@@ -437,6 +429,12 @@ function loopStatus(cwd: string, state: LoopState): ToolResult {
 					`goal: ${state.goal}`,
 					loopMetricsLine(metrics.states),
 					...(metrics.badFiles.length ? [`loop metrics unreadable: ${metrics.badFiles.join(", ")}`] : []),
+					...(rejectedVerifierReports.length
+						? [
+								"rejected verifier reports:",
+								...rejectedVerifierReports.map((report) => `- ${report.display}: ${report.reason}`),
+							]
+						: []),
 					...(stale ? [`stale: ${stale.kind === "test-hashes" ? "test hashes" : staleReasonText(stale)}`] : []),
 				].join("\n"),
 			},
@@ -660,44 +658,42 @@ async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<v
 			emitEffects(pi, stale.state, stale.effects);
 			return;
 		}
-		const block = (reason: string) => {
-			const blocked = blockForVerifierIntakeFailure(state, reason);
+		const block = (reason: string, rejection?: { report?: HelperReport; sessionFile?: string }) => {
+			const blocked = blockForVerifierIntakeFailure(state, reason, rejection);
 			writeLoopStateFile(path, blocked.state);
 			emitEffects(pi, blocked.state, blocked.effects);
 		};
 		if (typeof raw.sessionFile !== "string" || !raw.sessionFile) {
-			block("subagent_result is missing sessionFile");
+			block("subagent_result is missing sessionFile", {});
 			return;
 		}
 		let report: unknown;
 		try {
 			report = readHelperReport(raw.sessionFile);
 		} catch (error) {
-			block(String(error));
+			block(String(error), { sessionFile: raw.sessionFile });
 			return;
 		}
 		const valid = validateHelperReport(report);
 		if (!valid.ok) {
-			block(`invalid helper_report from ${raw.sessionFile}: ${valid.reason}`);
-			return;
-		}
-		if (valid.report.dispatchId !== state.verifierRequest.dispatchId) {
-			block(
-				valid.report.dispatchId
-					? `verifier dispatchId ${valid.report.dispatchId} did not match the pending verifier request`
-					: "verifier report is missing dispatchId for the pending verifier request",
-			);
+			block(`invalid helper_report from ${raw.sessionFile}: ${valid.reason}`, { sessionFile: raw.sessionFile });
 			return;
 		}
 		let result: { state: LoopState; effects: LoopEffect[] };
+		let acceptedLogs: ReturnType<typeof parseLoopRunLog>[];
 		try {
 			const details = valid.report.details as { acceptedLogs?: { log?: unknown }[] } | undefined;
-			const acceptedLogs = (details?.acceptedLogs ?? [])
+			acceptedLogs = (details?.acceptedLogs ?? [])
 				.filter((entry): entry is { log: string } => typeof entry.log === "string")
 				.map((entry) => parseLoopRunLog(entry.log));
+		} catch (error) {
+			block(String(error), { report: valid.report, sessionFile: raw.sessionFile });
+			return;
+		}
+		try {
 			result = applyVerifierReport(state, valid.report, { acceptedLogs });
 		} catch (error) {
-			block(String(error));
+			block(String(error), { report: valid.report, sessionFile: raw.sessionFile });
 			return;
 		}
 		let next: LoopState;

@@ -6,6 +6,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Type } from "typebox";
+import { dirtyFiles } from "./git-status.ts";
 import { HELPER_REPORT_TOOL_SCHEMA, renderHelperReport, validateHelperReport } from "./helper-report.ts";
 import { loopStatePath, readLoopStateFile } from "./loop-state.ts";
 import { hashFiles, paneCommand, type RunMeta, readRun, shellQuote } from "./runs.ts";
@@ -126,18 +127,34 @@ export default function sitraLead(pi: Pi): void {
 
 	const runsDir = join(process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent"), "runs");
 
-	const loopRunMeta = (cwd: string, branch?: string): Pick<RunMeta, "loop"> => {
-		if (!branch) return {};
+	const loopRunMeta = (cwd: string, branch?: string): { meta: Pick<RunMeta, "loop">; note?: string } => {
+		if (!branch) return { meta: {} };
 		const worktree = repoRoot(cwd);
 		const profile = process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
 		const statePath = loopStatePath(profile, worktree, branch);
-		if (!existsSync(statePath)) return {};
+		if (!existsSync(statePath)) return { meta: {} };
 		const state = readLoopStateFile(statePath);
-		if (state.stage !== "build") return {};
+		if (state.stage !== "build") {
+			const note =
+				state.stage === "blocked" && state.block
+					? `not recorded as loop evidence: loop is blocked at ${state.block.resumeStage}`
+					: `not recorded as loop evidence: loop stage is ${state.stage}`;
+			return { meta: {}, note };
+		}
 		const testFiles = state.frozenBrief?.advisorRuns.testDesign?.acceptanceTestFiles ?? [];
 		if (testFiles.length === 0) throw new Error("active loop build has no frozen acceptance test files");
+		const dirty = dirtyFiles(cwd);
+		if (dirty.length > 0) {
+			throw new Error(
+				[
+					"active loop build run was not started: worktree must be clean before run_in_pane records loop evidence",
+					"Dirty files:",
+					...dirty.map((file) => `- ${file}`),
+				].join("\n"),
+			);
+		}
 		const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
-		return { loop: { commit, testHashes: hashFiles(worktree, testFiles) } };
+		return { meta: { loop: { commit, testHashes: hashFiles(worktree, testFiles) } } };
 	};
 
 	if (isTeammate) {
@@ -181,6 +198,7 @@ export default function sitraLead(pi: Pi): void {
 			const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${slug}`;
 			const log = join(runsDir, `${runId}.log`);
 			const branch = gitBranch(ctx.cwd);
+			const loopEvidence = loopRunMeta(ctx.cwd, branch);
 			const line = paneCommand(p.command, log, {
 				label: p.label,
 				project: basename(mainCheckout(ctx.cwd)),
@@ -190,7 +208,7 @@ export default function sitraLead(pi: Pi): void {
 					(isTower ? (process.env.SITRA_TOWER_NAME?.trim() ?? "tower") : "lead"),
 				...(ctx.sessionManager?.getSessionId?.() ? { sessionId: ctx.sessionManager.getSessionId() } : {}),
 				command: p.command,
-				...loopRunMeta(ctx.cwd, branch),
+				...loopEvidence.meta,
 			});
 			let where: string;
 			if (process.env.HERDR_ENV === "1" && process.env.HERDR_PANE_ID) {
@@ -252,7 +270,10 @@ export default function sitraLead(pi: Pi): void {
 				content: [
 					{
 						type: "text",
-						text: `Started in ${where}. You'll get a message with the result when it finishes; don't wait or poll. Log: ${log}`,
+						text: [
+							`Started in ${where}. You'll get a message with the result when it finishes; don't wait or poll. Log: ${log}`,
+							...(loopEvidence.note ? [loopEvidence.note] : []),
+						].join("\n"),
 					},
 				],
 				details: { log, runId },

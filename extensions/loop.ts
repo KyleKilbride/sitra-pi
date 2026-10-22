@@ -105,6 +105,22 @@ const ReworkEntry = Type.Object(
 	{ additionalProperties: false },
 );
 
+const RejectedVerifierReport = Type.Object(
+	{
+		reason: Type.String({ minLength: 1 }),
+		display: Type.String({ minLength: 1 }),
+		sessionFile: Type.Optional(Type.String({ minLength: 1 })),
+		status: Type.Optional(Type.Union([Type.Literal("done"), Type.Literal("blocked"), Type.Literal("needs-input")])),
+		summary: Type.Optional(Type.String()),
+		evidence: Type.Optional(Type.Array(Type.String())),
+		acceptedLogs: Type.Optional(Type.Array(LogDecision)),
+		goalMatched: Type.Optional(Type.Boolean()),
+		missClass: Type.Optional(ReworkClass),
+		dispatchId: Type.Optional(Type.String({ minLength: 1 })),
+	},
+	{ additionalProperties: false },
+);
+
 const AdvisorRuns = Type.Object(
 	{
 		intent: Type.Optional(AdvisorRun),
@@ -144,6 +160,7 @@ const VerifierRequest = Type.Object(
 		diffHash: Type.String({ minLength: 1 }),
 		testHashes: Type.Array(TestHash),
 		task: Type.String({ minLength: 1 }),
+		retryAnswer: Type.Optional(Type.String({ minLength: 1 })),
 		dispatchId: Type.String({ minLength: 1 }),
 		runLogs: Type.Array(Type.String()),
 		maxVerifierRerunMs: Type.Number(),
@@ -203,6 +220,7 @@ export const LOOP_STATE_SCHEMA = Type.Object(
 			),
 		),
 		rework: Type.Array(ReworkEntry),
+		rejectedVerifierReports: Type.Optional(Type.Array(RejectedVerifierReport)),
 	},
 	{ additionalProperties: false },
 );
@@ -214,6 +232,7 @@ export type LoopState = Static<typeof LOOP_STATE_SCHEMA>;
 export type LoopBrief = Static<typeof LOOP_BRIEF_SCHEMA>;
 export type LoopTestHash = Static<typeof TestHash>;
 export type StaleReasonKind = "branch-changed" | "base-moved" | "brief" | "test-hashes" | "diff" | "dirty-worktree";
+export type VerifierRejection = Static<typeof RejectedVerifierReport>;
 export interface StaleReason {
 	kind: StaleReasonKind;
 	detail: string;
@@ -247,6 +266,8 @@ export type LoopEffect =
 	| { type: "brief-approved"; brief: LoopBrief }
 	| { type: "dispatch-verifier"; agent: "verifier"; task: string }
 	| { type: "write-grimoire-proposal"; reworkIndex: number };
+
+const VERIFIER_RETRY_ANSWER_HEADER = "Person answer for this verifier retry:";
 
 export function advisorKey(role: AdvisorRole | HelperReportRole): AdvisorKey {
 	if (role === "test-design") return "testDesign";
@@ -297,6 +318,7 @@ export function createLoopState(input: {
 		advisorRuns: {},
 		build: { testFiles: [], testHashes: [] },
 		rework: [],
+		rejectedVerifierReports: [],
 	};
 }
 
@@ -672,7 +694,7 @@ export function nextLoopEffects(state: LoopState): LoopEffect[] {
 	if (state.stage === "architecture-review") return architectureEffects(state).effects;
 	if (state.stage === "brief-approved") return [{ type: "brief-approved", brief: buildBrief(state) }];
 	if (state.stage === "verify" && state.verifierRequest)
-		return [{ type: "dispatch-verifier", agent: "verifier", task: state.verifierRequest.task }];
+		return [{ type: "dispatch-verifier", agent: "verifier", task: verifierDispatchTask(state.verifierRequest) }];
 	if (state.stage === "classify") {
 		const index = pendingProposalIndex(state);
 		return index === undefined ? [] : [proposalEffect(index)];
@@ -703,6 +725,12 @@ export function confirmNewInformation(state: LoopState): { state: LoopState; eff
 	}
 	const next: LoopState = { ...state, stage: "classify", block: undefined, dispatchedAdvisors: [] };
 	return { state: next, effects: nextLoopEffects(next) };
+}
+
+function verifierDispatchTask(request: NonNullable<LoopState["verifierRequest"]>): string {
+	return request.retryAnswer
+		? [request.task, "", VERIFIER_RETRY_ANSWER_HEADER, request.retryAnswer].join("\n")
+		: request.task;
 }
 
 export function denyNewInformation(state: LoopState, reason: string): { state: LoopState; effects: LoopEffect[] } {
@@ -794,11 +822,19 @@ export function answerLoopQuestion(
 		state.block.kind === "grimoire-unreadable" ||
 		state.block.kind === "git"
 	) {
+		const verifierRequest =
+			state.block.kind === "intake-failed" && state.block.resumeStage === "verify" && state.verifierRequest
+				? {
+						...state.verifierRequest,
+						retryAnswer: input.answer,
+					}
+				: state.verifierRequest;
 		const next: LoopState = {
 			...state,
 			stage: state.block.resumeStage,
 			block: undefined,
 			questions: answered,
+			...(verifierRequest ? { verifierRequest } : {}),
 			dispatchedAdvisors: [],
 		};
 		return state.block.pendingAdvisors.length
@@ -1067,6 +1103,7 @@ export function verifierTask(input: {
 	brief: LoopBrief;
 	diff: string;
 	commit: string;
+	redCommit: string;
 	testHashes: LoopTestHash[];
 	redRunLog: string;
 	greenRunLog: string;
@@ -1079,6 +1116,7 @@ export function verifierTask(input: {
 		"You are the independent LOOPS verifier. Start from this runner-written evidence only.",
 		`maxVerifierRerunMs: ${input.maxVerifierRerunMs}`,
 		`Commit: ${input.commit}`,
+		`Red commit: ${input.redCommit}`,
 		`Verifier dispatchId: ${input.dispatchId ?? ""}`,
 		"Set this exact dispatchId in helper_report.",
 		"Frozen brief:",
@@ -1093,7 +1131,7 @@ export function verifierTask(input: {
 		`- greenRunLog: ${input.greenRunLog}`,
 		...(input.greenRunCommand ? [`  command: ${input.greenRunCommand}`] : []),
 		"",
-		"Report only with helper_report role verifier details. Record every check rerun and every log accepted with a reason. Accept a saved log only when it is tied to this exact commit and test hashes; otherwise rerun the check if it is cheap under maxVerifierRerunMs and not a full suite, or report blocked.",
+		"Report only with helper_report role verifier details. Record every check rerun and every log accepted with a reason. Accept the saved red log only when it is tied to the recorded red commit and test hashes. Accept green and rerun logs only when they are tied to the build commit and test hashes; otherwise rerun the check if it is cheap under maxVerifierRerunMs and not a full suite, or report blocked.",
 	].join("\n");
 }
 
@@ -1112,31 +1150,34 @@ export function recordBuildEvidence(
 ): { state: LoopState; effects: LoopEffect[] } {
 	if (state.stage !== "build") throw new Error(`cannot record build evidence while stage is ${state.stage}`);
 	const agreedProblem = agreedTestProblem(state, input.testFiles);
+	if (agreedProblem) return buildBlock(state, agreedProblem);
+	const redProblem = redRunProblem(input.redRun, input.commit, input.testHashes);
+	if (redProblem) return buildBlock(state, redProblem);
+	const greenProblem = greenRunProblem(input.greenRun, input.commit, input.testHashes);
+	if (greenProblem) return buildBlock(state, greenProblem);
+	const redRunLog = input.redRun?.log;
+	const greenRunLog = input.greenRun?.log;
+	if (!redRunLog || !greenRunLog) return buildBlock(state, "run logs are missing");
+	const redCommit = input.redRun?.loop?.commit;
+	if (!redCommit) return buildBlock(state, "red run is missing recorded loop commit metadata");
 	const buildState: LoopState = {
 		...state,
 		build: {
 			commit: input.commit,
-			...(input.redRun?.loop?.commit ? { redCommit: input.redRun.loop.commit } : {}),
+			redCommit,
 			testFiles: input.testFiles,
 			testHashes: input.testHashes,
-			...(input.redRun ? { redRunLog: input.redRun.log } : {}),
-			...(input.greenRun ? { greenRunLog: input.greenRun.log } : {}),
+			redRunLog,
+			greenRunLog,
 			...(input.redRun?.command ? { redRunCommand: input.redRun.command } : {}),
 			...(input.greenRun?.command ? { greenRunCommand: input.greenRun.command } : {}),
 		},
 	};
-	if (agreedProblem) return buildBlock(buildState, agreedProblem);
-	const redProblem = redRunProblem(input.redRun, input.commit, input.testHashes);
-	if (redProblem) return buildBlock(buildState, redProblem);
-	const greenProblem = greenRunProblem(input.greenRun, input.commit, input.testHashes);
-	if (greenProblem) return buildBlock(buildState, greenProblem);
-	const redRunLog = input.redRun?.log;
-	const greenRunLog = input.greenRun?.log;
-	if (!redRunLog || !greenRunLog) return buildBlock(buildState, "run logs are missing");
 	const task = verifierTask({
 		brief: buildBrief(buildState),
 		diff: input.diff,
 		commit: input.commit,
+		redCommit,
 		testHashes: input.testHashes,
 		redRunLog,
 		greenRunLog,
@@ -1162,8 +1203,45 @@ export function recordBuildEvidence(
 	return { state: next, effects: [{ type: "dispatch-verifier", agent: "verifier", task }] };
 }
 
-function verifierBlock(state: LoopState, reason: string): { state: LoopState; effects: LoopEffect[] } {
-	return withBlock(state, {
+function rejectedVerifierReport(
+	reason: string,
+	input: { report?: HelperReport; sessionFile?: string } = {},
+): VerifierRejection {
+	const details = input.report?.details as {
+		acceptedLogs?: Static<typeof LogDecision>[];
+		goalMatched?: boolean;
+		missClass?: LoopReworkClass;
+	};
+	return {
+		reason,
+		display: input.report?.summary ?? input.sessionFile ?? "missing verifier sessionFile",
+		...(input.sessionFile ? { sessionFile: input.sessionFile } : {}),
+		...(input.report
+			? {
+					status: input.report.status,
+					summary: input.report.summary,
+					evidence: input.report.evidence,
+					acceptedLogs: Array.isArray(details?.acceptedLogs) ? details.acceptedLogs : [],
+				}
+			: {}),
+		...(typeof details?.goalMatched === "boolean" ? { goalMatched: details.goalMatched } : {}),
+		...(details?.missClass ? { missClass: details.missClass } : {}),
+		...(input.report?.dispatchId ? { dispatchId: input.report.dispatchId } : {}),
+	};
+}
+
+function verifierBlock(
+	state: LoopState,
+	reason: string,
+	rejection?: { report?: HelperReport; sessionFile?: string },
+): { state: LoopState; effects: LoopEffect[] } {
+	const blockedState = rejection
+		? {
+				...state,
+				rejectedVerifierReports: [...(state.rejectedVerifierReports ?? []), rejectedVerifierReport(reason, rejection)],
+			}
+		: state;
+	return withBlock(blockedState, {
 		kind: "intake-failed",
 		resumeStage: "verify",
 		question: {
@@ -1281,16 +1359,24 @@ export function applyVerifierReport(
 	}
 	if (state.stage !== "verify") throw new Error(`cannot apply verifier report while stage is ${state.stage}`);
 	if (!state.verifierRequest) throw new Error("verify stage is missing verifier request");
-	if (report.role !== "verifier") throw new Error("verifier report is missing role");
+	if (report.role !== "verifier") return verifierBlock(state, "verifier report is missing role", { report });
 	if (!report.dispatchId)
-		return verifierBlock(state, "verifier report is missing dispatchId for the pending verifier request");
+		return verifierBlock(state, "verifier report is missing dispatchId for the pending verifier request", { report });
 	if (report.dispatchId !== state.verifierRequest.dispatchId) {
-		return verifierBlock(state, `verifier dispatchId ${report.dispatchId} did not match the pending verifier request`);
+		return verifierBlock(state, `verifier dispatchId ${report.dispatchId} did not match the pending verifier request`, {
+			report,
+		});
 	}
 	if (!Value.Check(ROLE_HELPER_REPORT_SCHEMAS.verifier, report)) {
 		const [first] = Value.Errors(ROLE_HELPER_REPORT_SCHEMAS.verifier, report);
 		const where = first?.instancePath ? `${first.instancePath}: ` : "";
-		throw new Error(`invalid verifier helper_report: ${where}${first?.message ?? "report does not match schema"}`);
+		return verifierBlock(
+			state,
+			`invalid verifier helper_report: ${where}${first?.message ?? "report does not match schema"}`,
+			{
+				report,
+			},
+		);
 	}
 	const details = report.details as {
 		rerunChecks: Static<typeof RerunCheck>[];
@@ -1299,13 +1385,21 @@ export function applyVerifierReport(
 	};
 	for (const accepted of details.acceptedLogs) {
 		const evidence = options.acceptedLogs.find((run) => run.log === accepted.log);
-		if (!evidence) return verifierBlock(state, `${accepted.log} was accepted but could not be read`);
+		if (!evidence) return verifierBlock(state, `${accepted.log} was accepted but could not be read`, { report });
 		const tie = runTieProblem(evidence, state.verifierRequest.testHashes);
-		if (tie) return verifierBlock(state, `${accepted.log} was accepted but ${tie}`);
-		if (evidence.loop?.commit !== state.verifierRequest.commit) {
+		if (tie) return verifierBlock(state, `${accepted.log} was accepted but ${tie}`, { report });
+		let expectedCommit = state.verifierRequest.commit;
+		if (accepted.log === state.build.redRunLog) {
+			if (!state.build.redCommit) {
+				return verifierBlock(state, `${accepted.log} was accepted but the recorded red commit is missing`, { report });
+			}
+			expectedCommit = state.build.redCommit;
+		}
+		if (evidence.loop?.commit !== expectedCommit) {
 			return verifierBlock(
 				state,
-				`${accepted.log} was accepted but it is tied to commit ${evidence.loop?.commit}, not ${state.verifierRequest.commit}`,
+				`${accepted.log} was accepted but it is tied to commit ${evidence.loop?.commit}, not ${expectedCommit}`,
+				{ report },
 			);
 		}
 	}
@@ -1321,7 +1415,7 @@ export function applyVerifierReport(
 	}
 	if (report.status === "blocked") return verifierBlocked(state, report);
 	const missClass = (report.details as { missClass?: LoopReworkClass }).missClass;
-	if (!missClass) return verifierBlock(state, "verifier miss is missing missClass");
+	if (!missClass) return verifierBlock(state, "verifier miss is missing missClass", { report });
 	return classifiedMiss(state, report, missClass);
 }
 
@@ -1406,8 +1500,9 @@ export function blockForAdvisorIntakeFailure(
 export function blockForVerifierIntakeFailure(
 	state: LoopState,
 	reason: string,
+	rejection?: { report?: HelperReport; sessionFile?: string },
 ): { state: LoopState; effects: LoopEffect[] } {
-	return verifierBlock(state, reason);
+	return verifierBlock(state, reason, rejection);
 }
 
 export function blockForGitFailure(state: LoopState, reason: string): { state: LoopState; effects: LoopEffect[] } {
