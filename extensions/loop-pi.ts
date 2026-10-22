@@ -575,6 +575,12 @@ async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<v
 		}
 		writeLoopStateFile(path, result.state);
 		emitEffects(pi, result.state, result.effects);
+		if (result.state.stage === "done" || result.state.stage === "classify") {
+			pi.sendUserMessage(`LOOPS stage: ${result.state.stage}`, {
+				deliverAs: "followUp",
+				streamingBehavior: "followUp",
+			});
+		}
 		return;
 	}
 	const role = roleForAgent(raw.agent);
