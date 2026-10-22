@@ -1104,8 +1104,16 @@ describe("Pi wiring", () => {
 		let hash = sha256sum(cwd, "loop.test.ts");
 		const redLog = join(profile, "red.log");
 		const greenLog = join(profile, "green.log");
-		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
-		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		writeHeaderLoopLog(redLog, {
+			commit: redCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 1,
+		});
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 0,
+		});
 		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
 
 		writeFileSync(join(cwd, changedFile), contents);
@@ -1125,7 +1133,7 @@ describe("Pi wiring", () => {
 			),
 			ctx(cwd),
 		);
-		let stale = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		const stale = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
 		expect(stale.stage).toBe("blocked");
 		expect(stale.block).toMatchObject({ kind: "stale", resumeStage: "build" });
 		await commands.get("loop")?.handler("answer rebuild", ctx(cwd));
@@ -1139,8 +1147,16 @@ describe("Pi wiring", () => {
 		writeFileSync(join(cwd, "impl.ts"), `fresh green ${changedFile}\n`);
 		greenCommit = commitAll(cwd, `fresh implementation ${changedFile}`);
 		hash = sha256sum(cwd, "loop.test.ts");
-		writeHeaderLoopLog(redLog, { commit: redCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 1 });
-		writeHeaderLoopLog(greenLog, { commit: greenCommit, testHashes: [{ file: "loop.test.ts", sha256: hash }], exitCode: 0 });
+		writeHeaderLoopLog(redLog, {
+			commit: redCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 1,
+		});
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 0,
+		});
 		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
 		resumed = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
 		expect(resumed.stage).toBe("verify");
