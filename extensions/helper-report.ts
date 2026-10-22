@@ -142,6 +142,33 @@ export const HELPER_REPORT_SCHEMA = Type.Union([
 	ROLE_HELPER_REPORT_SCHEMAS.verifier,
 ]);
 
+const roleDetailToolFields = (): Record<string, TSchema> => {
+	const fields: Record<string, TSchema> = {};
+	for (const detail of Object.values(RoleDetails)) {
+		for (const [name, schema] of Object.entries(detail.properties)) fields[name] = Type.Optional(schema);
+	}
+	return fields;
+};
+
+export const HELPER_REPORT_TOOL_SCHEMA = Type.Object(
+	{
+		...BaseFields,
+		role: Type.Optional(
+			Type.Union(
+				Object.keys(ROLE_HELPER_REPORT_SCHEMAS).map((role) => Type.Literal(role as HelperReportRole)),
+				{ description: "Set this when returning one of the role-specific helper reports." },
+			),
+		),
+		details: Type.Optional(
+			Type.Object(roleDetailToolFields(), {
+				additionalProperties: false,
+				description: "Role-specific report details. Set role and fill the matching detail fields.",
+			}),
+		),
+	},
+	{ additionalProperties: false },
+);
+
 export type HelperReportStatus = "done" | "blocked" | "needs-input";
 export type HelperReportRole = "intent" | "codebase" | "test-design" | "architecture" | "verifier";
 

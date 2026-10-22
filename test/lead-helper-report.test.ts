@@ -11,6 +11,10 @@ function fakePi() {
 		{
 			description: string;
 			promptSnippet?: string;
+			parameters: {
+				type?: string;
+				properties?: Record<string, { type?: string }>;
+			};
 			execute: (
 				id: string,
 				params: Record<string, unknown>,
@@ -44,6 +48,11 @@ describe("helper_report", () => {
 		expect(tool).toBeDefined();
 		expect(tool?.description).not.toMatch(/Kyle|Sam/);
 		expect(tool?.promptSnippet).not.toMatch(/Kyle|Sam/);
+		expect(tool?.parameters.type).toBe("object");
+		expect(Object.keys(tool?.parameters.properties ?? {}).length).toBeGreaterThan(0);
+		expect(tool?.parameters.properties?.evidence?.type).toBe("array");
+		expect(tool?.parameters.properties?.openQuestions?.type).toBe("array");
+		expect(tool?.parameters.properties?.assumptions?.type).toBe("array");
 		const result = await tool?.execute(
 			"1",
 			{

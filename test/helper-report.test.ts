@@ -1,6 +1,8 @@
+import * as Value from "typebox/value";
 import { expect, test } from "vitest";
 import {
 	HELPER_REPORT_MARKER,
+	HELPER_REPORT_TOOL_SCHEMA,
 	type HelperReport,
 	helperReportForLead,
 	renderHelperReport,
@@ -15,6 +17,46 @@ const report: HelperReport = {
 	assumptions: ["No schema change was made."],
 };
 
+const roleDetailsFixtures = {
+	intent: {
+		questions: [{ id: "q1", text: "Use the existing CLI shape?", recommended: "Yes, keep it.", dependsOn: [] }],
+		doneCandidates: ["The CLI keeps existing behavior."],
+		ambiguities: [],
+	},
+	codebase: {
+		files: ["cli/init.ts:1"],
+		existingTests: ["test/init.test.ts:1"],
+		facts: ["Verified: init scaffolds recursively."],
+		boundaries: ["Observed: Pi wiring stays out of cli/."],
+		owners: ["Verified: git log -S scaffoldProfile names the relevant maintainer."],
+	},
+	"test-design": {
+		acceptanceTests: [
+			{
+				name: "private profile wins",
+				proves: "existing files are not overwritten",
+				targetFile: "test/init.test.ts",
+				command: "pnpm vitest run test/init.test.ts",
+			},
+		],
+	},
+	architecture: {
+		fitsExistingArchitecture: true,
+		boundaryConcerns: [],
+		needlessLayersOrCode: [],
+		simplerShape: ["Keep validation in helper-report.ts."],
+		checklistEntriesUsed: ["read-only helpers"],
+		checklist: { state: "ok", path: "$PI_CODING_AGENT_DIR/agents/checklists/architecture.md" },
+	},
+	verifier: {
+		checksRun: ["pnpm vitest run test/helper-report.test.ts"],
+		rerunChecks: [{ command: "pnpm vitest run test/helper-report.test.ts", log: "/tmp/run.log", reason: "cheap" }],
+		acceptedLogs: [{ log: "/tmp/red.log", reason: "tied to commit and test hashes" }],
+		testHashesChecked: ["test/helper-report.test.ts sha256:abc"],
+		goalMatched: true,
+	},
+} as const;
+
 test("helper reports are validated fields, not accepted prose", () => {
 	expect(validateHelperReport(report)).toEqual({ ok: true, report });
 	expect(validateHelperReport({ ...report, status: "done-ish" })).toMatchObject({
@@ -25,51 +67,19 @@ test("helper reports are validated fields, not accepted prose", () => {
 });
 
 test("role reports validate their role-specific details", () => {
-	const details = {
-		intent: {
-			questions: [{ id: "q1", text: "Use the existing CLI shape?", recommended: "Yes, keep it.", dependsOn: [] }],
-			doneCandidates: ["The CLI keeps existing behavior."],
-			ambiguities: [],
-		},
-		codebase: {
-			files: ["cli/init.ts:1"],
-			existingTests: ["test/init.test.ts:1"],
-			facts: ["Verified: init scaffolds recursively."],
-			boundaries: ["Observed: Pi wiring stays out of cli/."],
-			owners: ["Verified: git log -S scaffoldProfile names the relevant maintainer."],
-		},
-		"test-design": {
-			acceptanceTests: [
-				{
-					name: "private profile wins",
-					proves: "existing files are not overwritten",
-					targetFile: "test/init.test.ts",
-					command: "pnpm vitest run test/init.test.ts",
-				},
-			],
-		},
-		architecture: {
-			fitsExistingArchitecture: true,
-			boundaryConcerns: [],
-			needlessLayersOrCode: [],
-			simplerShape: ["Keep validation in helper-report.ts."],
-			checklistEntriesUsed: ["read-only helpers"],
-			checklist: { state: "ok", path: "$PI_CODING_AGENT_DIR/agents/checklists/architecture.md" },
-		},
-		verifier: {
-			checksRun: ["pnpm vitest run test/helper-report.test.ts"],
-			rerunChecks: [{ command: "pnpm vitest run test/helper-report.test.ts", log: "/tmp/run.log", reason: "cheap" }],
-			acceptedLogs: [{ log: "/tmp/red.log", reason: "tied to commit and test hashes" }],
-			testHashesChecked: ["test/helper-report.test.ts sha256:abc"],
-			goalMatched: true,
-		},
-	} as const;
-
-	for (const [role, roleDetails] of Object.entries(details)) {
+	for (const [role, roleDetails] of Object.entries(roleDetailsFixtures)) {
 		expect(validateHelperReport({ ...report, status: "done", role, details: roleDetails })).toMatchObject({
 			ok: true,
 			report: { role, details: roleDetails },
 		});
+	}
+});
+
+test("declared tool schema accepts every valid strict role report fixture", () => {
+	for (const [role, details] of Object.entries(roleDetailsFixtures)) {
+		const candidate = { ...report, status: "done", role, details };
+		expect(validateHelperReport(candidate)).toMatchObject({ ok: true });
+		expect(Value.Check(HELPER_REPORT_TOOL_SCHEMA, candidate)).toBe(true);
 	}
 });
 
