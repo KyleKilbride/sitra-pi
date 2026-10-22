@@ -230,6 +230,36 @@ async function recordBuildWithLogs(
 	return tools.get("loop_record_build")?.execute("1", { redRunId, greenRunId }, undefined, undefined, ctx(cwd));
 }
 
+async function prepareVerifierLoop(
+	profile: string,
+	cwd: string,
+	commands: ReturnType<typeof fakePi>["commands"],
+	tools: ReturnType<typeof fakePi>["tools"],
+) {
+	approvedLoop(profile, cwd);
+	writeFileSync(join(cwd, "loop.test.ts"), "red\n");
+	const redCommit = commitAll(cwd, "add tests");
+	writeFileSync(join(cwd, "impl.ts"), "green\n");
+	const greenCommit = commitAll(cwd, "implement");
+	await commands.get("loop")?.handler("build", ctx(cwd));
+	const hash = sha256sum(cwd, "loop.test.ts");
+	const redLog = join(profile, "red.log");
+	const greenLog = join(profile, "green.log");
+	writeHeaderLoopLog(redLog, {
+		commit: redCommit,
+		testHashes: [{ file: "loop.test.ts", sha256: hash }],
+		exitCode: 1,
+	});
+	writeHeaderLoopLog(greenLog, {
+		commit: greenCommit,
+		testHashes: [{ file: "loop.test.ts", sha256: hash }],
+		exitCode: 0,
+	});
+	await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
+	const path = loopStatePath(profile, cwd, "feature");
+	return { path, verifierTask: readLoopStateFile(path).verifierRequest?.task ?? "", greenLog };
+}
+
 function status(cwd: string): string {
 	return execFileSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" });
 }
@@ -1159,6 +1189,15 @@ describe("Pi wiring", () => {
 		const blocked = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
 		expect(blocked.stage).toBe("blocked");
 		expect(blocked.block).toMatchObject({ kind: "intake-failed" });
+		expect(blocked.rejectedVerifierReports).toEqual([
+			expect.objectContaining({
+				summary: "verifier summary",
+				reason: expect.stringContaining("tied to commit stale"),
+			}),
+		]);
+		const status = await tools.get("loop_status")?.execute("1", {}, undefined, undefined, ctx(cwd));
+		expect(status?.content[0]?.text).toContain("rejected verifier reports:");
+		expect(status?.content[0]?.text).toContain("verifier summary");
 
 		approvedLoop(profile, cwd);
 		await commands.get("loop")?.handler("build", ctx(cwd));
@@ -1196,6 +1235,108 @@ describe("Pi wiring", () => {
 			proposalPath: expect.stringMatching(/^proposals\//),
 		});
 		expect(missed.verification).toMatchObject({ status: "missed", summary: "Verifier found a miss." });
+	});
+
+	test.each([
+		{
+			name: "unreadable verifier session file",
+			sessionFile: (profile: string) => join(profile, "missing-verifier-session.jsonl"),
+			reason: "could not read helper session file",
+			sessionFileShown: true,
+		},
+		{
+			name: "invalid helper_report fields",
+			sessionFile: (_profile: string) =>
+				sessionFileWithHelperReport({
+					status: "done",
+					role: "verifier",
+					summary: "Invalid verifier report.",
+					evidence: [],
+					openQuestions: [],
+					assumptions: [],
+					details: { checksRun: [] },
+				}),
+			reason: "invalid helper_report",
+			sessionFileShown: true,
+		},
+		{
+			name: "parsed report rejected by verifier intake",
+			sessionFile: (_profile: string, verifierTask: string) =>
+				sessionFileWithVerifierReport(
+					{
+						status: "done",
+						summary: "Base report without verifier role.",
+						evidence: [],
+						openQuestions: [],
+						assumptions: [],
+					},
+					verifierTask,
+				),
+			reason: "verifier report is missing role",
+			summary: "Base report without verifier role.",
+		},
+		{
+			name: "accepted run log cannot be parsed",
+			sessionFile: (profile: string, verifierTask: string) => {
+				const badLog = join(profile, "bad-run.log");
+				writeFileSync(badLog, `${HEADER_MARKER}{\n`);
+				return sessionFileWithVerifierReport(
+					helperReport("verifier", {
+						checksRun: [],
+						rerunChecks: [],
+						acceptedLogs: [{ log: badLog, reason: "claimed valid" }],
+						testHashesChecked: ["loop.test.ts"],
+						goalMatched: true,
+					}),
+					verifierTask,
+				);
+			},
+			reason: "invalid run header",
+			summary: "verifier summary",
+		},
+	])("records rejected verifier reports in loop_status for $name", async (scenario) => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		const prepared = await prepareVerifierLoop(profile, cwd, commands, tools);
+		const sessionFile = scenario.sessionFile(profile, prepared.verifierTask);
+
+		await handlers.get("message_end")?.(subagentResult("verifier", sessionFile), ctx(cwd));
+
+		const blocked = readLoopStateFile(prepared.path);
+		expect(blocked.stage).toBe("blocked");
+		expect(blocked.rejectedVerifierReports).toHaveLength(1);
+		expect(blocked.rejectedVerifierReports?.[0]?.reason).toContain(scenario.reason);
+		if (scenario.summary) expect(blocked.rejectedVerifierReports?.[0]?.summary).toBe(scenario.summary);
+		if (scenario.sessionFileShown) expect(blocked.rejectedVerifierReports?.[0]?.sessionFile).toBe(sessionFile);
+		const status = await tools.get("loop_status")?.execute("1", {}, undefined, undefined, ctx(cwd));
+		expect(status?.content[0]?.text).toContain("rejected verifier reports:");
+		expect(status?.content[0]?.text).toContain(scenario.reason);
+		if (scenario.summary) expect(status?.content[0]?.text).toContain(scenario.summary);
+		if (scenario.sessionFileShown) expect(status?.content[0]?.text).toContain(sessionFile);
+	});
+
+	test("records rejected verifier reports in loop_status when verifier result has no sessionFile", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		const prepared = await prepareVerifierLoop(profile, cwd, commands, tools);
+
+		await handlers.get("message_end")?.(
+			{ message: { customType: "subagent_result", details: { agent: "verifier" } } },
+			ctx(cwd),
+		);
+
+		const blocked = readLoopStateFile(prepared.path);
+		expect(blocked.stage).toBe("blocked");
+		expect(blocked.rejectedVerifierReports).toEqual([
+			expect.objectContaining({ reason: "subagent_result is missing sessionFile" }),
+		]);
+		const status = await tools.get("loop_status")?.execute("1", {}, undefined, undefined, ctx(cwd));
+		expect(status?.content[0]?.text).toContain("rejected verifier reports:");
+		expect(status?.content[0]?.text).toContain("subagent_result is missing sessionFile");
 	});
 
 	test("verifier misses write Grimoire proposals only and ask before one rework build", async () => {

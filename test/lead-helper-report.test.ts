@@ -289,6 +289,103 @@ describe("run_in_pane loop metadata", () => {
 		).rejects.toThrow(/invalid loop state JSON/);
 	});
 
+	test("rejects loop build runs on a dirty worktree and names a renamed file with quoted characters", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-lead-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { tools } = fakePi();
+		const { cwd, head } = gitWorktree();
+		const state: LoopState = {
+			...createLoopState({
+				worktree: cwd,
+				branch: "feature",
+				baseRef: "origin/main",
+				baseHead: head,
+				goal: "Add the runner",
+				limits: [],
+				done: [],
+			}),
+			stage: "build",
+			frozenBrief: {
+				version: 1,
+				goal: "Add the runner",
+				limits: [],
+				done: [],
+				questions: [],
+				advisorRuns: {
+					testDesign: {
+						status: "done",
+						summary: "tests",
+						evidence: [],
+						openQuestions: [],
+						assumptions: [],
+						acceptanceTestFiles: ["loop.test.ts"],
+					},
+				},
+			},
+		};
+		writeLoopStateFile(loopStatePath(profile, cwd, "feature"), state);
+		const renamed = "renamed loop é.test.ts";
+		execFileSync("git", ["mv", "loop.test.ts", renamed], { cwd, stdio: "ignore" });
+
+		let message = "";
+		try {
+			await tools
+				.get("run_in_pane")
+				?.execute("1", { command: "true", label: "loop red" }, undefined, undefined, { cwd });
+		} catch (error) {
+			message = String(error);
+		}
+		expect(message).toContain("worktree must be clean");
+		expect(message).toContain("loop.test.ts");
+		expect(message).toContain(renamed);
+	});
+
+	test("makes runs while the loop is blocked visibly non-evidence", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-lead-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { tools } = fakePi();
+		const { cwd, head } = gitWorktree();
+		const state: LoopState = {
+			...createLoopState({
+				worktree: cwd,
+				branch: "feature",
+				baseRef: "origin/main",
+				baseHead: head,
+				goal: "Add the runner",
+				limits: [],
+				done: [],
+			}),
+			stage: "blocked",
+			block: {
+				kind: "questions",
+				questionId: "build-evidence",
+				resumeStage: "build",
+				pendingAdvisors: [],
+			},
+			questions: [
+				{
+					id: "build-evidence",
+					text: "Need valid build evidence.",
+					recommended: "Record fresh runs.",
+					dependsOn: [],
+				},
+			],
+		};
+		writeLoopStateFile(loopStatePath(profile, cwd, "feature"), state);
+
+		const result = await tools
+			.get("run_in_pane")
+			?.execute("1", { command: "true", label: "blocked run" }, undefined, undefined, { cwd });
+		expect(result?.content[0]?.text).toContain("not recorded as loop evidence: loop is blocked at build");
+		const details = result?.details as { log: string };
+		execFileSync("bash", [
+			"-c",
+			`for i in {1..50}; do [ -s ${JSON.stringify(details.log)} ] && exit 0; sleep 0.05; done; exit 1`,
+		]);
+		const header = readRunHeader(readFileSync(details.log, "utf8").split("\n")[0] ?? "");
+		expect(header?.meta.loop).toBeUndefined();
+	});
+
 	test("ordinary runs during build record missing frozen test files instead of failing", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-lead-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
