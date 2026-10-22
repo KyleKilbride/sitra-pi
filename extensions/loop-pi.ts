@@ -3,8 +3,9 @@
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { Type } from "typebox";
 import { worktreeClean } from "./git-status.ts";
 import { grimoireDir, grimoireStoreStatus, writeProposal } from "./grimoire.ts";
@@ -60,7 +61,7 @@ import {
 	readLoopStateFile,
 	writeLoopStateFile,
 } from "./loop-state.ts";
-import { hashFiles, readRun, readRunHeader } from "./runs.ts";
+import { hashFiles, paneCommand, readRun, readRunHeader } from "./runs.ts";
 import { childAgent, objectRecord, subagentChildren } from "./subagent-tools.ts";
 
 interface Ctx {
@@ -170,6 +171,15 @@ function runsDir(): string {
 	return join(profileDir(), "runs");
 }
 
+function runId(label: string): string {
+	const slug = label
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-|-$/g, "")
+		.slice(0, 40);
+	return `${new Date().toISOString().replace(/[:.]/g, "-")}-${slug}`;
+}
+
 function runLogForId(runId: string): string {
 	if (!runId || runId.includes("/") || runId.includes("\\"))
 		throw new Error("run id must be a file id from run_in_pane");
@@ -178,6 +188,35 @@ function runLogForId(runId: string): string {
 
 function frozenTestFiles(state: LoopState): string[] {
 	return state.frozenBrief?.advisorRuns.testDesign?.acceptanceTestFiles ?? [];
+}
+
+function buildEvidenceRecordingState(state: LoopState): LoopState {
+	if (state.stage === "build") return state;
+	if (state.stage === "blocked" && state.block?.kind === "build-evidence" && state.block.resumeStage === "build") {
+		return {
+			...state,
+			stage: "build",
+			block: undefined,
+			build: { testFiles: [], testHashes: [] },
+			verifierRequest: undefined,
+			dispatchedAdvisors: [],
+		};
+	}
+	return state;
+}
+
+function blockProblems(state: LoopState): string[] {
+	const problems = state.block?.problems ?? [];
+	if (problems.length > 0) {
+		return problems.flatMap((problem) => [`reason: ${problem.reason}`, `satisfy: ${problem.satisfy}`]);
+	}
+	const question = state.questions.find((item) => item.id === state.block?.questionId);
+	if (!state.block || !question) return [];
+	return [`block: ${state.block.kind}`, `reason: ${question.text}`, `satisfy: ${question.recommended}`];
+}
+
+function toolStageText(state: LoopState): string {
+	return [`stage: ${state.stage}`, ...blockProblems(state)].join("\n");
 }
 
 function testsOnlyAncestorProblem(cwd: string, testHashes: LoopTestHash[], redCommit: string): string | undefined {
@@ -225,6 +264,79 @@ function parseLoopRunLog(log: string): {
 		...(header?.meta.command ? { command: header.meta.command } : {}),
 		...(loop ? { loop } : {}),
 	};
+}
+
+function linkNodeModules(sourceWorktree: string, runWorktree: string): void {
+	const source = join(sourceWorktree, "node_modules");
+	const target = join(runWorktree, "node_modules");
+	if (!existsSync(source) || existsSync(target)) return;
+	symlinkSync(source, target, "dir");
+}
+
+function runEvidenceInWorktree(input: {
+	cwd: string;
+	state: LoopState;
+	phase: "red" | "green";
+	commit: string;
+	command: string;
+}): { runId: string; log: string; exitCode: number; commit: string; testHashes: LoopTestHash[] } {
+	const sourceWorktree = git(input.cwd, ["rev-parse", "--show-toplevel"]);
+	const buildCommit = currentCommit(input.cwd);
+	const requestedCommit = git(input.cwd, ["rev-parse", input.commit]);
+	if (input.phase === "green" && requestedCommit !== buildCommit) {
+		throw new Error(`green evidence commit must be the current build commit ${buildCommit}`);
+	}
+	const testFiles = frozenTestFiles(input.state);
+	if (testFiles.length === 0) throw new Error("active loop build has no frozen acceptance test files");
+	mkdirSync(runsDir(), { recursive: true });
+	const id = runId(`loop-${input.phase}-evidence`);
+	const log = runLogForId(id);
+	const tempParent = mkdtempSync(join(tmpdir(), "sitra-loop-evidence-"));
+	const tempWorktree = join(tempParent, "worktree");
+	let added = false;
+	try {
+		execFileSync("git", ["worktree", "add", "--detach", tempWorktree, requestedCommit], {
+			cwd: sourceWorktree,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		added = true;
+		linkNodeModules(sourceWorktree, tempWorktree);
+		const actualCommit = currentCommit(tempWorktree);
+		const hashes = hashFiles(tempWorktree, testFiles);
+		const missing = hashes.find((item) => item.missing);
+		if (missing)
+			throw new Error(`test file ${missing.file} does not exist at ${input.phase} evidence commit ${actualCommit}`);
+		const line = paneCommand(input.command, log, {
+			label: `loop ${input.phase} evidence`,
+			project: basename(sourceWorktree),
+			branch: input.state.branch,
+			agent: "loop-runner",
+			command: input.command,
+			loop: { commit: actualCommit, testHashes: hashes },
+		});
+		try {
+			execFileSync("bash", ["-c", line], { cwd: tempWorktree, stdio: "ignore" });
+		} catch {
+			// Non-zero commands are valid red evidence; the run log carries the structured exit code.
+		}
+		const status = readRun(readFileSync(log, "utf8"));
+		if (!status.done || status.exitCode === undefined || Number.isNaN(status.exitCode)) {
+			throw new Error(`loop ${input.phase} evidence did not record an exit code`);
+		}
+		return { runId: id, log, exitCode: status.exitCode, commit: actualCommit, testHashes: hashes };
+	} finally {
+		if (added) {
+			try {
+				execFileSync("git", ["worktree", "remove", "--force", tempWorktree], {
+					cwd: sourceWorktree,
+					stdio: "ignore",
+				});
+			} catch {
+				// The rmSync below still removes the temporary directory if Git has already detached it.
+			}
+		}
+		rmSync(tempParent, { recursive: true, force: true });
+	}
 }
 
 interface GitState {
@@ -552,28 +664,32 @@ function recordBuildFromParams(
 	state: LoopState,
 	params: { redRunId: string; greenRunId: string; maxVerifierRerunMs?: number },
 ): LoopState {
+	const recordingState = buildEvidenceRecordingState(state);
 	if (!worktreeClean(ctx.cwd)) {
-		const blocked = blockForBuildEvidenceFailure(state, "worktree must be clean before recording build evidence");
+		const blocked = blockForBuildEvidenceFailure(
+			recordingState,
+			"worktree must be clean before recording build evidence",
+		);
 		writeLoopStateFile(path, blocked.state);
 		emitEffects(pi, blocked.state, blocked.effects);
 		return blocked.state;
 	}
-	const testFiles = frozenTestFiles(state);
+	const testFiles = frozenTestFiles(recordingState);
 	const hashes = testHashes(ctx.cwd, testFiles);
 	const redRun = parseLoopRunLog(runLogForId(params.redRunId));
 	const greenRun = parseLoopRunLog(runLogForId(params.greenRunId));
 	if (redRun.loop?.commit) {
 		const ancestorProblem = testsOnlyAncestorProblem(ctx.cwd, hashes, redRun.loop.commit);
 		if (ancestorProblem) {
-			const blocked = blockForBuildEvidenceFailure(state, ancestorProblem);
+			const blocked = blockForBuildEvidenceFailure(recordingState, ancestorProblem);
 			writeLoopStateFile(path, blocked.state);
 			emitEffects(pi, blocked.state, blocked.effects);
 			return blocked.state;
 		}
 	}
-	const result = recordBuildEvidence(state, {
+	const result = recordBuildEvidence(recordingState, {
 		commit: currentCommit(ctx.cwd),
-		diff: diffAgainstBase(ctx.cwd, state),
+		diff: diffAgainstBase(ctx.cwd, recordingState),
 		testFiles,
 		testHashes: hashes,
 		redRun,
@@ -696,7 +812,10 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 		const result = startBuild(loadMutableState(gitState));
 		persistAndEmit(pi, path, result);
 		pi.sendUserMessage(
-			"LOOPS stage: build\nMaterialize the agreed tests, run red then green checks, and record evidence with loop_record_build.",
+			[
+				"LOOPS stage: build",
+				"Evidence recipe: commit the acceptance tests alone, run red evidence at that commit with loop_run_evidence, implement, then run green evidence at the build commit with loop_run_evidence. Record both run ids with loop_record_build.",
+			].join("\n"),
 			{ deliverAs: "followUp", streamingBehavior: "followUp" },
 		);
 		return;
@@ -932,6 +1051,70 @@ export default function sitraLoop(pi: Pi): void {
 	});
 
 	pi.registerTool({
+		name: "loop_run_evidence",
+		label: "Run loop evidence",
+		description:
+			"Run LOOPS red or green evidence in a temporary detached git worktree at the named commit and return a run id for loop_record_build.",
+		promptSnippet:
+			"loop_run_evidence: run the agreed test command for red at the tests-only commit and green at the build commit",
+		parameters: Type.Object(
+			{
+				phase: Type.Union([Type.Literal("red"), Type.Literal("green")]),
+				commit: Type.String({ minLength: 1 }),
+				command: Type.String({ minLength: 1 }),
+			},
+			{ additionalProperties: false },
+		),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const checkout = checkoutGit(ctx.cwd);
+			const { path, state } = loadExistingCurrentState(checkout);
+			const recordingState = buildEvidenceRecordingState(state);
+			if (recordingState.stage !== "build") {
+				throw new Error(`cannot run loop evidence while stage is ${state.stage}`);
+			}
+			let gitState: GitState;
+			try {
+				gitState = currentGitForState(ctx.cwd, recordingState);
+			} catch (error) {
+				const blocked = blockForGitFailure(state, String(error));
+				writeLoopStateFile(path, blocked.state);
+				emitEffects(pi, blocked.state, blocked.effects);
+				return { content: [{ type: "text", text: toolStageText(blocked.state) }], details: blocked.state };
+			}
+			const stale = staleReason(recordingState, { branch: gitState.branch, baseHead: gitState.baseHead });
+			if (stale) {
+				const blocked = blockForStaleState(recordingState, { branch: gitState.branch, baseHead: gitState.baseHead });
+				writeLoopStateFile(path, blocked.state);
+				emitEffects(pi, blocked.state, blocked.effects);
+				return { content: [{ type: "text", text: toolStageText(blocked.state) }], details: blocked.state };
+			}
+			const p = params as { phase: "red" | "green"; commit: string; command: string };
+			const result = runEvidenceInWorktree({
+				cwd: ctx.cwd,
+				state: recordingState,
+				phase: p.phase,
+				commit: p.commit,
+				command: p.command,
+			});
+			return {
+				content: [
+					{
+						type: "text",
+						text: [
+							`phase: ${p.phase}`,
+							`commit: ${result.commit}`,
+							`exit: ${result.exitCode}`,
+							`runId: ${result.runId}`,
+							`log: ${result.log}`,
+						].join("\n"),
+					},
+				],
+				details: result,
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: "loop_record_build",
 		label: "Record loop build evidence",
 		description:
@@ -957,13 +1140,13 @@ export default function sitraLoop(pi: Pi): void {
 				const blocked = blockForGitFailure(state, String(error));
 				writeLoopStateFile(path, blocked.state);
 				emitEffects(pi, blocked.state, blocked.effects);
-				return { content: [{ type: "text", text: `stage: ${blocked.state.stage}` }], details: blocked.state };
+				return { content: [{ type: "text", text: toolStageText(blocked.state) }], details: blocked.state };
 			}
 			const stale = blockIfBuildOrVerifyStale(ctx.cwd, path, state, gitState);
 			if (stale) {
 				emitEffects(pi, stale.state, stale.effects);
 				return {
-					content: [{ type: "text", text: `stage: ${stale.state.stage}\nstale block recorded` }],
+					content: [{ type: "text", text: `${toolStageText(stale.state)}\nstale block recorded` }],
 					details: stale.state,
 				};
 			}
@@ -974,7 +1157,7 @@ export default function sitraLoop(pi: Pi): void {
 			};
 			const next = recordBuildFromParams(pi, ctx, path, state, p);
 			return {
-				content: [{ type: "text", text: `stage: ${next.stage}` }],
+				content: [{ type: "text", text: toolStageText(next) }],
 				details: next,
 			};
 		},

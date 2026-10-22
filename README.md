@@ -146,8 +146,13 @@ questions into one `/loop answer <answer>` round, and shows pending advisor role
 `/loop status` and `loop_status`.
 
 When advisors are done, the lead submits its plan with `loop_submit_plan`. Approval stays human-only: type
-`/loop approve <summary>` yourself when the plan and architecture review are acceptable. Then use `/loop build`, run
-red and green checks with `run_in_pane`, and have the lead record them with `loop_record_build`.
+`/loop approve <summary>` yourself when the plan and architecture review are acceptable. Then use `/loop build` and
+follow the evidence recipe the runner prints: commit the acceptance tests alone, run red evidence at that commit with
+`loop_run_evidence`, implement, then run green evidence at the build commit with `loop_run_evidence`. Have the lead
+pass both returned run ids to `loop_record_build`. If evidence is blocked, the tool returns the exact reason and what
+would satisfy it; build-evidence-only blocks can be retried without another person touch. `run_in_pane` evidence is
+still accepted when its logs are stamped with loop metadata, but `loop_run_evidence` is the preferred path because the
+runner checks out the named commit in a temporary worktree and stamps the log itself.
 
 **Grimoire** (`/grimoire`): see below.
 

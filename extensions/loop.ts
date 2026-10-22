@@ -140,6 +140,7 @@ const Block = Type.Object(
 			Type.Literal("grimoire-unreadable"),
 			Type.Literal("intake-failed"),
 			Type.Literal("questions"),
+			Type.Literal("build-evidence"),
 			Type.Literal("git"),
 			Type.Literal("new-information"),
 			Type.Literal("new-information-denied"),
@@ -150,6 +151,17 @@ const Block = Type.Object(
 		questionId: Type.String({ minLength: 1 }),
 		resumeStage: LoopStageSchema,
 		pendingAdvisors: Type.Array(AdvisorRoleSchema),
+		problems: Type.Optional(
+			Type.Array(
+				Type.Object(
+					{
+						reason: Type.String({ minLength: 1 }),
+						satisfy: Type.String({ minLength: 1 }),
+					},
+					{ additionalProperties: false },
+				),
+			),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -563,6 +575,7 @@ function withBlock(
 		question: LoopQuestion;
 		pendingAdvisors?: AdvisorRole[];
 		resumeStage?: LoopStage;
+		problems?: NonNullable<LoopState["block"]>["problems"];
 	},
 ): { state: LoopState; effects: LoopEffect[] } {
 	if (state.block) {
@@ -597,6 +610,7 @@ function withBlock(
 			questionId: input.question.id,
 			resumeStage,
 			pendingAdvisors: input.pendingAdvisors ?? pendingAdvisorsForResume(state),
+			...(input.problems ? { problems: input.problems } : {}),
 		},
 		questions: [...state.questions, input.question],
 		dispatchedAdvisors: [],
@@ -975,6 +989,18 @@ export function answerLoopQuestion(
 		};
 		return roles.length ? dispatch(next, roles) : { state: next, effects: nextLoopEffects(next) };
 	}
+	if (state.block.kind === "build-evidence") {
+		const next: LoopState = {
+			...state,
+			stage: state.block.resumeStage,
+			block: undefined,
+			questions: answered,
+			build: { testFiles: [], testHashes: [] },
+			verifierRequest: undefined,
+			dispatchedAdvisors: [],
+		};
+		return { state: next, effects: nextLoopEffects(next) };
+	}
 	const roles = state.block.kind === "questions" ? state.block.pendingAdvisors : affectedAdvisors(state);
 	if (state.block.kind === "questions" && state.block.resumeStage === "classify") {
 		const next: LoopState = { ...state, stage: state.block.resumeStage, block: undefined, questions: answered };
@@ -1148,14 +1174,15 @@ function greenRunProblem(
 }
 
 function buildBlock(state: LoopState, problem: string): { state: LoopState; effects: LoopEffect[] } {
+	const satisfy = "Record red evidence on a tests-only ancestor commit and green evidence on the current build commit.";
 	return withBlock(state, {
-		kind: "questions",
+		kind: "build-evidence",
 		resumeStage: "build",
+		problems: [{ reason: problem, satisfy }],
 		question: {
 			id: "build-evidence",
 			text: `Build evidence is not ready for verification: ${problem}. Record a valid red run and green run tied to the current commit and test hashes.`,
-			recommended:
-				"Run the agreed test so it fails before implementation, then passes after implementation, and record both run logs.",
+			recommended: satisfy,
 			dependsOn: [],
 		},
 	});
