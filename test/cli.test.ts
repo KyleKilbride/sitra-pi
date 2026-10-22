@@ -87,9 +87,9 @@ describe("launch", () => {
 		expect(() => piEnv("/home/sam/.sitra", { name: "Sam", skills: [], handoverTokens: 0 }, {})).toThrow(
 			/handoverTokens.*received 0.*type number/i,
 		);
-		expect(() =>
-			piEnv("/home/sam/.sitra", { name: "Sam", skills: [], handoverTokens: "many" as never }, {}),
-		).toThrow(/handoverTokens.*received "many".*type string/i);
+		expect(() => piEnv("/home/sam/.sitra", { name: "Sam", skills: [], handoverTokens: "many" as never }, {})).toThrow(
+			/handoverTokens.*received "many".*type string/i,
+		);
 	});
 
 	test("a lead started from inside the tower's shell is a lead, not a second tower", () => {

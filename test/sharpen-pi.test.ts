@@ -176,9 +176,9 @@ describe("handing over", () => {
 		expect(() => handlers.get("session_start")?.({}, ctx)).toThrow(/SITRA_HANDOVER_TOKENS.*context window/i);
 		expect(notes.join(" ")).toMatch(/SITRA_HANDOVER_TOKENS.*200000.*context window/i);
 		notes.length = 0;
-		expect(() =>
-			handlers.get("model_select")?.({ model: { contextWindow: 100_000 } }, { ui: ctx.ui }),
-		).toThrow(/SITRA_HANDOVER_TOKENS.*context window/i);
+		expect(() => handlers.get("model_select")?.({ model: { contextWindow: 100_000 } }, { ui: ctx.ui })).toThrow(
+			/SITRA_HANDOVER_TOKENS.*context window/i,
+		);
 		expect(notes.join(" ")).toMatch(/SITRA_HANDOVER_TOKENS.*200000.*context window/i);
 	});
 

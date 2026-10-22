@@ -55,7 +55,9 @@ export function configuredHandoverTokens(): number | undefined {
 
 function currentHandoverThreshold(contextWindow: number): number {
 	const raw = process.env.SITRA_HANDOVER_TOKENS;
-	return raw === undefined ? handoverThreshold(contextWindow) : handoverThreshold(contextWindow, raw, "SITRA_HANDOVER_TOKENS");
+	return raw === undefined
+		? handoverThreshold(contextWindow)
+		: handoverThreshold(contextWindow, raw, "SITRA_HANDOVER_TOKENS");
 }
 
 function failLoudlyOnHandoverConfig(error: unknown, ctx: Ctx): void {
