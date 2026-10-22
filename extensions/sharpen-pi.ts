@@ -15,6 +15,7 @@ import {
 	helperBrief,
 	type Msg,
 	stubToolResults,
+	validateHandoverTokens,
 } from "./sharpen.ts";
 
 interface Ctx {
@@ -46,18 +47,15 @@ const on = () => process.env.SITRA_SHARPEN !== "0";
 const isHelper = () => Boolean(process.env.PI_SUBAGENT_NAME);
 const BRIEF_MARK = "## Context from the lead's conversation";
 
-function configuredHandoverTokens(): number | undefined {
+export function configuredHandoverTokens(): number | undefined {
 	const raw = process.env.SITRA_HANDOVER_TOKENS;
 	if (raw === undefined) return undefined;
-	const value = Number(raw);
-	if (!Number.isInteger(value) || value <= 0) {
-		throw new HandoverConfigError("handoverTokens in config.json must be a positive integer.");
-	}
-	return value;
+	return validateHandoverTokens(raw, "SITRA_HANDOVER_TOKENS");
 }
 
 function currentHandoverThreshold(contextWindow: number): number {
-	return handoverThreshold(contextWindow, configuredHandoverTokens());
+	const raw = process.env.SITRA_HANDOVER_TOKENS;
+	return raw === undefined ? handoverThreshold(contextWindow) : handoverThreshold(contextWindow, raw, "SITRA_HANDOVER_TOKENS");
 }
 
 function failLoudlyOnHandoverConfig(error: unknown, ctx: Ctx): void {
@@ -65,6 +63,23 @@ function failLoudlyOnHandoverConfig(error: unknown, ctx: Ctx): void {
 		ctx.ui?.notify(error.message, "error");
 		throw error;
 	}
+}
+
+function modelContextWindow(model: unknown): number | undefined {
+	return model && typeof model === "object" && typeof (model as { contextWindow?: unknown }).contextWindow === "number"
+		? (model as { contextWindow: number }).contextWindow
+		: undefined;
+}
+
+function validateConfiguredThreshold(ctx: Ctx, model?: unknown): void {
+	const raw = process.env.SITRA_HANDOVER_TOKENS;
+	if (raw === undefined) return;
+	const window = modelContextWindow(model) ?? modelContextWindow(ctx.model);
+	if (window === undefined) {
+		configuredHandoverTokens();
+		return;
+	}
+	currentHandoverThreshold(window);
 }
 
 function branchMessages(ctx: Ctx): Msg[] {
@@ -161,8 +176,21 @@ export default function sitraSharpen(pi: Pi): void {
 	 * handover that can't get under it (a small window, little to summarise) never repeats every turn.
 	 */
 	let armed = true;
-	pi.on("session_start", () => {
+	pi.on("session_start", (_event: unknown, ctx) => {
 		armed = true;
+		try {
+			validateConfiguredThreshold(ctx);
+		} catch (error) {
+			failLoudlyOnHandoverConfig(error, ctx);
+		}
+	});
+
+	pi.on("model_select", (event: { model?: unknown }, ctx) => {
+		try {
+			validateConfiguredThreshold(ctx, event?.model);
+		} catch (error) {
+			failLoudlyOnHandoverConfig(error, ctx);
+		}
 	});
 
 	// After Pi has finished its own retries, recovery and follow-ups: compacting earlier (at agent_end) would abort them.

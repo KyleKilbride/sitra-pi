@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { HANDOVER_INSTRUCTIONS, type Msg } from "../extensions/sharpen.ts";
-import sitraSharpen from "../extensions/sharpen-pi.ts";
+import sitraSharpen, { configuredHandoverTokens } from "../extensions/sharpen-pi.ts";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
@@ -126,6 +126,16 @@ describe("hand-offs to helpers", () => {
 });
 
 describe("handing over", () => {
+	test("configuredHandoverTokens reads the runtime env and rejects invalid values with source, value and type", () => {
+		expect(configuredHandoverTokens()).toBeUndefined();
+		vi.stubEnv("SITRA_HANDOVER_TOKENS", "250000");
+		expect(configuredHandoverTokens()).toBe(250_000);
+		vi.stubEnv("SITRA_HANDOVER_TOKENS", "0");
+		expect(() => configuredHandoverTokens()).toThrow(/SITRA_HANDOVER_TOKENS.*received "0".*type string/i);
+		vi.stubEnv("SITRA_HANDOVER_TOKENS", "1.5");
+		expect(() => configuredHandoverTokens()).toThrow(/SITRA_HANDOVER_TOKENS.*received "1.5".*type string/i);
+	});
+
 	test("when a run ends past the threshold, it says so and compacts with the handover instructions; below it, nothing", () => {
 		const { handlers } = fakePi();
 		const notes: string[] = [];
@@ -156,6 +166,47 @@ describe("handing over", () => {
 		vi.stubEnv("PI_SUBAGENT_NAME", "builder");
 		handlers.get("agent_settled")?.({ aborted: false }, ctx(410_000));
 		expect(compacts).toHaveLength(1);
+	});
+
+	test("session start and model selection validate handoverTokens against the active model window", () => {
+		const { handlers } = fakePi();
+		const notes: string[] = [];
+		vi.stubEnv("SITRA_HANDOVER_TOKENS", "200000");
+		const ctx = { ui: { notify: (m: string) => notes.push(m) }, model: { contextWindow: 100_000 } };
+		expect(() => handlers.get("session_start")?.({}, ctx)).toThrow(/SITRA_HANDOVER_TOKENS.*context window/i);
+		expect(notes.join(" ")).toMatch(/SITRA_HANDOVER_TOKENS.*200000.*context window/i);
+		notes.length = 0;
+		expect(() =>
+			handlers.get("model_select")?.({ model: { contextWindow: 100_000 } }, { ui: ctx.ui }),
+		).toThrow(/SITRA_HANDOVER_TOKENS.*context window/i);
+		expect(notes.join(" ")).toMatch(/SITRA_HANDOVER_TOKENS.*200000.*context window/i);
+	});
+
+	test("agent_settled loudly rejects invalid and above-window handoverTokens", () => {
+		const { handlers } = fakePi();
+		const notes: string[] = [];
+		const ctx = {
+			sessionManager: {
+				getBranch: () => [
+					{ type: "message", message: user("a") },
+					{ type: "message", message: user("b") },
+				],
+			},
+			ui: { notify: (m: string) => notes.push(m) },
+			getContextUsage: () => ({ tokens: 90_000, contextWindow: 100_000 }),
+			compact() {},
+		};
+		vi.stubEnv("SITRA_HANDOVER_TOKENS", "0");
+		expect(() => handlers.get("agent_settled")?.({ aborted: false }, ctx)).toThrow(
+			/SITRA_HANDOVER_TOKENS.*positive integer/i,
+		);
+		expect(notes.join(" ")).toMatch(/SITRA_HANDOVER_TOKENS.*received "0".*type string/i);
+		notes.length = 0;
+		vi.stubEnv("SITRA_HANDOVER_TOKENS", "120000");
+		expect(() => handlers.get("agent_settled")?.({ aborted: false }, ctx)).toThrow(
+			/SITRA_HANDOVER_TOKENS.*context window/i,
+		);
+		expect(notes.join(" ")).toMatch(/SITRA_HANDOVER_TOKENS.*120000.*context window/i);
 	});
 
 	test("after a handover, it waits until the context has dropped below the line before it can hand over again", () => {
@@ -324,6 +375,25 @@ describe("handing over mid-run", () => {
 		const again = ctx(412_000);
 		expect(await te(turnEnd(run(10)), again.ctx)).toBeUndefined();
 		expect(again.calls).toHaveLength(0);
+	});
+
+	test("turn_end loudly rejects invalid and above-window handoverTokens", async () => {
+		const { handlers } = fakePi();
+		const notes: string[] = [];
+		const base = ctx(90_000).ctx as {
+			ui: { notify(m: string): void };
+			getContextUsage(): { tokens: number; contextWindow: number };
+		};
+		base.ui = { notify: (m: string) => notes.push(m) };
+		base.getContextUsage = () => ({ tokens: 90_000, contextWindow: 100_000 });
+		const te = handlers.get("turn_end") as (event: unknown, ctx: unknown) => Promise<unknown>;
+		vi.stubEnv("SITRA_HANDOVER_TOKENS", "1.5");
+		await expect(te(turnEnd(run(6)), base)).rejects.toThrow(/SITRA_HANDOVER_TOKENS.*positive integer/i);
+		expect(notes.join(" ")).toMatch(/SITRA_HANDOVER_TOKENS.*received "1.5".*type string/i);
+		notes.length = 0;
+		vi.stubEnv("SITRA_HANDOVER_TOKENS", "120000");
+		await expect(te(turnEnd(run(6)), base)).rejects.toThrow(/SITRA_HANDOVER_TOKENS.*context window/i);
+		expect(notes.join(" ")).toMatch(/SITRA_HANDOVER_TOKENS.*120000.*context window/i);
 	});
 });
 

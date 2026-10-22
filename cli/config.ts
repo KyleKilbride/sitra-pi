@@ -40,9 +40,6 @@ export function readConfig(sitra: string): Config {
 	const file = join(sitra, "config.json");
 	if (!existsSync(file)) return { name: "", skills: [] };
 	const raw = JSON.parse(readFileSync(file, "utf8")) as Partial<Config>;
-	if (raw.handoverTokens !== undefined && (!Number.isInteger(raw.handoverTokens) || raw.handoverTokens <= 0)) {
-		throw new Error(`${file}: handoverTokens must be a positive integer.`);
-	}
 	const base: Config = {
 		name: raw.name ?? "",
 		skills: raw.skills ?? [],
