@@ -2,10 +2,11 @@ import { describe, expect, test } from "vitest";
 import type { HelperReport } from "../extensions/helper-report.ts";
 import {
 	advisorKey,
+	answerLoopQuestion,
 	applyAdvisorReport,
 	applyLeadPlan,
-	applyPersonAnswer,
 	approveBrief,
+	blockForStaleState,
 	briefHash,
 	buildBrief,
 	createLoopState,
@@ -64,7 +65,7 @@ describe("loop schema and start", () => {
 		});
 
 		expect(result.state.stage).toBe("advise");
-		expect(result.effects).toEqual([{ type: "dispatch-advisors", roles: ["intent", "codebase"] }]);
+		expect(result.effects).toMatchObject([{ type: "dispatch-advisors", roles: ["intent", "codebase"] }]);
 		expect(validateLoopState(result.state)).toMatchObject({ ok: true });
 	});
 
@@ -77,7 +78,7 @@ describe("loop schema and start", () => {
 			grimoire: { state: "missing", dir: "/profile/grimoire", reason: "not created yet" },
 		});
 		expect(missing.state.stage).toBe("advise");
-		expect(missing.effects).toEqual([{ type: "dispatch-advisors", roles: ["intent", "codebase"] }]);
+		expect(missing.effects).toMatchObject([{ type: "dispatch-advisors", roles: ["intent", "codebase"] }]);
 
 		const unreadable = startLoop({
 			...context,
@@ -101,13 +102,13 @@ describe("advisor transition and ordering", () => {
 			limits: [],
 			done: [],
 		});
-		expect(nextLoopEffects(state)).toEqual([{ type: "dispatch-advisors", roles: ["intent", "codebase"] }]);
+		expect(nextLoopEffects(state)).toMatchObject([{ type: "dispatch-advisors", roles: ["intent", "codebase"] }]);
 
 		state = applyAdvisorReport(state, report("intent"), { tokenCount: 111 }).state;
 		expect(nextLoopEffects(state)).toEqual([]);
 
 		state = applyAdvisorReport(state, report("codebase"), { tokenCount: 222 }).state;
-		expect(nextLoopEffects(state)).toEqual([{ type: "dispatch-advisors", roles: ["test-design"] }]);
+		expect(nextLoopEffects(state)).toMatchObject([{ type: "dispatch-advisors", roles: ["test-design"] }]);
 
 		state = applyAdvisorReport(
 			state,
@@ -121,15 +122,48 @@ describe("advisor transition and ordering", () => {
 		expect(state.questions).toHaveLength(1);
 		expect(state.questions[0]?.text).toContain("Should the CLI command be /loop start?");
 
-		state = applyPersonAnswer(state, {
+		const answered = answerLoopQuestion(state, {
 			answer: "Yes, use /loop start.",
-			affectedAdvisors: ["test-design"],
-		}).state;
+			current: context,
+		});
+		state = answered.state;
 		expect(state.stage).toBe("advise");
+		expect(state.questions[0]?.answer).toBe("Yes, use /loop start.");
 		expect(state.advisorRuns.intent?.summary).toBe("intent done");
 		expect(state.advisorRuns.codebase?.summary).toBe("codebase done");
 		expect(state.advisorRuns.testDesign).toBeUndefined();
-		expect(nextLoopEffects(state)).toEqual([{ type: "dispatch-advisors", roles: ["test-design"] }]);
+		expect(answered.effects).toMatchObject([{ type: "dispatch-advisors", roles: ["test-design"] }]);
+	});
+
+	test("groups several ready questions into one person question", () => {
+		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+		state = applyAdvisorReport(
+			state,
+			report("intent", {
+				openQuestions: ["Which command starts the graph?"],
+				details: {
+					questions: [
+						{
+							id: "q1",
+							text: "Should the runner ask before build?",
+							recommended: "Yes, ask before build.",
+							dependsOn: [],
+						},
+					],
+					doneCandidates: [],
+					ambiguities: [],
+				},
+			}),
+			{ tokenCount: 1 },
+		).state;
+		state = applyAdvisorReport(state, report("codebase", { openQuestions: ["Should state live in the profile?"] }), {
+			tokenCount: 2,
+		}).state;
+		expect(state.stage).toBe("needs-person");
+		expect(state.questions).toHaveLength(1);
+		expect(state.questions[0]?.text).toContain("Should the runner ask before build?");
+		expect(state.questions[0]?.text).toContain("Which command starts the graph?");
+		expect(state.questions[0]?.text).toContain("Should state live in the profile?");
 	});
 
 	test("moves from completed advisors to lead plan, architecture review, and explicit brief approval", () => {
@@ -140,9 +174,10 @@ describe("advisor transition and ordering", () => {
 		expect(state.stage).toBe("plan");
 		expect(nextLoopEffects(state)).toMatchObject([{ type: "write-lead-plan" }]);
 
-		state = applyLeadPlan(state, "Keep Pi wiring thin and transition logic pure.").state;
+		const planned = applyLeadPlan(state, "Keep Pi wiring thin and transition logic pure.");
+		state = planned.state;
 		expect(state.stage).toBe("architecture-review");
-		expect(nextLoopEffects(state)).toMatchObject([{ type: "dispatch-advisors", roles: ["architecture"] }]);
+		expect(planned.effects).toMatchObject([{ type: "dispatch-advisors", roles: ["architecture"] }]);
 
 		state = applyAdvisorReport(state, report("architecture"), { tokenCount: 4 }).state;
 		expect(state.stage).toBe("architecture-review");
@@ -168,6 +203,29 @@ describe("advisor transition and ordering", () => {
 		).state;
 		expect(state.stage).toBe("needs-person");
 		expect(state.questions).toHaveLength(1);
+	});
+
+	test("a blocked architecture report with no open question still asks the person", () => {
+		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+		state = applyAdvisorReport(state, report("intent"), { tokenCount: 1 }).state;
+		state = applyAdvisorReport(state, report("codebase"), { tokenCount: 2 }).state;
+		state = applyAdvisorReport(state, report("test-design"), { tokenCount: 3 }).state;
+		state = applyLeadPlan(state, "Plan").state;
+		state = applyAdvisorReport(state, report("architecture", { status: "blocked", summary: "Checklist unreadable." }), {
+			tokenCount: 4,
+		}).state;
+		expect(state.stage).toBe("needs-person");
+		expect(state.questions[0]?.text).toContain("Checklist unreadable.");
+	});
+
+	test("rejects reports outside the active stage or from undispatched advisors", () => {
+		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+		expect(() => applyAdvisorReport({ ...state, stage: "blocked" }, report("intent"), { tokenCount: 1 })).toThrow(
+			/cannot apply advisor report/,
+		);
+		expect(() => applyAdvisorReport(state, report("test-design"), { tokenCount: 1 })).toThrow(/not dispatched/);
+		state = applyAdvisorReport(state, report("intent"), { tokenCount: 1 }).state;
+		expect(() => applyAdvisorReport(state, report("architecture"), { tokenCount: 1 })).toThrow(/not dispatched/);
 	});
 });
 
@@ -212,6 +270,32 @@ describe("stale state and validation", () => {
 			frozenBriefHash: "not-current",
 		};
 		expect(staleReason(state, context)).toContain("frozen brief hash");
+	});
+
+	test("a freshly approved brief is not stale, and stale blocks can be left by answering", () => {
+		let state = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+		state = applyAdvisorReport(state, report("intent"), { tokenCount: 1 }).state;
+		state = applyAdvisorReport(state, report("codebase"), { tokenCount: 2 }).state;
+		state = applyAdvisorReport(state, report("test-design"), { tokenCount: 3 }).state;
+		state = applyLeadPlan(state, "Plan").state;
+		state = applyAdvisorReport(state, report("architecture"), { tokenCount: 4 }).state;
+		state = approveBrief(state, {
+			approvedBy: "person",
+			approvedAt: "2026-10-22T00:00:00.000Z",
+			summary: "Approved.",
+		}).state;
+		expect(staleReason(state, context)).toBeUndefined();
+		const blocked = blockForStaleState(state, { ...context, branch: "feature", baseHead: "base-b" }).state;
+		expect(blocked.stage).toBe("blocked");
+		expect(blocked.frozenBriefHash).toBe(state.frozenBriefHash);
+		const answered = answerLoopQuestion(blocked, {
+			answer: "Continue on the new branch and base.",
+			current: { ...context, branch: "feature", baseHead: "base-b" },
+		}).state;
+		expect(answered.stage).toBe("brief-approved");
+		expect(answered.branch).toBe("feature");
+		expect(answered.baseHead).toBe("base-b");
+		expect(staleReason(answered, { ...context, branch: "feature", baseHead: "base-b" })).toBeUndefined();
 	});
 
 	test("validates TypeBox state fields loudly", () => {

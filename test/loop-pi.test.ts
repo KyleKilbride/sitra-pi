@@ -1,9 +1,10 @@
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { createLoopState } from "../extensions/loop.ts";
-import sitraLoop, { loopStatePath, readLoopStateFile } from "../extensions/loop-pi.ts";
+import { createLoopState, staleReason } from "../extensions/loop.ts";
+import sitraLoop, { loopStatePath, readLoopStateFile, writeLoopStateFile } from "../extensions/loop-pi.ts";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
@@ -44,6 +45,58 @@ const ctx = (cwd: string, messages: string[] = []) => ({
 	},
 });
 
+function gitWorktree(): { cwd: string; head: string } {
+	const cwd = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-work-")));
+	execFileSync("git", ["init", "-b", "main"], { cwd, stdio: "ignore" });
+	writeFileSync(join(cwd, "README.md"), "test\n");
+	execFileSync("git", ["add", "README.md"], { cwd, stdio: "ignore" });
+	execFileSync("git", ["-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", "initial"], {
+		cwd,
+		stdio: "ignore",
+	});
+	const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
+	return { cwd, head };
+}
+
+function helperReport(role: string, details: unknown, openQuestions: string[] = []) {
+	return {
+		status: openQuestions.length ? "needs-input" : "done",
+		role,
+		summary: `${role} summary`,
+		evidence: [`${role}.md:1`],
+		openQuestions,
+		assumptions: [],
+		details,
+	};
+}
+
+function sessionFileWithHelperReport(report: unknown): string {
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-session-")));
+	const file = join(dir, "session.jsonl");
+	writeFileSync(
+		file,
+		`${JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "helper_report", details: report } })}\n`,
+	);
+	return file;
+}
+
+function subagentResult(agent: string, sessionFile: string, tokens = { outputTokens: 30, contextTokens: 70 }) {
+	return {
+		message: {
+			role: "custom",
+			customType: "subagent_result",
+			details: {
+				id: "sub-1",
+				name: agent,
+				agent,
+				status: "completed",
+				sessionFile,
+				...tokens,
+			},
+		},
+	};
+}
+
 afterEach(() => vi.unstubAllEnvs());
 
 describe("loop state files", () => {
@@ -81,76 +134,108 @@ describe("Pi wiring", () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
 		const { commands, userMessages } = fakePi();
-		const cwd = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-work-")));
+		const { cwd, head } = gitWorktree();
 
 		await commands.get("loop")?.handler("start Add the runner", ctx(cwd));
 
-		const files = readFileSync(loopStatePath(profile, cwd, "unknown"), "utf8");
+		const files = readFileSync(loopStatePath(profile, cwd, "main"), "utf8");
 		expect(files).toContain("Add the runner");
+		expect(files).toContain(head);
 		expect(userMessages.join("\n")).toContain("intent-advisor");
 		expect(userMessages.join("\n")).toContain("codebase-advisor");
+		await expect(commands.get("loop")?.handler("start Again", ctx(cwd))).rejects.toThrow(/already exists/);
 	});
 
-	test("loop_status is read-only and returns the current state", async () => {
+	test("loop_status is read-only and reports staleness without writing", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
 		const { commands, tools } = fakePi();
-		const cwd = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-work-")));
+		const { cwd } = gitWorktree();
 		await commands.get("loop")?.handler("start Add the runner", ctx(cwd));
+		const path = loopStatePath(profile, cwd, "main");
+		const state = readLoopStateFile(path);
+		writeLoopStateFile(path, { ...state, branch: "old-main" });
+		const before = readFileSync(path, "utf8");
 
 		const result = await tools.get("loop_status")?.execute("1", {}, undefined, undefined, ctx(cwd));
 		expect(result?.content[0]?.text).toContain("stage: advise");
-		expect(result?.details).toMatchObject({ stage: "advise", goal: "Add the runner" });
+		expect(result?.content[0]?.text).toContain("stale:");
+		expect(readFileSync(path, "utf8")).toBe(before);
 	});
 
-	test("subagent_result details are validated helper reports and update state through pure transitions", async () => {
+	test("subagent_result reads helper_report details from the child session file", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
 		const { commands, handlers, userMessages } = fakePi();
-		const cwd = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-work-")));
+		const { cwd } = gitWorktree();
 		await commands.get("loop")?.handler("start Add the runner", ctx(cwd));
 
-		await handlers.get("subagent_result")?.(
-			{
-				sessionFile: "/tmp/session.jsonl",
-				details: {
-					status: "done",
-					role: "intent",
-					summary: "Intent clear.",
-					evidence: ["docs/LOOPS.md:1"],
-					openQuestions: [],
-					assumptions: [],
-					details: { questions: [], doneCandidates: ["Approved brief."], ambiguities: [] },
-				},
-				usage: { totalTokens: 1234 },
-			},
+		expect(handlers.has("subagent_result")).toBe(false);
+		await handlers.get("message_end")?.(
+			subagentResult(
+				"intent-advisor",
+				sessionFileWithHelperReport(helperReport("intent", { questions: [], doneCandidates: [], ambiguities: [] })),
+			),
 			ctx(cwd),
 		);
-		await handlers.get("subagent_result")?.(
-			{
-				sessionFile: "/tmp/session.jsonl",
-				details: {
-					status: "done",
-					role: "codebase",
-					summary: "Loop belongs in extensions.",
-					evidence: ["extensions/lead.ts:1"],
-					openQuestions: [],
-					assumptions: [],
-					details: { files: ["extensions/loop.ts"], existingTests: [], facts: [], boundaries: [], owners: [] },
-				},
-				tokenCount: 2222,
-			},
+		await handlers.get("message_end")?.(
+			subagentResult(
+				"codebase-advisor",
+				sessionFileWithHelperReport(
+					helperReport("codebase", {
+						files: ["extensions/loop.ts"],
+						existingTests: [],
+						facts: [],
+						boundaries: [],
+						owners: [],
+					}),
+				),
+			),
 			ctx(cwd),
 		);
 
-		expect(readLoopStateFile(loopStatePath(profile, cwd, "unknown")).advisorRuns.intent?.tokenCount).toBe(1234);
+		expect(readLoopStateFile(loopStatePath(profile, cwd, "main")).advisorRuns.intent?.tokenCount).toBe(100);
 		expect(userMessages.join("\n")).toContain("test-design-advisor");
 
 		await expect(
-			handlers.get("subagent_result")?.(
-				{ sessionFile: "/tmp/session.jsonl", details: { status: "done-ish" } },
+			handlers.get("message_end")?.(
+				subagentResult("test-design-advisor", sessionFileWithHelperReport({ status: "done-ish" })),
 				ctx(cwd),
 			),
 		).rejects.toThrow(/invalid helper_report/);
+	});
+
+	test("ordinary teammate results are ignored when no state or advisor dispatch matches", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers } = fakePi();
+		const { cwd } = gitWorktree();
+		const result = subagentResult(
+			"builder",
+			sessionFileWithHelperReport(helperReport("intent", { questions: [], doneCandidates: [], ambiguities: [] })),
+		);
+		await expect(handlers.get("message_end")?.(result, ctx(cwd))).resolves.toBeUndefined();
+		await commands.get("loop")?.handler("start Add the runner", ctx(cwd));
+		await expect(handlers.get("message_end")?.(result, ctx(cwd))).resolves.toBeUndefined();
+	});
+
+	test("stale blocking through wiring can be left by /loop answer", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands } = fakePi();
+		const { cwd, head } = gitWorktree();
+		await commands.get("loop")?.handler("start Add the runner", ctx(cwd));
+		const path = loopStatePath(profile, cwd, "main");
+		const state = readLoopStateFile(path);
+		writeLoopStateFile(path, { ...state, branch: "old-main" });
+		await expect(commands.get("loop")?.handler("plan should fail", ctx(cwd))).rejects.toThrow(/stale/);
+		const blocked = readLoopStateFile(path);
+		expect(blocked.stage).toBe("blocked");
+		await commands.get("loop")?.handler("answer continue on current branch", ctx(cwd));
+		const answered = readLoopStateFile(path);
+		expect(answered.stage).toBe("advise");
+		expect(answered.branch).toBe("main");
+		expect(answered.baseHead).toBe(head);
+		expect(staleReason(answered, { branch: "main", baseHead: head })).toBeUndefined();
 	});
 });
