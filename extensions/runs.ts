@@ -48,6 +48,20 @@ export function waitForPaneShellReady(herdr: (args: string[]) => string, pane: s
 	herdr(["pane", "wait-output", pane, "--match", `sitra-ready-${nonce}`, "--timeout", "15000"]);
 }
 
+export function startCommandInFreshPane(herdr: (args: string[]) => string, pane: string, line: string): void {
+	try {
+		waitForPaneShellReady(herdr, pane);
+	} catch (error) {
+		try {
+			herdr(["pane", "close", pane]);
+		} catch {
+			// The readiness error is the useful failure; closing is best-effort cleanup.
+		}
+		throw error;
+	}
+	herdr(["pane", "run", pane, line]);
+}
+
 /** Write the script that records who runs it, runs the command, keeps a full log, and records the exit code. */
 export function writeRunScript(
 	scriptPath: string,

@@ -975,6 +975,7 @@ describe("tower edge cases", () => {
 			expect(runCalls).toHaveLength(1);
 			expect(runCalls[0]?.[3]).toContain("printf 'sitra-%s\\n'");
 			expect(runCalls[0]?.[3]).not.toMatch(/^bash /);
+			expect(readHerdrCalls(logFile)).toContainEqual(["pane", "close", "wNew:p1"]);
 		} finally {
 			s.restore();
 		}

@@ -8,7 +8,7 @@ import { existsSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Type } from "typebox";
 import { writeTowerSummary } from "./radar-store.ts";
-import { waitForPaneShellReady } from "./runs.ts";
+import { startCommandInFreshPane } from "./runs.ts";
 import {
 	auditSessionsFriction,
 	createTailReader,
@@ -703,7 +703,7 @@ export default function sitraTower(pi: Pi): void {
 				label,
 			);
 			try {
-				waitForPaneShellReady(herdr, paneId);
+				startCommandInFreshPane(herdr, paneId, line);
 			} catch {
 				return {
 					content: [
@@ -713,7 +713,7 @@ export default function sitraTower(pi: Pi): void {
 								`Spawned workspace ${workspaceNumber ? `#${workspaceNumber} ` : ""}"${label}" (${workspaceId ?? paneId}).`,
 								`Worktree: ${prepared.worktreePath} (branch ${prepared.branch} from ${prepared.baseRef})`,
 								`Copied .env files: ${prepared.copiedEnvFiles.length > 0 ? prepared.copiedEnvFiles.join(", ") : "none"}`,
-								`The worker was not started: pane shell never became ready (${paneId}).`,
+								`The worker was not started: pane shell never became ready (${paneId}); the new pane was closed.`,
 								`Script: ${scriptPath}`,
 							].join("\n"),
 						},
@@ -730,7 +730,6 @@ export default function sitraTower(pi: Pi): void {
 					},
 				};
 			}
-			herdr(["pane", "run", paneId, line]);
 
 			return {
 				content: [
