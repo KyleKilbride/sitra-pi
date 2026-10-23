@@ -3,14 +3,13 @@
  * visible herdr panes instead of blocking, and a "needs you" signal in herdr when a question is waiting.
  */
 import { execFileSync, spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Type } from "typebox";
 import { dirtyFiles } from "./git-status.ts";
 import { HELPER_REPORT_TOOL_SCHEMA, renderHelperReport, validateHelperReport } from "./helper-report.ts";
 import { loopStatePath, readLoopStateFile } from "./loop-state.ts";
-import { hashFiles, type RunMeta, readRun, shellQuote, writeRunScript } from "./runs.ts";
+import { hashFiles, type RunMeta, readRun, waitForPaneShellReady, writeRunScript } from "./runs.ts";
 import { gitBranch, mainCheckout } from "./sessions.ts";
 
 /** The lead's working rules, written for the person it works with (their name, or "the user"). */
@@ -247,10 +246,8 @@ export default function sitraLead(pi: Pi): void {
 				}
 				const pane = runPane;
 				if (freshPane) {
-					const nonce = randomBytes(8).toString("hex");
-					herdr(["pane", "run", pane, `printf 'sitra-%s\\n' ${shellQuote(`ready-${nonce}`)}`]);
 					try {
-						herdr(["pane", "wait-output", pane, "--match", `sitra-ready-${nonce}`, "--timeout", "15000"]);
+						waitForPaneShellReady(herdr, pane);
 					} catch {
 						runPane = undefined;
 						return {

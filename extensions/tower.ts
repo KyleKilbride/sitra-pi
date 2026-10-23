@@ -29,10 +29,11 @@ import {
 	type SessionRecord,
 	type SessionRole,
 	sendInboxMessage,
-	spawnPaneCommand,
 	updateSession,
+	writeSpawnPaneScript,
 	writeSession,
 } from "./sessions.ts";
+import { waitForPaneShellReady } from "./runs.ts";
 
 /** Working rules for the tower (the person's number 2 / producer). */
 export function towerRules(userName?: string, towerName?: string): string {
@@ -651,7 +652,7 @@ export default function sitraTower(pi: Pi): void {
 		name: "spawn_session",
 		label: "Spawn a new sitra worker workspace",
 		description:
-			"Create a new git worktree from the chosen base branch (e.g. staging or sre), copy the primary repo's .env files, open a new single-tab single-pane herdr workspace, and run `pnpm i && pnpm run build && sitra <grounding>` in that pane.",
+			"Create a new git worktree from the chosen base branch (e.g. staging or sre), copy the primary repo's .env files, open a new single-tab single-pane herdr workspace, and run a short startup script for `pnpm i && pnpm run build && sitra <grounding>` in that pane.",
 		promptSnippet:
 			"spawn_session: open a new herdr space in a fresh worktree with .env files copied, pnpm i && build, and initial grounding instructions",
 		parameters: Type.Object({
@@ -695,8 +696,41 @@ export default function sitraTower(pi: Pi): void {
 			}
 
 			const prompt = groundingPrompt(process.env.SITRA_USER_NAME, extra);
-			const cmd = spawnPaneCommand(prompt);
-			herdr(["pane", "run", paneId, cmd]);
+			const { line, scriptPath, groundingPath } = writeSpawnPaneScript(
+				join(profileDir, "runs"),
+				prepared.worktreePath,
+				prompt,
+				label,
+			);
+			try {
+				waitForPaneShellReady(herdr, paneId);
+			} catch {
+				return {
+					content: [
+						{
+							type: "text",
+							text: [
+								`Spawned workspace ${workspaceNumber ? `#${workspaceNumber} ` : ""}"${label}" (${workspaceId ?? paneId}).`,
+								`Worktree: ${prepared.worktreePath} (branch ${prepared.branch} from ${prepared.baseRef})`,
+								`Copied .env files: ${prepared.copiedEnvFiles.length > 0 ? prepared.copiedEnvFiles.join(", ") : "none"}`,
+								`The worker was not started: pane shell never became ready (${paneId}).`,
+								`Script: ${scriptPath}`,
+							].join("\n"),
+						},
+					],
+					details: {
+						spawned: false,
+						error: "pane shell never became ready",
+						workspaceId,
+						workspaceNumber,
+						paneId,
+						scriptPath,
+						groundingPath,
+						...prepared,
+					},
+				};
+			}
+			herdr(["pane", "run", paneId, line]);
 
 			return {
 				content: [
@@ -707,6 +741,7 @@ export default function sitraTower(pi: Pi): void {
 							`Worktree: ${prepared.worktreePath} (branch ${prepared.branch} from ${prepared.baseRef})`,
 							`Copied .env files: ${prepared.copiedEnvFiles.length > 0 ? prepared.copiedEnvFiles.join(", ") : "none"}`,
 							`Running in pane ${paneId}: pnpm i && pnpm run build && sitra <grounding>`,
+							`Script: ${scriptPath}`,
 						].join("\n"),
 					},
 				],
@@ -715,6 +750,8 @@ export default function sitraTower(pi: Pi): void {
 					workspaceId,
 					workspaceNumber,
 					paneId,
+					scriptPath,
+					groundingPath,
 					...prepared,
 				},
 			};

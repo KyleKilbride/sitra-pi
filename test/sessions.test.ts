@@ -30,7 +30,6 @@ import {
 	removeSession,
 	type SessionRecord,
 	sendInboxMessage,
-	spawnPaneCommand,
 	transcriptItemFromEntry,
 	updateSession,
 	writeSession,
@@ -506,6 +505,34 @@ function startSession(env: Record<string, string | undefined>) {
 	return { handlers, tools, messages, restore, ctxFor };
 }
 
+function writeSpawnHerdr(bin: string, logFile: string, options: { waitFails?: boolean } = {}) {
+	writeFileSync(
+		join(bin, "herdr"),
+		`#!/usr/bin/env node
+const { appendFileSync } = require("node:fs");
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(logFile)}, JSON.stringify(args) + "\\n");
+if (args[0] === "workspace" && args[1] === "create") {
+  console.log('{"result":{"workspace":{"workspace_id":"wNew","number":6},"tab":{"tab_id":"wNew:t1"},"root_pane":{"pane_id":"wNew:p1"}}}');
+  process.exit(0);
+}
+if (args[0] === "pane" && args[1] === "wait-output" && ${options.waitFails ? "true" : "false"}) {
+  process.exit(124);
+}
+process.exit(0);
+`,
+	);
+	chmodSync(join(bin, "herdr"), 0o755);
+}
+
+function readHerdrCalls(logFile: string): string[][] {
+	return readFileSync(logFile, "utf8")
+		.trim()
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line) as string[]);
+}
+
 describe("ended sessions leave the registry", () => {
 	test("a stopped lead whose worktree is gone is removed and raises no alert", () => {
 		const profile = tmp();
@@ -838,26 +865,16 @@ describe("tower edge cases", () => {
 		expect(readFileSync(join(prepared.worktreePath, "agent", ".env"), "utf8")).toBe("API_KEY=1\n");
 		expect(readFileSync(join(prepared.worktreePath, "ui", ".env.local"), "utf8")).toBe("UI_FLAG=1\n");
 
-		const prompt = groundingPrompt("Sam", "Focus on the flights date refresh flow.");
+		const instructions = `Focus on the flight card dispatcher and preserve the user's single quote: ' ${"x".repeat(5_000)}`;
+		const prompt = groundingPrompt("Sam", instructions);
 		expect(prompt).toContain("AGENTS.md");
 		expect(prompt).toContain("Sam");
-		expect(prompt).toContain("Focus on the flights date refresh flow.");
-		const cmd = spawnPaneCommand(prompt);
-		expect(cmd).toContain("pnpm i && pnpm run build && sitra ");
+		expect(prompt).toContain(instructions);
 
 		const profile = tmp();
 		const bin = tmp();
 		const logFile = join(bin, "herdr-spawn.log");
-		writeFileSync(
-			join(bin, "herdr"),
-			`#!/bin/sh
-echo "$@" >> "${logFile}"
-if [ "$1" = "workspace" ] && [ "$2" = "create" ]; then
-  echo '{"result":{"workspace":{"workspace_id":"wNew","number":6},"tab":{"tab_id":"wNew:t1"},"root_pane":{"pane_id":"wNew:p1"}}}'
-fi
-`,
-		);
-		chmodSync(join(bin, "herdr"), 0o755);
+		writeSpawnHerdr(bin, logFile);
 
 		const s = startSession({
 			PI_CODING_AGENT_DIR: profile,
@@ -876,16 +893,85 @@ fi
 					branch: "krskl/hotel-cards",
 					base: "staging",
 					label: "hotel-cards",
-					instructions: "Read the hotel card dispatcher docs.",
+					instructions,
 				},
 				undefined,
 				undefined,
 				s.ctxFor("tower-1", repo),
 			);
-			expect((res?.details as { spawned?: boolean } | undefined)?.spawned).toBe(true);
-			const calls = readFileSync(logFile, "utf8").trim().split("\n");
-			expect(calls.some((c) => c.includes("workspace create") && c.includes("--label hotel-cards"))).toBe(true);
-			expect(calls.some((c) => c.startsWith("pane run wNew:p1 pnpm i && pnpm run build && sitra "))).toBe(true);
+			const details = res?.details as
+				| { spawned?: boolean; scriptPath?: string; groundingPath?: string; worktreePath?: string }
+				| undefined;
+			expect(details?.spawned).toBe(true);
+			expect(details?.scriptPath).toBeTruthy();
+			expect(details?.groundingPath).toBeTruthy();
+			if (!details?.scriptPath || !details.groundingPath || !details.worktreePath) throw new Error("missing spawn paths");
+			expect(res?.content[0]?.text).toContain(`Script: ${details.scriptPath}`);
+			expect(details.scriptPath.startsWith(`${details.worktreePath}/`)).toBe(false);
+			expect(readFileSync(details.groundingPath, "utf8")).toBe(prompt);
+			const script = readFileSync(details.scriptPath, "utf8");
+			expect(script).toContain("pnpm i && pnpm run build && sitra \"$(cat ");
+			expect(script).not.toContain(prompt);
+
+			const calls = readHerdrCalls(logFile);
+			expect(calls.some((c) => c[0] === "workspace" && c[1] === "create" && c.includes("--label"))).toBe(true);
+			expect(calls.find((c) => c[0] === "workspace" && c[1] === "create")).toContain("hotel-cards");
+			expect(calls[1]?.slice(0, 3)).toEqual(["pane", "run", "wNew:p1"]);
+			expect(calls[1]?.[3]).toContain("printf 'sitra-%s\\n'");
+			expect(calls[2]).toEqual(expect.arrayContaining(["pane", "wait-output", "wNew:p1", "--timeout", "15000"]));
+			expect(calls[3]?.slice(0, 3)).toEqual(["pane", "run", "wNew:p1"]);
+			expect(calls[3]?.[3]).toBe(`bash '${details.scriptPath}'`);
+			expect(calls[3]?.[3]?.length).toBeLessThan(300);
+			expect(calls[3]?.[3]).not.toContain(instructions);
+		} finally {
+			s.restore();
+		}
+	});
+
+	test("spawn_session fails loudly and does not type the script when the new pane shell is never ready", async () => {
+		const repo = tmp();
+		const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
+		git("init", "-b", "staging");
+		git("config", "user.email", "test@example.com");
+		git("config", "user.name", "Test User");
+		writeFileSync(join(repo, ".gitignore"), ".worktrees/\n");
+		writeFileSync(join(repo, "package.json"), '{"name":"app"}\n');
+		git("add", ".");
+		git("commit", "-m", "initial staging");
+
+		const profile = tmp();
+		const bin = tmp();
+		const logFile = join(bin, "herdr-spawn-timeout.log");
+		writeSpawnHerdr(bin, logFile, { waitFails: true });
+
+		const s = startSession({
+			PI_CODING_AGENT_DIR: profile,
+			SITRA_ROLE: "tower",
+			HERDR_ENV: "1",
+			HERDR_PANE_ID: "w0:p1",
+			PATH: `${bin}:${process.env.PATH}`,
+		});
+		try {
+			const result = await s.tools.get("spawn_session")?.execute(
+				"1",
+				{ repo, branch: "krskl/ready-timeout", base: "staging", label: "ready-timeout" },
+				undefined,
+				undefined,
+				s.ctxFor("tower-1", repo),
+			);
+			const details = result?.details as { spawned?: boolean; scriptPath?: string; paneId?: string; error?: string };
+			expect(details.spawned).toBe(false);
+			expect(details.error).toBe("pane shell never became ready");
+			expect(details.scriptPath).toBeTruthy();
+			if (!details.scriptPath) throw new Error("missing script path");
+			expect(result?.content[0]?.text).toContain("pane shell never became ready");
+			expect(result?.content[0]?.text).toContain("wNew:p1");
+			expect(result?.content[0]?.text).toContain(details.scriptPath);
+
+			const runCalls = readHerdrCalls(logFile).filter((call) => call[0] === "pane" && call[1] === "run");
+			expect(runCalls).toHaveLength(1);
+			expect(runCalls[0]?.[3]).toContain("printf 'sitra-%s\\n'");
+			expect(runCalls[0]?.[3]).not.toMatch(/^bash /);
 		} finally {
 			s.restore();
 		}

@@ -1,5 +1,5 @@
 /** Long commands run in a visible herdr pane with output teed to a log; agents check the log instead of waiting. */
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -40,6 +40,12 @@ export function hashFiles(worktree: string, files: string[]): { file: string; sh
 
 export function shellQuote(s: string): string {
 	return `'${s.replaceAll("'", "'\\''")}'`;
+}
+
+export function waitForPaneShellReady(herdr: (args: string[]) => string, pane: string): void {
+	const nonce = randomBytes(8).toString("hex");
+	herdr(["pane", "run", pane, `printf 'sitra-%s\\n' ${shellQuote(`ready-${nonce}`)}`]);
+	herdr(["pane", "wait-output", pane, "--match", `sitra-ready-${nonce}`, "--timeout", "15000"]);
 }
 
 /** Write the script that records who runs it, runs the command, keeps a full log, and records the exit code. */

@@ -651,8 +651,31 @@ export function groundingPrompt(userName?: string, extraInstructions?: string): 
 	return `Read AGENTS.md, CLAUDE.md, any project steering index, and Grimoire (the root and catalogue in your prompt) so you are grounded in this codebase and how ${who} works. Do not edit code or start a task yet.${extra} Reply in two short lines confirming which docs and rules you loaded and that you are ready for ${who} to drive.`;
 }
 
-export function spawnPaneCommand(grounding: string): string {
-	return `pnpm i && pnpm run build && sitra ${shellQuote(grounding)}`;
+export function writeSpawnPaneScript(
+	runsDir: string,
+	worktreePath: string,
+	grounding: string,
+	label?: string,
+): { line: string; scriptPath: string; groundingPath: string } {
+	mkdirSync(runsDir, { recursive: true });
+	const slug =
+		(label || basename(worktreePath))
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/^-+|-+$/g, "")
+			.slice(0, 40) || "spawn";
+	const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${slug}`;
+	const scriptPath = join(runsDir, `${runId}.sh`);
+	const groundingPath = join(runsDir, `${runId}.grounding.txt`);
+	writeFileSync(groundingPath, grounding, { mode: 0o600 });
+	chmodSync(groundingPath, 0o600);
+	const command = `pnpm i && pnpm run build && sitra "$(cat ${shellQuote(groundingPath)})"`;
+	const script = ["#!/usr/bin/env bash", "set -euo pipefail", `cd ${shellQuote(worktreePath)}`, command, ""].join(
+		"\n",
+	);
+	writeFileSync(scriptPath, script, { mode: 0o700 });
+	chmodSync(scriptPath, 0o700);
+	return { line: `bash ${shellQuote(scriptPath)}`, scriptPath, groundingPath };
 }
 
 const SKIP_ENV_DIRS = new Set(["node_modules", "dist", "build", "coverage", "out"]);
