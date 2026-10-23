@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { ASK_USER_TOOL } from "../extensions/ask-user-tool.ts";
 import { listProposals } from "../extensions/grimoire.ts";
 import { briefHash, buildBrief, createLoopState, type LoopState, staleReason } from "../extensions/loop.ts";
 import sitraLoop, { loopStatePath, readLoopStateFile, writeLoopStateFile } from "../extensions/loop-pi.ts";
@@ -355,6 +356,71 @@ function approvedLoop(profile: string, cwd: string, command: string | string[] =
 		frozenBrief,
 		frozenBriefHash: briefHash(frozenBrief),
 	});
+}
+
+function writePendingAskLoop(
+	profile: string,
+	cwd: string,
+	input: {
+		stage: "needs-person" | "blocked";
+		kind: NonNullable<LoopState["block"]>["kind"];
+		id: string;
+		text: string;
+		resumeStage?: LoopState["stage"];
+	},
+): void {
+	const state: LoopState = {
+		...createLoopState({
+			worktree: cwd,
+			branch: "feature",
+			baseRef: "origin/main",
+			baseHead: execFileSync("git", ["rev-parse", "origin/main"], { cwd, encoding: "utf8" }).trim(),
+			goal: "Add the runner",
+			limits: [],
+			done: [],
+		}),
+		stage: input.stage,
+		dispatchedAdvisors: [],
+		block: {
+			kind: input.kind,
+			questionId: input.id,
+			resumeStage: input.resumeStage ?? "advise",
+			pendingAdvisors: [],
+		},
+		questions: [
+			{
+				id: input.id,
+				text: input.text,
+				recommended: "Answer so the loop can continue.",
+				dependsOn: [],
+			},
+		],
+	};
+	writeLoopStateFile(loopStatePath(profile, cwd, "feature"), state);
+}
+
+function writeBriefApprovalLoop(profile: string, cwd: string): void {
+	const state: LoopState = {
+		...createLoopState({
+			worktree: cwd,
+			branch: "feature",
+			baseRef: "origin/main",
+			baseHead: execFileSync("git", ["rev-parse", "origin/main"], { cwd, encoding: "utf8" }).trim(),
+			goal: "Add the runner",
+			limits: [],
+			done: [],
+		}),
+		stage: "architecture-review",
+		dispatchedAdvisors: [],
+		advisorRuns: {
+			intent: { status: "done", summary: "intent", evidence: [], openQuestions: [], assumptions: [] },
+			codebase: { status: "done", summary: "codebase", evidence: [], openQuestions: [], assumptions: [] },
+			testDesign: { status: "done", summary: "tests", evidence: [], openQuestions: [], assumptions: [] },
+			architecture: { status: "done", summary: "architecture", evidence: [], openQuestions: [], assumptions: [] },
+		},
+		plan: { author: "lead", text: "Plan" },
+	};
+	writeLoopStateFile(loopStatePath(profile, cwd, "feature"), state);
 }
 
 afterEach(() => vi.unstubAllEnvs());
@@ -1049,6 +1115,114 @@ describe("Pi wiring", () => {
 		const after = readLoopStateFile(path);
 		expect(after.stage).toBe("architecture-review");
 		expect(after.approval).toBeUndefined();
+	});
+
+	test("ask_user_question is refused at needs-person, naming the question id and /loop answer", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { handlers } = fakePi();
+		const { cwd } = gitWorktree();
+		writePendingAskLoop(profile, cwd, {
+			stage: "needs-person",
+			kind: "questions",
+			id: "advisor-questions-123",
+			text: "Which command should the runner use?",
+		});
+
+		const result = handlers.get("tool_call")?.({ toolName: ASK_USER_TOOL, input: {} }, ctx(cwd));
+
+		expect(result).toMatchObject({ block: true });
+		expect((result as { reason?: string }).reason).toContain("question advisor-questions-123");
+		expect((result as { reason?: string }).reason).toContain("Which command should the runner use?");
+		expect((result as { reason?: string }).reason).toContain("/loop answer");
+	});
+
+	test("ask_user_question is refused for blocked loops with the command that clears each kind", async () => {
+		for (const item of [
+			{
+				kind: "intake-failed" as const,
+				id: "verifier-intake",
+				text: "Verifier report could not be accepted.",
+				next: "/loop answer",
+				resumeStage: "verify" as const,
+			},
+			{
+				kind: "new-information" as const,
+				id: "new-information",
+				text: "Confirm whether the verifier found real new information.",
+				next: "/loop confirm-new-info or /loop deny-new-info",
+				resumeStage: "classify" as const,
+			},
+		]) {
+			const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+			vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+			const { handlers } = fakePi();
+			const { cwd } = gitWorktree();
+			writePendingAskLoop(profile, cwd, {
+				stage: "blocked",
+				kind: item.kind,
+				id: item.id,
+				text: item.text,
+				resumeStage: item.resumeStage,
+			});
+
+			const result = handlers.get("tool_call")?.({ toolName: ASK_USER_TOOL, input: {} }, ctx(cwd));
+
+			expect(result).toMatchObject({ block: true });
+			expect((result as { reason?: string }).reason).toContain(`question ${item.id}`);
+			expect((result as { reason?: string }).reason).toContain(item.text);
+			expect((result as { reason?: string }).reason).toContain(item.next);
+		}
+	});
+
+	test("ask_user_question is refused while brief approval is pending and points to /loop approve", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { handlers } = fakePi();
+		const { cwd } = gitWorktree();
+		writeBriefApprovalLoop(profile, cwd);
+
+		const result = handlers.get("tool_call")?.({ toolName: ASK_USER_TOOL, input: {} }, ctx(cwd));
+
+		expect(result).toMatchObject({ block: true });
+		expect((result as { reason?: string }).reason).toContain("question brief-approval");
+		expect((result as { reason?: string }).reason).toContain("Architecture review is ready.");
+		expect((result as { reason?: string }).reason).toContain("/loop approve");
+	});
+
+	test("ask_user_question is allowed while advisors are still running", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers } = fakePi();
+		const { cwd } = gitWorktree();
+		await commands.get("loop")?.handler("start Add the runner", ctx(cwd));
+
+		expect(handlers.get("tool_call")?.({ toolName: ASK_USER_TOOL, input: {} }, ctx(cwd))).toBeUndefined();
+	});
+
+	test("ask_user_question is allowed when there is no loop in the worktree", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { handlers } = fakePi();
+		const { cwd } = gitWorktree();
+
+		expect(handlers.get("tool_call")?.({ toolName: ASK_USER_TOOL, input: {} }, ctx(cwd))).toBeUndefined();
+	});
+
+	test("a teammate's ask_user_question is not refused", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		vi.stubEnv("PI_SUBAGENT_NAME", "builder");
+		const { handlers } = fakePi();
+		const { cwd } = gitWorktree();
+		writePendingAskLoop(profile, cwd, {
+			stage: "needs-person",
+			kind: "questions",
+			id: "advisor-questions-123",
+			text: "Which command should the runner use?",
+		});
+
+		expect(handlers.get("tool_call")?.({ toolName: ASK_USER_TOOL, input: {} }, ctx(cwd))).toBeUndefined();
 	});
 
 	test("ordinary teammate results are ignored when no state or advisor dispatch matches", async () => {

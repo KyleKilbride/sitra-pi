@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync }
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { Type } from "typebox";
+import { ASK_USER_TOOL } from "./ask-user-tool.ts";
 import { worktreeClean } from "./git-status.ts";
 import { grimoireDir, grimoireStoreStatus, writeProposal } from "./grimoire.ts";
 import { type HelperReport, validateHelperReport } from "./helper-report.ts";
@@ -33,6 +34,7 @@ import {
 	type LoopState,
 	type LoopTestHash,
 	loopMetricsLine,
+	pendingPersonAsk,
 	recordAdvisorStarted,
 	recordBlockAnswer,
 	recordBuildEvidence,
@@ -797,6 +799,7 @@ function nextExpectedAction(state: LoopState, effects: LoopEffect[]): string {
 		(effect): effect is Extract<LoopEffect, { type: "ask-person" }> => effect.type === "ask-person",
 	);
 	if (askPerson?.reason === "brief-approval") return "person types /loop approve <summary>";
+	if (askPerson?.reason === "new-information") return "person types /loop confirm-new-info or /loop deny-new-info";
 	if (askPerson) return "wait for the person's next /loop answer";
 	if (state.stage === "build") return "start new red and green runs with loop_run_evidence";
 	if (state.stage === "brief-approved") return "start implementation with /loop build";
@@ -1397,7 +1400,19 @@ async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<v
 	persistAndEmit(pi, path, result);
 }
 
-function handleToolCall(event: ToolCall, ctx: Ctx): void {
+function handleToolCall(event: ToolCall, ctx: Ctx): { block: true; reason: string } | undefined {
+	if (event?.toolName === ASK_USER_TOOL && !process.env.PI_SUBAGENT_NAME) {
+		const loaded = loadCurrentLoopStateIfExists(ctx.cwd);
+		if (loaded) {
+			const ask = pendingPersonAsk(loaded.state);
+			if (ask) {
+				return {
+					block: true,
+					reason: `LOOPS is waiting on the person for question ${ask.question.id}: ${ask.question.text}. Do not ask it through ${ASK_USER_TOOL}; that answer never reaches the loop. Show this question as written and stop. Next: ${nextExpectedAction(loaded.state, [ask])}.`,
+				};
+			}
+		}
+	}
 	if (event?.toolName !== "subagent") return;
 	const input = objectRecord(event.input);
 	if (!input) return;
