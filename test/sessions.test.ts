@@ -34,6 +34,7 @@ import {
 	updateSession,
 	writeSession,
 } from "../extensions/sessions.ts";
+import { SUBAGENT_LAUNCH_RULE } from "../extensions/subagent-tools.ts";
 import sitraTower, { towerRules } from "../extensions/tower.ts";
 
 const tmp = () => realpathSync(mkdtempSync(join(tmpdir(), "sitra-sessions-")));
@@ -246,6 +247,10 @@ describe("tower rules", () => {
 		expect(rules).toContain(
 			"A brief carries only limits Sam gave; an option you offered that Sam has not chosen is not a limit.",
 		);
+	});
+
+	test("tell the tower to launch subagents in their own turn", () => {
+		expect(towerRules("Sam", "Radar")).toContain(SUBAGENT_LAUNCH_RULE);
 	});
 
 	test("tell the tower to check first and ask at most three plain questions", () => {

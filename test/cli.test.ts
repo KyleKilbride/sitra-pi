@@ -7,6 +7,7 @@ import { ensureTowerName, isRadarCommand, isTowerCommand, launchCommand, piArgs,
 import { scaffoldProfile } from "../cli/profile.ts";
 import { atLeast, parseVersion } from "../cli/versions.ts";
 import { leadRules } from "../extensions/lead.ts";
+import { SUBAGENT_LAUNCH_RULE } from "../extensions/subagent-tools.ts";
 
 const tmp = () => realpathSync(mkdtempSync(join(tmpdir(), "sitra-cli-")));
 
@@ -186,6 +187,10 @@ describe("lead rules", () => {
 		expect(rules).toContain(
 			"A /loop Sam typed is permission to run the loop and its advisors; never ask for a separate go.",
 		);
+	});
+
+	test("tell the lead to launch subagents in their own turn", () => {
+		expect(leadRules("Sam")).toContain(SUBAGENT_LAUNCH_RULE);
 	});
 
 	test("tell the lead to check first and ask at most three plain questions", () => {
