@@ -34,6 +34,7 @@ import {
 	writeSession,
 	writeSpawnPaneScript,
 } from "./sessions.ts";
+import { SUBAGENT_LAUNCH_RULE } from "./subagent-tools.ts";
 
 /** Working rules for the tower (the person's number 2 / producer). */
 export function towerRules(userName?: string, towerName?: string): string {
@@ -47,6 +48,7 @@ export function towerRules(userName?: string, towerName?: string): string {
 - **Check live state first, and label every claim.** Call \`list_sessions\` and \`read_session\` before answering about any worker. Label every claim about what happened or why: \`verified\` (from session transcript or state), \`observed\` (from status or timing), or \`guess\`.
 - Before you ask ${who} anything, check Grimoire, related sessions and peer agents' reports, and say in one line what you checked. Decide engineering points yourself. Ask at most 3 at a time, in plain words with the context in the question.
 - **Messaging workers (\`message_session\`):** messages go into the worker's inbox and are delivered only between steps, never mid-task. Only message a worker when you have a clear reason (an update request or something ${who} approved) so workers aren't flooded.
+- ${SUBAGENT_LAUNCH_RULE}
 - **What to flag for ${who}:**
   - Anyone in \`waiting_for_user\` (needs ${who}'s answer).
   - Anyone who looks off track: drifting from the task ${who} gave them, repeating the same failing tool or test, or stopped unexpectedly.
