@@ -146,7 +146,8 @@ the lead gets the result as a message and picks up from there. No sleep or poll 
 Start from a feature branch with `/loop start [--base <ref>] <goal>`. The runner dispatches advisors, groups their
 questions into `/loop answer <answer>` rounds of at most three, and shows pending advisor roles plus the exact task text
 in `/loop status` and `loop_status`. Repeated settled questions are ignored. If advise hits its rerun cap, the runner
-moves on with the remaining advisor questions recorded as visible assumptions in `/loop status` and `loop_status`.
+moves on with the remaining engineering advisor questions recorded as visible assumptions in `/loop status` and
+`loop_status`; intent questions are still asked at the rerun cap.
 
 When advisors are done, the lead submits its plan with `loop_submit_plan`. Approval stays human-only: type
 `/loop approve <summary>` yourself when the plan and architecture review are acceptable. Then use `/loop build` and
@@ -155,7 +156,8 @@ follow the evidence recipe the runner prints: commit the acceptance tests alone,
 pass both returned run ids to `loop_record_build`. If evidence is blocked, the tool returns the exact reason and what
 would satisfy it; build-evidence-only blocks can be retried without another person touch. `loop_run_evidence` only
 runs commands that exactly match the frozen test-design commands, and `loop_record_build` accepts only the run ids that
-`loop_run_evidence` recorded with matching log hashes.
+`loop_run_evidence` recorded with matching log hashes. When build evidence is valid, the runner starts the `verifier`
+agent itself with the stored task; status shows "verifier started, waiting for its report" until the report arrives.
 
 **Grimoire** (`/grimoire`): see below.
 

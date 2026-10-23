@@ -26,7 +26,8 @@ If `origin/HEAD` is not available, pass `--base origin/main` or another base ref
 lead submits a plan. `/loop status` and the `loop_status` tool are read-only; when the runner is waiting on advisors,
 they list every awaited advisor, whether it has been dispatched or is not started yet, and the exact task text that
 must be used. A lead-written summary does not count as an advisor report: the advisor has to report through
-`helper_report`.
+`helper_report`. In the verify stage they show whether the verifier has been started and, once started, that the runner
+is waiting for its report.
 
 Questions from advisors are grouped into `/loop answer <answer>` rounds of at most three questions. The runner records
 stable question ids and the exact normalized text that was answered, so repeated questions by id or exact text are not
@@ -42,8 +43,12 @@ recipe up front: commit the acceptance tests alone, run red evidence at that com
 then run green evidence at the build commit with `loop_run_evidence`. Record both returned run ids with
 `loop_record_build` or `/loop record-build <json>`. `loop_run_evidence` rejects any command that is not an exact
 frozen test-design command, and `loop_record_build` accepts only those runner-recorded run ids while checking their log
-hashes. When a `/loop answer` unblocks a stage, the runner tells the lead the resumed stage, the answer it recorded,
-and the next expected action.
+hashes. When build evidence is valid, the runner starts agent `verifier` itself with the stored verifier task; the lead
+does not receive a "Start verifier..." task to copy. The `loop_start_verifier` tool is no-argument and uses the same
+stored task for resume and answer paths. It refuses a second start for the same dispatch while one is running. Verifier
+delivery can be asynchronous through `subagent_result` or awaited through the subagent tool return; both use the same
+`helper_report` validation path. When a `/loop answer` unblocks a stage, the runner tells the lead the resumed stage,
+the answer it recorded, and the next expected action.
 
 Anything the lead's shell can write, including the loop state file, can still be forged; the verifier remains the
 independent check on the frozen brief, diff, hashes and logs.
@@ -57,7 +62,8 @@ Other useful verbs:
 | `/loop approve <summary>` | person only | Freezes the brief after architecture review. No tool or agent-message path approves. |
 | `/loop build` | person only after approval | Enters build and prints the tests-only red commit -> implementation green commit evidence recipe. |
 | `loop_run_evidence` | lead | Runs an exact frozen test-design command in a temporary worktree at a named commit and records the run id plus log hash. Red should name the tests-only commit; green should name the current build commit. |
-| `loop_record_build` | lead | Records red and green runner-recorded run ids and dispatches the verifier when evidence is valid. If the only active block is build evidence, the lead can retry this without a person answer; stale, git, verifier and decision blocks still need the person. |
+| `loop_record_build` | lead | Records red and green runner-recorded run ids and starts the verifier when evidence is valid. If the only active block is build evidence, the lead can retry this without a person answer; stale, git, verifier and decision blocks still need the person. |
+| `loop_start_verifier` | runner/lead | Starts the pending verifier from the saved task with no arguments, and refuses a duplicate start for the same dispatch while one is running. |
 | `/loop resume` | person | Re-emits the current runner effect; it can write a stale block if the saved state no longer matches the checkout. |
 | `/loop abandon [reason]` | person | Archives the active loop state for this worktree and branch. |
 

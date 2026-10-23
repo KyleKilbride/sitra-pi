@@ -25,6 +25,7 @@ import {
 	blockForGitFailure,
 	blockForStaleState,
 	blockForVerifierIntakeFailure,
+	clearVerifierStarted,
 	confirmNewInformation,
 	denyNewInformation,
 	diffHash,
@@ -36,6 +37,7 @@ import {
 	recordBlockAnswer,
 	recordBuildEvidence,
 	recordReworkProposal,
+	recordVerifierStarted,
 	replaceBlockWithStale,
 	resumeLoop,
 	reworkProposal,
@@ -67,6 +69,7 @@ import { childAgent, objectRecord, subagentChildren } from "./subagent-tools.ts"
 
 interface Ctx {
 	cwd: string;
+	executeTool?(toolName: string, input: Record<string, unknown>): Promise<unknown>;
 	ui?: {
 		notify(message: string, type?: "info" | "warning" | "error"): void;
 		setStatus?(key: string, text: string | undefined): void;
@@ -705,6 +708,18 @@ function advisorWaitLines(state: LoopState): string[] {
 	];
 }
 
+function verifierWaitLines(state: LoopState): string[] {
+	if (state.stage !== "verify" || !state.verifierRequest) return [];
+	return [
+		`verifier: ${state.verifierRequest.startedAt ? "started, waiting for its report" : "not started"}`,
+		`next expected action: ${nextExpectedAction(state, nextLoopEffectsForStatus(state))}`,
+	];
+}
+
+function nextLoopEffectsForStatus(state: LoopState): LoopEffect[] {
+	return resumeLoop(state).effects;
+}
+
 function advisorKeyForStatus(role: AdvisorRole): keyof LoopState["advisorRuns"] {
 	return role === "test-design" ? "testDesign" : role;
 }
@@ -727,20 +742,16 @@ function renderEffect(state: LoopState, effect: LoopEffect): string {
 		].join("\n\n");
 	if (effect.type === "write-lead-plan")
 		return "LOOPS advisors are complete. Write the high-level lead plan, then call loop_submit_plan with the plan text. The equivalent human slash command is `/loop plan <plan>`.";
-	if (effect.type === "dispatch-verifier")
-		return [
-			"LOOPS runner dispatch for stage verify:",
-			"Start verifier in a fresh context with this exact task. Do not add the builder transcript or any helper brief.",
-			effect.task,
-		].join("\n");
 	if (effect.type === "write-grimoire-proposal")
 		return `LOOPS classified rework ${effect.reworkIndex + 1}; drafting a Grimoire proposal for review.`;
 	return `LOOPS stage: brief-approved\nFrozen brief hash: ${state.frozenBriefHash ?? "(missing)"}`;
 }
 
 function emitEffects(pi: Pi, state: LoopState, effects: LoopEffect[]): void {
-	for (const effect of effects)
+	for (const effect of effects) {
+		if (effect.type === "dispatch-verifier") continue;
 		pi.sendUserMessage(renderEffect(state, effect), { deliverAs: "followUp", streamingBehavior: "followUp" });
+	}
 }
 
 function materializeEffects(state: LoopState, effects: LoopEffect[]): { state: LoopState; effects: LoopEffect[] } {
@@ -778,7 +789,9 @@ function nextExpectedAction(state: LoopState, effects: LoopEffect[]): string {
 	}
 	if (effects.some((effect) => effect.type === "write-lead-plan")) return "submit the lead plan with loop_submit_plan";
 	if (effects.some((effect) => effect.type === "dispatch-verifier")) {
-		return "start verifier with the exact runner task and wait for helper_report";
+		return state.verifierRequest?.startedAt
+			? "verifier started, waiting for its report"
+			: "start verifier with loop_start_verifier";
 	}
 	const askPerson = effects.find(
 		(effect): effect is Extract<LoopEffect, { type: "ask-person" }> => effect.type === "ask-person",
@@ -789,7 +802,10 @@ function nextExpectedAction(state: LoopState, effects: LoopEffect[]): string {
 	if (state.stage === "brief-approved") return "start implementation with /loop build";
 	if (state.stage === "architecture-review") return "wait for architecture-advisor helper_report or person approval";
 	if (state.stage === "plan") return "submit the lead plan with loop_submit_plan";
-	if (state.stage === "verify") return "wait for verifier helper_report";
+	if (state.stage === "verify")
+		return state.verifierRequest?.startedAt
+			? "verifier started, waiting for its report"
+			: "start verifier with loop_start_verifier";
 	if (state.stage === "done") return "loop is done";
 	throw new Error(`no next expected action for unhandled LOOPS stage ${state.stage}`);
 }
@@ -844,6 +860,7 @@ function loopStatus(cwd: string, state: LoopState): ToolResult {
 					loopMetricsLine(metrics.states),
 					...advisorWaitLines(state),
 					...adviseAssumptionLines(state),
+					...verifierWaitLines(state),
 					...(metrics.badFiles.length ? [`loop metrics unreadable: ${metrics.badFiles.join(", ")}`] : []),
 					...(rejectedVerifierReports.length
 						? [
@@ -859,13 +876,186 @@ function loopStatus(cwd: string, state: LoopState): ToolResult {
 	};
 }
 
-function recordBuildFromParams(
+function verifierStartedText(state: LoopState): string {
+	const dispatchId = state.verifierRequest?.dispatchId ?? "(missing)";
+	return `verifier already started for dispatchId ${dispatchId}; waiting for its report`;
+}
+
+function verifierLaunchedText(state: LoopState): string {
+	const dispatchId = state.verifierRequest?.dispatchId ?? "(missing)";
+	return `verifier started, waiting for its report\nVerifier dispatchId: ${dispatchId}`;
+}
+
+function pendingVerifierEffect(effects: LoopEffect[]): Extract<LoopEffect, { type: "dispatch-verifier" }> | undefined {
+	return effects.find(
+		(effect): effect is Extract<LoopEffect, { type: "dispatch-verifier" }> => effect.type === "dispatch-verifier",
+	);
+}
+
+function awaitedVerifierToolReturn(
+	result: unknown,
+): { awaited: false } | { awaited: true; sessionFile?: string; report?: unknown } {
+	const root = objectRecord(result);
+	const details = objectRecord(root?.details);
+	if (details?.async !== false || details.deliveryState !== "awaited") return { awaited: false };
+	const report = findHelperReport(result);
+	const sessionFile = typeof details.sessionFile === "string" && details.sessionFile ? details.sessionFile : undefined;
+	return report === undefined ? { awaited: true, ...(sessionFile ? { sessionFile } : {}) } : { awaited: true, report };
+}
+
+function blockVerifierIntake(
+	pi: Pi,
+	path: string,
+	state: LoopState,
+	reason: string,
+	rejection?: { report?: HelperReport; sessionFile?: string },
+): LoopState {
+	const blocked = blockForVerifierIntakeFailure(clearVerifierStarted(state), reason, rejection);
+	writeLoopStateFile(path, blocked.state);
+	emitEffects(pi, blocked.state, blocked.effects);
+	return blocked.state;
+}
+
+function processVerifierReport(
+	pi: Pi,
+	ctx: Ctx,
+	path: string,
+	state: LoopState,
+	report: unknown,
+	sessionFile?: string,
+): LoopState {
+	const intakeState = clearVerifierStarted(state);
+	let gitState: GitState;
+	try {
+		gitState = currentGitForState(ctx.cwd, intakeState);
+	} catch (error) {
+		const blocked = blockForGitFailure(intakeState, String(error));
+		writeLoopStateFile(path, blocked.state);
+		emitEffects(pi, blocked.state, blocked.effects);
+		return blocked.state;
+	}
+	const stale = blockIfBuildOrVerifyStale(ctx.cwd, path, intakeState, gitState);
+	if (stale) {
+		emitEffects(pi, stale.state, stale.effects);
+		return stale.state;
+	}
+	const valid = validateHelperReport(report);
+	if (!valid.ok) {
+		return blockVerifierIntake(
+			pi,
+			path,
+			intakeState,
+			`invalid helper_report${sessionFile ? ` from ${sessionFile}` : ""}: ${valid.reason}`,
+			{ ...(sessionFile ? { sessionFile } : {}) },
+		);
+	}
+	let result: { state: LoopState; effects: LoopEffect[] };
+	let acceptedLogs: ReturnType<typeof parseLoopRunLog>[];
+	try {
+		const details = valid.report.details as { acceptedLogs?: { log?: unknown }[] } | undefined;
+		acceptedLogs = (details?.acceptedLogs ?? [])
+			.filter((entry): entry is { log: string } => typeof entry.log === "string")
+			.map((entry) => parseLoopRunLog(entry.log));
+	} catch (error) {
+		return blockVerifierIntake(pi, path, intakeState, String(error), {
+			report: valid.report,
+			...(sessionFile ? { sessionFile } : {}),
+		});
+	}
+	try {
+		result = applyVerifierReport(intakeState, valid.report, { acceptedLogs });
+	} catch (error) {
+		return blockVerifierIntake(pi, path, intakeState, String(error), {
+			report: valid.report,
+			...(sessionFile ? { sessionFile } : {}),
+		});
+	}
+	let next: LoopState;
+	try {
+		next = persistAndEmit(pi, path, result);
+	} catch (error) {
+		return blockVerifierIntake(pi, path, intakeState, `could not write Grimoire proposal: ${String(error)}`);
+	}
+	if (next.stage === "done" || next.stage === "blocked" || next.stage === "brief-approved") {
+		pi.sendUserMessage(`LOOPS stage: ${next.stage}`, {
+			deliverAs: "followUp",
+			streamingBehavior: "followUp",
+		});
+	}
+	return next;
+}
+
+function processVerifierSessionFile(pi: Pi, ctx: Ctx, path: string, state: LoopState, sessionFile: string): LoopState {
+	let report: unknown;
+	try {
+		report = readHelperReport(sessionFile);
+	} catch (error) {
+		return blockVerifierIntake(pi, path, state, String(error), { sessionFile });
+	}
+	return processVerifierReport(pi, ctx, path, state, report, sessionFile);
+}
+
+async function startVerifierFromState(pi: Pi, ctx: Ctx, path: string, state: LoopState): Promise<LoopState> {
+	if (state.stage !== "verify" || !state.verifierRequest)
+		throw new Error(`cannot start verifier while stage is ${state.stage}`);
+	if (state.verifierRequest.startedAt) {
+		pi.sendUserMessage(verifierStartedText(state), { deliverAs: "followUp", streamingBehavior: "followUp" });
+		return state;
+	}
+	if (!ctx.executeTool) {
+		pi.sendUserMessage("LOOPS verifier could not start: Pi executeTool support is unavailable.", {
+			deliverAs: "followUp",
+			streamingBehavior: "followUp",
+		});
+		return state;
+	}
+	const input = {
+		agent: "verifier",
+		name: `loop-verifier-${state.verifierRequest.dispatchId.slice(0, 12)}`,
+		title: "LOOPS verifier",
+		task: state.verifierRequest.task,
+	};
+	const started = recordVerifierStarted(state, new Date().toISOString());
+	writeLoopStateFile(path, started);
+	let result: unknown;
+	try {
+		result = await ctx.executeTool("subagent", input);
+	} catch (error) {
+		const reset = clearVerifierStarted(started);
+		writeLoopStateFile(path, reset);
+		pi.sendUserMessage(`LOOPS verifier could not start: ${String(error)}`, {
+			deliverAs: "followUp",
+			streamingBehavior: "followUp",
+		});
+		return reset;
+	}
+	const awaited = awaitedVerifierToolReturn(result);
+	if (awaited.awaited) {
+		if (awaited.report !== undefined) return processVerifierReport(pi, ctx, path, started, awaited.report);
+		if (awaited.sessionFile) return processVerifierSessionFile(pi, ctx, path, started, awaited.sessionFile);
+		return blockVerifierIntake(pi, path, started, "awaited verifier result did not include helper_report");
+	}
+	pi.sendUserMessage(verifierLaunchedText(started), { deliverAs: "followUp", streamingBehavior: "followUp" });
+	return started;
+}
+
+async function startVerifierFromEffects(
+	pi: Pi,
+	ctx: Ctx,
+	path: string,
+	state: LoopState,
+	effects: LoopEffect[],
+): Promise<LoopState> {
+	return pendingVerifierEffect(effects) ? startVerifierFromState(pi, ctx, path, state) : state;
+}
+
+async function recordBuildFromParams(
 	pi: Pi,
 	ctx: Ctx,
 	path: string,
 	state: LoopState,
 	params: { redRunId: string; greenRunId: string; maxVerifierRerunMs?: number },
-): LoopState {
+): Promise<LoopState> {
 	const recordingState = buildEvidenceRecordingState(state);
 	if (recordingState.stage !== "build") throw new Error(`cannot record build evidence while stage is ${state.stage}`);
 	if (!worktreeClean(ctx.cwd)) {
@@ -970,7 +1160,7 @@ function recordBuildFromParams(
 	const nextState = result.state.stage === "verify" ? answerBuildEvidenceQuestions(result.state) : result.state;
 	writeLoopStateFile(path, nextState);
 	emitEffects(pi, nextState, result.effects);
-	return nextState;
+	return startVerifierFromEffects(pi, ctx, path, nextState, result.effects);
 }
 
 async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> {
@@ -1026,7 +1216,9 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 			emitEffects(pi, stale.state, stale.effects);
 			return;
 		}
-		persistAndEmit(pi, path, resumeLoop(currentState));
+		const result = resumeLoop(currentState);
+		const next = persistAndEmit(pi, path, result);
+		await startVerifierFromEffects(pi, ctx, path, next, result.effects);
 		return;
 	}
 	if (verb === "confirm-new-info") {
@@ -1054,13 +1246,15 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 				return;
 			}
 			const result = answerLoopQuestion(answered, { answer: rest, current: gitState });
-			const next = persistAndEmit(pi, path, result);
+			let next = persistAndEmit(pi, path, result);
+			next = await startVerifierFromEffects(pi, ctx, path, next, result.effects);
 			emitUnblockNotice(pi, rawState, rest, next, result.effects);
 			return;
 		}
 		const state = isStaleAnswer ? rawState : loadMutableState(gitState);
 		const result = answerLoopQuestion(state, { answer: rest, current: gitState });
-		const next = persistAndEmit(pi, path, result);
+		let next = persistAndEmit(pi, path, result);
+		next = await startVerifierFromEffects(pi, ctx, path, next, result.effects);
 		emitUnblockNotice(pi, state, rest, next, result.effects);
 		return;
 	}
@@ -1115,7 +1309,7 @@ async function handleLoopCommand(pi: Pi, args: string, ctx: Ctx): Promise<void> 
 		) {
 			throw new Error("invalid /loop record-build JSON: expected redRunId and greenRunId");
 		}
-		const next = recordBuildFromParams(pi, ctx, path, state, {
+		const next = await recordBuildFromParams(pi, ctx, path, state, {
 			redRunId: params.redRunId,
 			greenRunId: params.greenRunId,
 			...(typeof params.maxVerifierRerunMs === "number" ? { maxVerifierRerunMs: params.maxVerifierRerunMs } : {}),
@@ -1134,71 +1328,19 @@ async function handleSubagentResult(pi: Pi, event: unknown, ctx: Ctx): Promise<v
 	if (raw.agent === "verifier") {
 		if (state.stage !== "verify") return;
 		if (!state.verifierRequest) return;
-		let gitState: GitState;
-		try {
-			gitState = currentGitForState(ctx.cwd, state);
-		} catch (error) {
-			const blocked = blockForGitFailure(state, String(error));
-			writeLoopStateFile(path, blocked.state);
-			emitEffects(pi, blocked.state, blocked.effects);
-			return;
-		}
-		const stale = blockIfBuildOrVerifyStale(ctx.cwd, path, state, gitState);
-		if (stale) {
-			emitEffects(pi, stale.state, stale.effects);
-			return;
-		}
-		const block = (reason: string, rejection?: { report?: HelperReport; sessionFile?: string }) => {
-			const blocked = blockForVerifierIntakeFailure(state, reason, rejection);
-			writeLoopStateFile(path, blocked.state);
-			emitEffects(pi, blocked.state, blocked.effects);
-		};
 		if (typeof raw.sessionFile !== "string" || !raw.sessionFile) {
-			block("subagent_result is missing sessionFile", {});
+			blockVerifierIntake(pi, path, state, "subagent_result is missing sessionFile", {});
 			return;
 		}
-		let report: unknown;
-		try {
-			report = readHelperReport(raw.sessionFile);
-		} catch (error) {
-			block(String(error), { sessionFile: raw.sessionFile });
-			return;
-		}
-		const valid = validateHelperReport(report);
-		if (!valid.ok) {
-			block(`invalid helper_report from ${raw.sessionFile}: ${valid.reason}`, { sessionFile: raw.sessionFile });
-			return;
-		}
-		let result: { state: LoopState; effects: LoopEffect[] };
-		let acceptedLogs: ReturnType<typeof parseLoopRunLog>[];
-		try {
-			const details = valid.report.details as { acceptedLogs?: { log?: unknown }[] } | undefined;
-			acceptedLogs = (details?.acceptedLogs ?? [])
-				.filter((entry): entry is { log: string } => typeof entry.log === "string")
-				.map((entry) => parseLoopRunLog(entry.log));
-		} catch (error) {
-			block(String(error), { report: valid.report, sessionFile: raw.sessionFile });
-			return;
-		}
-		try {
-			result = applyVerifierReport(state, valid.report, { acceptedLogs });
-		} catch (error) {
-			block(String(error), { report: valid.report, sessionFile: raw.sessionFile });
-			return;
-		}
-		let next: LoopState;
-		try {
-			next = persistAndEmit(pi, path, result);
-		} catch (error) {
-			block(`could not write Grimoire proposal: ${String(error)}`);
-			return;
-		}
-		if (next.stage === "done" || next.stage === "blocked" || next.stage === "brief-approved") {
-			pi.sendUserMessage(`LOOPS stage: ${next.stage}`, {
-				deliverAs: "followUp",
-				streamingBehavior: "followUp",
-			});
-		}
+		processVerifierSessionFile(pi, ctx, path, state, raw.sessionFile);
+		return;
+	}
+	if (state.stage === "verify" && state.verifierRequest) {
+		const agent = typeof raw.agent === "string" && raw.agent ? raw.agent : "unknown agent";
+		pi.sendUserMessage(`LOOPS ignored subagent result from ${agent} during verify; waiting for verifier.`, {
+			deliverAs: "followUp",
+			streamingBehavior: "followUp",
+		});
 		return;
 	}
 	const role = roleForAgent(raw.agent);
@@ -1491,7 +1633,7 @@ export default function sitraLoop(pi: Pi): void {
 			if (typeof p.redRunId !== "string" || typeof p.greenRunId !== "string") {
 				throw new Error("loop_record_build requires redRunId and greenRunId run id strings");
 			}
-			const next = recordBuildFromParams(pi, ctx, path, state, p);
+			const next = await recordBuildFromParams(pi, ctx, path, state, p);
 			return {
 				content: [{ type: "text", text: toolStageText(next) }],
 				details: next,
@@ -1530,6 +1672,30 @@ export default function sitraLoop(pi: Pi): void {
 			const next = persistAndEmit(pi, path, result);
 			return {
 				content: [{ type: "text", text: `stage: ${next.stage}` }],
+				details: next,
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "loop_start_verifier",
+		label: "Start loop verifier",
+		description:
+			"Start the pending LOOPS verifier from the runner-stored verifier task. Takes no arguments and refuses a duplicate start for the same dispatch while one is running.",
+		promptSnippet: "loop_start_verifier: start the pending LOOPS verifier when the runner is in verify",
+		parameters: Type.Object({}, { additionalProperties: false }),
+		async execute(_id, _params, _signal, _onUpdate, ctx) {
+			const checkout = checkoutGit(ctx.cwd);
+			const { path, state } = loadExistingCurrentState(checkout);
+			const alreadyStarted = !!state.verifierRequest?.startedAt;
+			const next = await startVerifierFromState(pi, ctx, path, state);
+			const text = alreadyStarted
+				? verifierStartedText(next)
+				: next.verifierRequest?.startedAt
+					? verifierLaunchedText(next)
+					: toolStageText(next);
+			return {
+				content: [{ type: "text", text }],
 				details: next,
 			};
 		},

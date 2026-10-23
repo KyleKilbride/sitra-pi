@@ -193,6 +193,7 @@ const VerifierRequest = Type.Object(
 		dispatchId: Type.String({ minLength: 1 }),
 		runLogs: Type.Array(Type.String()),
 		maxVerifierRerunMs: Type.Number(),
+		startedAt: Type.Optional(Type.String({ minLength: 1 })),
 	},
 	{ additionalProperties: false },
 );
@@ -481,6 +482,17 @@ export function recordAdvisorStarted(state: LoopState, roles: AdvisorRole[]): Lo
 		if (pending.has(role)) started.add(role);
 	}
 	return { ...state, startedAdvisors: [...started] };
+}
+
+export function recordVerifierStarted(state: LoopState, startedAt: string): LoopState {
+	if (state.stage !== "verify" || !state.verifierRequest) return state;
+	return { ...state, verifierRequest: { ...state.verifierRequest, startedAt } };
+}
+
+export function clearVerifierStarted(state: LoopState): LoopState {
+	if (!state.verifierRequest?.startedAt) return state;
+	const { startedAt: _startedAt, ...verifierRequest } = state.verifierRequest;
+	return { ...state, verifierRequest };
 }
 
 export function tokensFromSubagentResult(details: Record<string, unknown>): {
@@ -1132,10 +1144,13 @@ export function answerLoopQuestion(
 		}
 		const verifierRequest =
 			state.block.kind === "intake-failed" && state.block.resumeStage === "verify" && state.verifierRequest
-				? {
-						...state.verifierRequest,
-						retryAnswer: input.answer,
-					}
+				? (() => {
+						const { startedAt: _startedAt, ...request } = state.verifierRequest;
+						return {
+							...request,
+							retryAnswer: input.answer,
+						};
+					})()
 				: state.verifierRequest;
 		const next: LoopState = {
 			...state,

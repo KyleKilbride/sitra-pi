@@ -452,7 +452,10 @@ async function runBuildVerifyE2e(kind: "pass" | "miss") {
 						})}\n`,
 					);
 				}
-				if (!finished && text.includes("Start verifier")) {
+				if (
+					!finished &&
+					(text.includes("verifier started, waiting for its report") || text.includes("LOOPS verifier could not start"))
+				) {
 					finished = true;
 					clearTimeout(fail);
 					child.stdin.end();
@@ -471,8 +474,11 @@ async function runBuildVerifyE2e(kind: "pass" | "miss") {
 		child.stdin.write(`${JSON.stringify({ type: "prompt", message: "/loop start Add the LOOPS runner" })}\n`);
 	});
 	const transcript = JSON.stringify(records);
-	expect(transcript).toContain("Start verifier");
-	expect(transcript).toContain(kind === "pass" ? "pass-green-run.log" : "miss-green-run.log");
+	expect(transcript).not.toContain("Start verifier");
+	expect(transcript).toMatch(/verifier started, waiting for its report|LOOPS verifier could not start/);
+	const state = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+	expect(state.stage).toBe("verify");
+	expect(state.verifierRequest?.task).toContain(kind === "pass" ? "pass-green-run.log" : "miss-green-run.log");
 }
 
 test("loop runner e2e: explicit build and verifier pass reach verifier dispatch", async () => {
