@@ -53,8 +53,16 @@ function fakePi() {
 	return { handlers, commands, tools, userMessages };
 }
 
-const ctx = (cwd: string, messages: string[] = []) => ({
+const ctx = (
+	cwd: string,
+	messages: string[] = [],
+	executeTool: (toolName: string, input: Record<string, unknown>) => Promise<unknown> = async () => ({
+		content: [{ type: "text", text: "launched async with id test-verifier" }],
+		details: { async: true },
+	}),
+) => ({
 	cwd,
+	executeTool,
 	ui: {
 		setStatus() {},
 		notify: (message: string) => messages.push(message),
@@ -231,6 +239,7 @@ async function recordBuildWithLogs(
 	redLog: string,
 	greenLog: string,
 	cwd: string,
+	executeTool?: (toolName: string, input: Record<string, unknown>) => Promise<unknown>,
 ) {
 	const redRunId = `red-${nextRunId++}`;
 	const greenRunId = `green-${nextRunId++}`;
@@ -265,7 +274,9 @@ async function recordBuildWithLogs(
 			],
 		},
 	});
-	return tools.get("loop_record_build")?.execute("1", { redRunId, greenRunId }, undefined, undefined, ctx(cwd));
+	return tools
+		.get("loop_record_build")
+		?.execute("1", { redRunId, greenRunId }, undefined, undefined, ctx(cwd, [], executeTool));
 }
 
 async function prepareVerifierLoop(
@@ -1388,6 +1399,11 @@ describe("Pi wiring", () => {
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
 		const { commands, tools, userMessages } = fakePi();
 		const { cwd } = gitWorktree();
+		const executeCalls: { toolName: string; input: Record<string, unknown> }[] = [];
+		const executeTool = vi.fn(async (toolName: string, input: Record<string, unknown>) => {
+			executeCalls.push({ toolName, input });
+			return { content: [{ type: "text", text: "launched async with id verifier-1" }], details: { async: true } };
+		});
 		approvedLoop(profile, cwd);
 		writeFileSync(join(cwd, "loop.test.ts"), "expect(true).toBe(true)\n");
 		const redCommit = commitAll(cwd, "add tests");
@@ -1411,14 +1427,164 @@ describe("Pi wiring", () => {
 			testHashes: [{ file: "loop.test.ts", sha256: expectedHash }],
 			exitCode: 0,
 		});
-		const result = await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
+		const result = await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd, executeTool);
 		expect(result?.content[0]?.text).toContain("stage: verify");
 		const state = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
 		expect(state.stage).toBe("verify");
 		expect(state.build.testHashes).toEqual([{ file: "loop.test.ts", sha256: expectedHash }]);
-		expect(userMessages.join("\n")).toContain("Start verifier");
-		expect(userMessages.join("\n")).toContain("maxVerifierRerunMs: 120000");
+		expect(executeTool).toHaveBeenCalledTimes(1);
+		expect(executeCalls[0]).toMatchObject({
+			toolName: "subagent",
+			input: { agent: "verifier", name: expect.stringContaining("loop-verifier"), title: "LOOPS verifier" },
+		});
+		expect(executeCalls[0]?.input.task).toContain("maxVerifierRerunMs: 120000");
+		expect(executeCalls[0]?.input).not.toHaveProperty("async");
+		expect(userMessages.join("\n")).toContain("verifier started, waiting for its report");
+		expect(userMessages.join("\n")).not.toContain("Start verifier");
 		expect(userMessages.join("\n")).not.toContain("## Context from the lead's conversation");
+	});
+
+	test("loop_start_verifier refuses a second start for the same dispatch while it is running", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		approvedLoop(profile, cwd);
+		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
+		const redCommit = commitAll(cwd, "add tests");
+		writeFileSync(join(cwd, "impl.ts"), "green\n");
+		const greenCommit = commitAll(cwd, "implement");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		const hash = sha256sum(cwd, "loop.test.ts");
+		const redLog = join(profile, "red.log");
+		const greenLog = join(profile, "green.log");
+		writeHeaderLoopLog(redLog, {
+			commit: redCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 1,
+		});
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 0,
+		});
+		const executeTool = vi.fn(async () => ({
+			content: [{ type: "text", text: "launched async with id verifier-1" }],
+			details: { async: true },
+		}));
+		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd, executeTool);
+		const dispatchId = readLoopStateFile(loopStatePath(profile, cwd, "feature")).verifierRequest?.dispatchId;
+
+		const second = await tools
+			.get("loop_start_verifier")
+			?.execute("2", {}, undefined, undefined, ctx(cwd, [], executeTool));
+
+		expect(executeTool).toHaveBeenCalledTimes(1);
+		expect(second?.content[0]?.text).toContain(`verifier already started for dispatchId ${dispatchId}`);
+		expect(second?.content[0]?.text).toContain("waiting for its report");
+	});
+
+	test("loop_status shows a started verifier and the next expected action waits for its report", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		await prepareVerifierLoop(profile, cwd, commands, tools);
+
+		const status = await tools.get("loop_status")?.execute("1", {}, undefined, undefined, ctx(cwd));
+
+		expect(status?.content[0]?.text).toContain("verifier: started, waiting for its report");
+		expect(status?.content[0]?.text).toContain("next expected action: verifier started, waiting for its report");
+	});
+
+	test("subagent results from non-verifier agents during verify produce a visible notice", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers, tools, userMessages } = fakePi();
+		const { cwd } = gitWorktree();
+		await prepareVerifierLoop(profile, cwd, commands, tools);
+		userMessages.length = 0;
+
+		await handlers.get("message_end")?.(
+			subagentResult("reviewer", sessionFileWithHelperReport(helperReport("verifier", {}))),
+			ctx(cwd),
+		);
+
+		expect(userMessages.join("\n")).toContain("ignored subagent result from reviewer during verify");
+	});
+
+	test("record-build, resume, and answer do not emit the old verifier start instruction", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers, tools, userMessages } = fakePi();
+		const { cwd } = gitWorktree();
+		const prepared = await prepareVerifierLoop(profile, cwd, commands, tools);
+		expect(userMessages.join("\n")).not.toContain("Start verifier");
+
+		userMessages.length = 0;
+		await commands.get("loop")?.handler("resume", ctx(cwd));
+		expect(userMessages.join("\n")).not.toContain("Start verifier");
+		expect(userMessages.join("\n")).toContain("verifier already started");
+
+		await handlers.get("message_end")?.(
+			{ message: { customType: "subagent_result", details: { agent: "verifier" } } },
+			ctx(cwd),
+		);
+		userMessages.length = 0;
+		await commands.get("loop")?.handler("answer retry verifier", ctx(cwd));
+		expect(readLoopStateFile(prepared.path).stage).toBe("verify");
+		expect(userMessages.join("\n")).not.toContain("Start verifier");
+		expect(userMessages.join("\n")).toContain("verifier started, waiting for its report");
+	});
+
+	test("synchronous awaited verifier delivery records the verifier report", async () => {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, tools } = fakePi();
+		const { cwd } = gitWorktree();
+		approvedLoop(profile, cwd);
+		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
+		const redCommit = commitAll(cwd, "add tests");
+		writeFileSync(join(cwd, "impl.ts"), "green\n");
+		const greenCommit = commitAll(cwd, "implement");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		const hash = sha256sum(cwd, "loop.test.ts");
+		const redLog = join(profile, "red.log");
+		const greenLog = join(profile, "green.log");
+		writeHeaderLoopLog(redLog, {
+			commit: redCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 1,
+		});
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 0,
+		});
+		const executeTool = vi.fn(async (_toolName: string, input: Record<string, unknown>) => {
+			const task = String(input.task ?? "");
+			const sessionFile = sessionFileWithVerifierReport(
+				helperReport("verifier", {
+					checksRun: [],
+					rerunChecks: [],
+					acceptedLogs: [],
+					testHashesChecked: ["loop.test.ts"],
+					goalMatched: true,
+				}),
+				task,
+			);
+			return {
+				content: [{ type: "text", text: "verifier completed" }],
+				details: { async: false, deliveryState: "awaited", sessionFile },
+			};
+		});
+
+		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd, executeTool);
+
+		const state = readLoopStateFile(loopStatePath(profile, cwd, "feature"));
+		expect(executeTool).toHaveBeenCalledTimes(1);
+		expect(state.stage).toBe("done");
+		expect(state.verification).toMatchObject({ status: "passed", summary: "verifier summary" });
 	});
 
 	test("loop_run_evidence runs the command in a temporary worktree at the named commit and loop_record_build accepts the logs", async () => {
@@ -2732,7 +2898,7 @@ describe("Pi wiring", () => {
 		expect(readLoopStateFile(path).stage).toBe("done");
 	});
 
-	test("/loop resume re-emits a pending verifier request with the same dispatchId and the matching report advances", async () => {
+	test("/loop resume reports a running verifier with the same dispatchId and the matching report advances", async () => {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
 		const { commands, handlers, tools, userMessages } = fakePi();
@@ -2764,8 +2930,9 @@ describe("Pi wiring", () => {
 		await commands.get("loop")?.handler("resume", ctx(cwd));
 
 		const resumed = userMessages.join("\n");
-		expect(resumed).toContain("Start verifier");
-		expect(resumed).toContain(`Verifier dispatchId: ${dispatchId}`);
+		expect(resumed).toContain(`verifier already started for dispatchId ${dispatchId}`);
+		expect(resumed).toContain("waiting for its report");
+		expect(resumed).not.toContain("Start verifier");
 		await handlers.get("message_end")?.(
 			subagentResult(
 				"verifier",
