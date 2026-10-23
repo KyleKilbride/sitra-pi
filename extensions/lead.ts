@@ -3,14 +3,13 @@
  * visible herdr panes instead of blocking, and a "needs you" signal in herdr when a question is waiting.
  */
 import { execFileSync, spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Type } from "typebox";
 import { dirtyFiles } from "./git-status.ts";
 import { HELPER_REPORT_TOOL_SCHEMA, renderHelperReport, validateHelperReport } from "./helper-report.ts";
 import { loopStatePath, readLoopStateFile } from "./loop-state.ts";
-import { hashFiles, type RunMeta, readRun, shellQuote, writeRunScript } from "./runs.ts";
+import { hashFiles, type RunMeta, readRun, startCommandInFreshPane, writeRunScript } from "./runs.ts";
 import { gitBranch, mainCheckout } from "./sessions.ts";
 
 /** The lead's working rules, written for the person it works with (their name, or "the user"). */
@@ -49,7 +48,7 @@ function paneIdFromSplit(output: string): string | undefined {
 	try {
 		const value: unknown = JSON.parse(output);
 		if (!value || typeof value !== "object") return undefined;
-		const paneId = (value as { pane_id?: unknown }).pane_id;
+		const paneId = (value as { result?: { pane?: { pane_id?: unknown } } }).result?.pane?.pane_id;
 		return typeof paneId === "string" && paneId ? paneId : undefined;
 	} catch {
 		return undefined;
@@ -242,29 +241,28 @@ export default function sitraLead(pi: Pi): void {
 						ctx.cwd,
 					]);
 					runPane = paneIdFromSplit(split);
-					if (!runPane) throw new Error(`could not open a pane: ${split.slice(0, 200)}`);
+					if (!runPane) throw new Error(`could not open a pane: ${split}`);
 					freshPane = true;
 				}
 				const pane = runPane;
 				if (freshPane) {
-					const nonce = randomBytes(8).toString("hex");
-					herdr(["pane", "run", pane, `printf 'sitra-%s\\n' ${shellQuote(`ready-${nonce}`)}`]);
 					try {
-						herdr(["pane", "wait-output", pane, "--match", `sitra-ready-${nonce}`, "--timeout", "15000"]);
+						startCommandInFreshPane(herdr, pane, line);
 					} catch {
 						runPane = undefined;
 						return {
 							content: [
 								{
 									type: "text",
-									text: `The run "${p.label}" was not started: pane shell never became ready (${pane}); the pane was left as-is for you to inspect. Log: ${log}`,
+									text: `The run "${p.label}" was not started: pane shell never became ready (${pane}); the new pane was closed. Log: ${log}\nScript: ${script}`,
 								},
 							],
-							details: { log, runId, pane, error: "pane shell never became ready" },
+							details: { log, runId, pane, script, error: "pane shell never became ready" },
 						};
 					}
+				} else {
+					herdr(["pane", "run", pane, line]);
 				}
-				herdr(["pane", "run", pane, line]);
 				where = `herdr pane ${pane} ("${p.label}")`;
 			} else {
 				spawn("bash", [script], { detached: true, stdio: "ignore" }).unref();
