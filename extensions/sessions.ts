@@ -670,9 +670,7 @@ export function writeSpawnPaneScript(
 	writeFileSync(groundingPath, grounding, { mode: 0o600 });
 	chmodSync(groundingPath, 0o600);
 	const command = `pnpm i && pnpm run build && sitra "$(cat ${shellQuote(groundingPath)})"`;
-	const script = ["#!/usr/bin/env bash", "set -euo pipefail", `cd ${shellQuote(worktreePath)}`, command, ""].join(
-		"\n",
-	);
+	const script = ["#!/usr/bin/env bash", "set -euo pipefail", `cd ${shellQuote(worktreePath)}`, command, ""].join("\n");
 	writeFileSync(scriptPath, script, { mode: 0o700 });
 	chmodSync(scriptPath, 0o700);
 	return { line: `bash ${shellQuote(scriptPath)}`, scriptPath, groundingPath };

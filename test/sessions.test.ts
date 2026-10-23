@@ -905,12 +905,13 @@ describe("tower edge cases", () => {
 			expect(details?.spawned).toBe(true);
 			expect(details?.scriptPath).toBeTruthy();
 			expect(details?.groundingPath).toBeTruthy();
-			if (!details?.scriptPath || !details.groundingPath || !details.worktreePath) throw new Error("missing spawn paths");
+			if (!details?.scriptPath || !details.groundingPath || !details.worktreePath)
+				throw new Error("missing spawn paths");
 			expect(res?.content[0]?.text).toContain(`Script: ${details.scriptPath}`);
 			expect(details.scriptPath.startsWith(`${details.worktreePath}/`)).toBe(false);
 			expect(readFileSync(details.groundingPath, "utf8")).toBe(prompt);
 			const script = readFileSync(details.scriptPath, "utf8");
-			expect(script).toContain("pnpm i && pnpm run build && sitra \"$(cat ");
+			expect(script).toContain('pnpm i && pnpm run build && sitra "$(cat ');
 			expect(script).not.toContain(prompt);
 
 			const calls = readHerdrCalls(logFile);
@@ -952,13 +953,15 @@ describe("tower edge cases", () => {
 			PATH: `${bin}:${process.env.PATH}`,
 		});
 		try {
-			const result = await s.tools.get("spawn_session")?.execute(
-				"1",
-				{ repo, branch: "krskl/ready-timeout", base: "staging", label: "ready-timeout" },
-				undefined,
-				undefined,
-				s.ctxFor("tower-1", repo),
-			);
+			const result = await s.tools
+				.get("spawn_session")
+				?.execute(
+					"1",
+					{ repo, branch: "krskl/ready-timeout", base: "staging", label: "ready-timeout" },
+					undefined,
+					undefined,
+					s.ctxFor("tower-1", repo),
+				);
 			const details = result?.details as { spawned?: boolean; scriptPath?: string; paneId?: string; error?: string };
 			expect(details.spawned).toBe(false);
 			expect(details.error).toBe("pane shell never became ready");

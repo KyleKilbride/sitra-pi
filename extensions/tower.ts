@@ -8,6 +8,7 @@ import { existsSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Type } from "typebox";
 import { writeTowerSummary } from "./radar-store.ts";
+import { waitForPaneShellReady } from "./runs.ts";
 import {
 	auditSessionsFriction,
 	createTailReader,
@@ -30,10 +31,9 @@ import {
 	type SessionRole,
 	sendInboxMessage,
 	updateSession,
-	writeSpawnPaneScript,
 	writeSession,
+	writeSpawnPaneScript,
 } from "./sessions.ts";
-import { waitForPaneShellReady } from "./runs.ts";
 
 /** Working rules for the tower (the person's number 2 / producer). */
 export function towerRules(userName?: string, towerName?: string): string {
