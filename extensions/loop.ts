@@ -933,6 +933,19 @@ function architectureEffects(state: LoopState): { state: LoopState; effects: Loo
 	return { state, effects: [{ type: "ask-person", reason: "brief-approval", question }] };
 }
 
+export function pendingPersonAsk(state: LoopState): Extract<LoopEffect, { type: "ask-person" }> | undefined {
+	if ((state.stage === "needs-person" || state.stage === "blocked") && state.block) {
+		const question = state.questions.find((item) => item.id === state.block?.questionId);
+		return question ? { type: "ask-person", reason: state.block.kind, question } : undefined;
+	}
+	if (state.stage === "architecture-review") {
+		return architectureEffects(state).effects.find(
+			(effect): effect is Extract<LoopEffect, { type: "ask-person" }> => effect.type === "ask-person",
+		);
+	}
+	return undefined;
+}
+
 function pendingProposalIndex(state: LoopState): number | undefined {
 	if (state.block) return undefined;
 	const index = state.rework.findIndex((entry) => !entry.proposalPath);

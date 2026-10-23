@@ -2,6 +2,7 @@
 import { execFile, execFileSync } from "node:child_process";
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
+import { ASK_USER_TOOL } from "./ask-user-tool.ts";
 import { grimoireDir, listProposals } from "./grimoire.ts";
 import { initialRadarState, type RadarState, type TowerSummary } from "./radar-model.ts";
 import { collectMail, readTowerSummary } from "./radar-store.ts";
@@ -367,7 +368,7 @@ function readTranscriptInsightsFromParsed(
 					lastLine = cleanMarkdown(trimmed);
 					break;
 				}
-			} else if (p.type === "toolCall" && p.name === "ask_user_question" && status === "waiting_for_user") {
+			} else if (p.type === "toolCall" && p.name === ASK_USER_TOOL && status === "waiting_for_user") {
 				const args = p.arguments as { questions?: { question?: string }[] } | undefined;
 				const q = args?.questions?.[0];
 				const firstLine = q?.question?.split("\n")[0];

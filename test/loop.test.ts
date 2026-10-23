@@ -19,6 +19,7 @@ import {
 	type LoopQuestion,
 	type LoopState,
 	nextLoopEffects,
+	pendingPersonAsk,
 	recordBuildEvidence,
 	reworkProposal,
 	staleReason,
@@ -1698,5 +1699,65 @@ describe("build and verify slice", () => {
 
 	test("exports the verifier task builder for isolated verifier dispatch", () => {
 		expect(verifierTask).toBeTypeOf("function");
+	});
+
+	test("pendingPersonAsk returns the pending question at needs-person, blocked, and brief approval", () => {
+		let needsPerson = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+		needsPerson = applyAdvisorReport(
+			needsPerson,
+			report("intent", {
+				details: {
+					questions: [
+						{
+							id: "q-person",
+							text: "Which behavior should ship?",
+							recommended: "Choose the default behavior.",
+							dependsOn: [],
+						},
+					],
+					doneCandidates: [],
+					ambiguities: [],
+				},
+			}),
+			{ outputTokens: 1, contextTokens: 0 },
+		).state;
+		needsPerson = applyAdvisorReport(needsPerson, report("codebase"), { outputTokens: 1, contextTokens: 0 }).state;
+
+		expect(pendingPersonAsk(needsPerson)).toMatchObject({
+			type: "ask-person",
+			reason: "questions",
+			question: { id: needsPerson.block?.questionId },
+		});
+
+		const blocked = blockForVerifierIntakeFailure(verifiedState(), "missing verifier evidence").state;
+		expect(pendingPersonAsk(blocked)).toMatchObject({
+			type: "ask-person",
+			reason: "intake-failed",
+			question: { id: blocked.block?.questionId },
+		});
+
+		let briefApproval = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+		briefApproval = applyAdvisorReport(briefApproval, report("intent"), { outputTokens: 1, contextTokens: 0 }).state;
+		briefApproval = applyAdvisorReport(briefApproval, report("codebase"), { outputTokens: 1, contextTokens: 0 }).state;
+		briefApproval = applyAdvisorReport(briefApproval, report("test-design"), {
+			outputTokens: 1,
+			contextTokens: 0,
+		}).state;
+		briefApproval = applyLeadPlan(briefApproval, "Keep transitions pure.").state;
+		briefApproval = applyAdvisorReport(briefApproval, report("architecture"), {
+			outputTokens: 1,
+			contextTokens: 0,
+		}).state;
+		expect(pendingPersonAsk(briefApproval)).toMatchObject({
+			type: "ask-person",
+			reason: "brief-approval",
+			question: { id: "brief-approval" },
+		});
+
+		const advisorsRunning = createLoopState({ ...context, goal: "Add the loop runner.", limits: [], done: [] });
+		expect(pendingPersonAsk(advisorsRunning)).toBeUndefined();
+		const needsPersonBlock = needsPerson.block;
+		if (!needsPersonBlock) throw new Error("expected a pending question block");
+		expect(pendingPersonAsk({ ...needsPerson, block: { ...needsPersonBlock, questionId: "missing" } })).toBeUndefined();
 	});
 });

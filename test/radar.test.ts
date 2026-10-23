@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { ASK_USER_TOOL } from "../extensions/ask-user-tool.ts";
 import { writeProposal } from "../extensions/grimoire.ts";
 import {
 	collectRadarSnapshot,
@@ -275,7 +276,7 @@ fi
 						content: [
 							{
 								type: "toolCall",
-								name: "ask_user_question",
+								name: ASK_USER_TOOL,
 								arguments: { questions: [{ question: "Which branch should we target?" }] },
 							},
 						],
@@ -368,6 +369,10 @@ fi
 				else process.env[k] = v;
 			}
 		}
+	});
+
+	test("the question widget tool name is pinned to ask_user_question", () => {
+		expect(ASK_USER_TOOL).toBe("ask_user_question");
 	});
 });
 
