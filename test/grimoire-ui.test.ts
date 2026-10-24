@@ -26,10 +26,15 @@ import {
 	writeProposal,
 } from "../extensions/grimoire.ts";
 import {
+	addEntry,
 	dayLog,
+	type EntryInput,
 	type GrimoireServer,
+	moveEntry,
+	restoreRejected,
 	snapshot,
 	startGrimoireServer,
+	updateEntry,
 	validateGrimoirePath,
 } from "../extensions/grimoire-ui.ts";
 import { recordMoment, tally } from "../extensions/learn.ts";
@@ -425,6 +430,76 @@ describe("CRUD: root, add, edit, move, delete, accept, reject, restore and link 
 		expect(rejected.status).toBe(200);
 		expect(rejected.data.file).toMatch(/^rejected\//);
 		expect(listProposals(dir)).toEqual([]);
+	});
+
+	const unknownLines = ['rejectedReason: "dup"', 'status: "x"', "owner: someone"];
+	const withUnknownKeys = (kindFolder: string, name: string, dir: string) => {
+		const file = `${kindFolder}/${name}.md`;
+		mkdirSync(join(dir, kindFolder), { recursive: true });
+		const lines = [
+			"---",
+			'kind: "lesson"',
+			'title: "Keep what you do not know"',
+			'date: "2026-10-20"',
+			...unknownLines,
+			"---",
+			"",
+			"Body.",
+			"",
+		];
+		writeFileSync(join(dir, file), lines.join("\n"));
+		return file;
+	};
+	const fileLines = (dir: string, file: string) => readFileSync(join(dir, file), "utf8").split("\n");
+
+	test("editing an entry keeps frontmatter keys it doesn't know, byte for byte", () => {
+		const dir = tmp();
+		const file = withUnknownKeys("kinds/lessons", "2026-10-20-keep", dir);
+		const updated = updateEntry(dir, file, { title: "A new title" });
+		expect(updated.title).toBe("A new title");
+		const lines = fileLines(dir, file);
+		expect(lines).toContain('title: "A new title"');
+		for (const line of unknownLines) expect(lines).toContain(line);
+		expect(parseEntry(readFileSync(join(dir, file), "utf8"), file)?.extra).toEqual([
+			{ key: "rejectedReason", raw: 'rejectedReason: "dup"' },
+			{ key: "status", raw: 'status: "x"' },
+			{ key: "owner", raw: "owner: someone" },
+		]);
+	});
+
+	test("moving an entry to another kind keeps the unknown keys", () => {
+		const dir = tmp();
+		const file = withUnknownKeys("kinds/lessons", "2026-10-20-keep", dir);
+		const moved = moveEntry(dir, file, "warning");
+		expect(moved.file).toBe("kinds/warnings/2026-10-20-keep.md");
+		const lines = fileLines(dir, moved.file ?? "");
+		expect(lines).toContain('kind: "warning"');
+		for (const line of unknownLines) expect(lines).toContain(line);
+	});
+
+	test("restoring a rejected entry keeps the unknown keys, including the rejection notes", () => {
+		const dir = tmp();
+		const file = withUnknownKeys("rejected", "2026-10-20-keep", dir);
+		const restored = restoreRejected(dir, file);
+		expect(restored.file).toBe("kinds/lessons/2026-10-20-keep.md");
+		const lines = fileLines(dir, restored.file);
+		for (const line of unknownLines) expect(lines).toContain(line);
+	});
+
+	test("a new entry is written with the known fields only", () => {
+		const dir = tmp();
+		const input = {
+			kind: "lesson",
+			title: "Fresh entry",
+			body: "Body.",
+			date: "2026-10-20",
+			extra: [{ key: "status", raw: 'status: "x"' }],
+		} as unknown as EntryInput;
+		const entry = addEntry(dir, input);
+		expect(entry).not.toHaveProperty("extra");
+		const text = readFileSync(join(dir, entry.file), "utf8");
+		expect(text).toBe(renderEntry({ kind: "lesson", title: "Fresh entry", body: "Body.", date: "2026-10-20" }));
+		expect(text).not.toContain("status");
 	});
 });
 

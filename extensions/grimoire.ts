@@ -28,6 +28,8 @@ export interface Entry {
 	when?: string[];
 	/** Path from the Grimoire folder, e.g. `kinds/lessons/2026-10-08-read-evals.md`. */
 	file: string;
+	/** Frontmatter lines whose key sitra doesn't know, verbatim and in order, so a rewrite never drops them. */
+	extra?: { key: string; raw: string }[];
 }
 
 export interface RootText {
