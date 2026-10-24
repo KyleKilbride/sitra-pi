@@ -549,14 +549,30 @@ export function loadRootWithStatus(
 }
 
 /**
- * The root as one file Claude Code imports from CLAUDE.md (`<grimoire>/.sitra/root.md`), capped like Pi's. Rewritten
- * only when the root changed; every Claude Code session start and every sitra session start refreshes it, so root
+ * The root as one file Claude Code imports from CLAUDE.md (`<grimoire>/.sitra/root.md`), capped like Pi's. With
+ * `projects` (projects are in use), it is the same for every project: the global root (at most
+ * `LIMITS.globalRootChars`) and the catalogue of global entries; Claude Code's session hook adds the project's part.
+ * Rewritten only when it changed; every Claude Code session start and every sitra session start refreshes it, so
  * files approved later are picked up.
  */
-export function writeClaudeRoot(dir: string, maxChars = LIMITS.rootChars): string {
+export function writeClaudeRoot(dir: string, maxChars = LIMITS.rootChars, projects = false): string {
 	const file = join(dir, ".sitra", "root.md");
-	const root = loadRoot(dir, undefined, maxChars);
-	const text = root.text ? `${root.text}\n` : "(The Grimoire root is empty.)\n";
+	const root = loadRoot(dir, undefined, projects ? Math.min(LIMITS.globalRootChars, maxChars) : maxChars);
+	let text = root.text ? `${root.text}\n` : "(The Grimoire root is empty.)\n";
+	if (projects) {
+		const global = entriesFor(listEntries(dir), undefined);
+		const search = `\`sitra grimoire search --dir ${shellQuote(dir)} "<words>"\` in the shell`;
+		text = [
+			root.text || "(The Grimoire global root is empty.)",
+			"",
+			"---",
+			"",
+			`## Global Grimoire entries (${global.length}, in ${dir})`,
+			"Entries for the project you work in come from sitra's session hook.",
+			...(global.length > 0 ? ["", catalogue(global, LIMITS.catalogueChars, search)] : []),
+			"",
+		].join("\n");
+	}
 	if (!existsSync(file) || readFileSync(file, "utf8") !== text) {
 		mkdirSync(dirname(file), { recursive: true });
 		writeFileSync(file, text);
@@ -571,6 +587,13 @@ export interface SectionOptions {
 	shell?: boolean;
 	/** The project the entries were chosen for. Leave it out when no projects are registered. */
 	scope?: SectionScope;
+	/** The catalogue as already built (a `projectCatalogue`), used instead of building one from `entries`. */
+	catalogueText?: string;
+	/**
+	 * The file the global root and global entries are loaded from instead (Claude Code's import). `entries` are then
+	 * the project's only, and the section says where the global part is.
+	 */
+	globalIn?: string;
 }
 
 /**
@@ -604,11 +627,15 @@ export function grimoireSection(
 	if (projectRoot) out.push("", `## Root for ${scope?.project?.label}`, "", projectRoot);
 	if (rootText || projectRoot) out.push("", "---");
 	const globalCount = entries.filter((e) => !e.scope).length;
-	const count = !scope
-		? `${entries.length}`
-		: scope.project
-			? `${globalCount} global + ${entries.length - globalCount} for ${scope.project.label}`
-			: `${globalCount} global`;
+	const count = options.globalIn
+		? scope?.project
+			? `${entries.length} for ${scope.project.label}`
+			: "global only"
+		: !scope
+			? `${entries.length}`
+			: scope.project
+				? `${globalCount} global + ${entries.length - globalCount} for ${scope.project.label}`
+				: `${globalCount} global`;
 	out.push(
 		"",
 		`## Approved entries (${count}, in ${dir})`,
@@ -619,9 +646,14 @@ export function grimoireSection(
 			: scope
 				? [`No project here, so global only: ${scope.why}.`]
 				: []),
+		...(options.globalIn
+			? [`The global root and global entries are in ${options.globalIn}, which CLAUDE.md imports.`]
+			: []),
 		`Before each step, check whether an entry below touches what you are about to do; if one might, read it in full before acting. Don't guess what ${who} would want: look it up (${search}) or ask.`,
 	);
-	if (entries.length > 0) out.push("", catalogue(entries, options.catalogueChars, search));
+	const listed =
+		options.catalogueText ?? (entries.length > 0 ? catalogue(entries, options.catalogueChars, search) : "");
+	if (listed) out.push("", listed);
 	out.push(
 		"",
 		`When you learn something future agents must know (a lesson from a mistake, a fact about how things really work, a decision and its reason, a warning, a change to the agent setup), propose it: ${propose}. Only ${who} approves entries. Never edit files in ${join(dir, "root")} or ${join(dir, "kinds")}.`,
@@ -732,14 +764,18 @@ function catalogueLine(e: Entry): string {
  * Every approved entry as one line (kind, title, summary, path), most important kinds first and newest first within a
  * kind, so an agent can open what applies. Past `maxChars` the rest are counted, and found with grimoire_search.
  */
+function catalogueOrder(entries: readonly Entry[]): Entry[] {
+	return ORDER.flatMap((k) =>
+		entries.filter((e) => e.kind === k).sort((a, b) => b.date.localeCompare(a.date) || a.file.localeCompare(b.file)),
+	);
+}
+
 export function catalogue(
 	entries: readonly Entry[],
 	maxChars = LIMITS.catalogueChars,
 	search = "grimoire_search",
 ): string {
-	const sorted = ORDER.flatMap((k) =>
-		entries.filter((e) => e.kind === k).sort((a, b) => b.date.localeCompare(a.date) || a.file.localeCompare(b.file)),
-	);
+	const sorted = catalogueOrder(entries);
 	const all = sorted.map(catalogueLine);
 	if (all.join("\n").length <= maxChars) return all.join("\n");
 	const more = (n: number) => `- …and ${n} more. Find them with ${search}.`;
@@ -753,6 +789,71 @@ export function catalogue(
 	}
 	lines.push(more(sorted.length - lines.length));
 	return lines.join("\n").slice(0, maxChars);
+}
+
+export interface ProjectCatalogue {
+	text: string;
+	/** Entries listed in `text`, in full or by title. */
+	shown: number;
+	/** Summaries were left out so every title (or as many as fit) could be listed. */
+	titlesOnly: boolean;
+	/** Entries not listed in `text`, all written to `file`. Absent when every entry is listed. */
+	overflow?: { count: number; file: string };
+}
+
+/** Where a project's full catalogue goes when the hook can't show every title. */
+export function catalogueOverflowFile(dir: string, projectId: string): string {
+	return join(dir, ".sitra", "catalogues", `${projectId}.md`);
+}
+
+const TITLES_ONLY = "Titles only, to fit; each entry's summary is in its file.";
+
+/**
+ * A project's catalogue within `budget` characters, never cut without saying so: full lines if they fit; else titles
+ * only for every entry; else as many titles as fit, then a line counting the rest and naming `overflowFile`, which
+ * gets the full catalogue (rewritten only when it changes). `search` is how to search the project's entries.
+ */
+export function projectCatalogue(
+	entries: readonly Entry[],
+	budget: number,
+	overflowFile: string,
+	options: { label: string; search: string },
+): ProjectCatalogue {
+	const sorted = catalogueOrder(entries);
+	const full = sorted.map(catalogueLine);
+	if (full.join("\n").length <= budget) return { text: full.join("\n"), shown: sorted.length, titlesOnly: false };
+	const titles = sorted.map((e) => `- [${e.kind}] ${e.title} (${e.file})`);
+	const titled = [TITLES_ONLY, ...titles].join("\n");
+	if (titled.length <= budget) return { text: titled, shown: sorted.length, titlesOnly: true };
+
+	const total = sorted.length;
+	const more = (count: number, shown: number) =>
+		`- …and ${count} more ${options.label} entries (showing ${shown} of ${total}): full list in ${overflowFile}; read it before work they might touch, or search with ${options.search}.`;
+	const room = budget - TITLES_ONLY.length - 1 - more(total, total).length - 1;
+	const lines: string[] = [];
+	let used = 0;
+	for (const line of titles) {
+		if (used + line.length + 1 > room) break;
+		lines.push(line);
+		used += line.length + 1;
+	}
+	const content = `# ${options.label}: every approved entry (${total})\n\n${full.join("\n")}\n`;
+	if (!existsSync(overflowFile) || readFileSync(overflowFile, "utf8") !== content) {
+		mkdirSync(dirname(overflowFile), { recursive: true });
+		writeFileSync(overflowFile, content);
+	}
+	const count = total - lines.length;
+	return {
+		text: [TITLES_ONLY, ...lines, more(count, lines.length)].join("\n"),
+		shown: lines.length,
+		titlesOnly: true,
+		overflow: { count, file: overflowFile },
+	};
+}
+
+/** An entry's scope for a list that mixes projects: `global`, or `scope: <ids>`. */
+export function scopeLabel(entry: Entry): string {
+	return entry.scope ? `scope: ${entry.scope.join(", ")}` : "global";
 }
 
 /** grimoire_search's answer: the best matches as catalogue lines, or a plain "nothing found". */
@@ -792,14 +893,16 @@ export function importedRepos(dir: string): string[] {
 /**
  * Copies a repo's `.pi/knowledge` entries (approved and proposed) into `proposals/` for the person to review, skipping
  * any whose title Grimoire already has anywhere (approved, proposed or rejected, in every scope). With `scope`, the
- * proposals are scoped to those projects. Never touches the old folder.
+ * proposals are scoped to those projects; with `scopeNote` (from `proposalScope`), they record why they are global.
+ * Never touches the old folder.
  */
 export function importKnowledge(
 	source: string,
 	dir: string,
 	label: string,
-	scope?: readonly string[],
+	placement: { scope?: readonly string[]; scopeNote?: string } = {},
 ): { imported: string[]; skipped: string[] } {
+	const { scope, scopeNote } = placement;
 	const known = new Set(
 		[...listEntries(dir), ...listProposals(dir), ...readEntries(dir, "rejected")].map((e) => normalTitle(e.title)),
 	);
@@ -815,7 +918,12 @@ export function importKnowledge(
 		known.add(key);
 		const note = `imported from ${label} (.pi/knowledge/${file})`;
 		const noted = { ...entry, evidence: entry.evidence ? `${entry.evidence}; ${note}` : note };
-		imported.push(writeProposal(dir, scope ? withScope(noted, scope, file) : noted));
+		const placed = scope
+			? withScope(noted, scope, file)
+			: scopeNote
+				? { ...withScope(noted, undefined, file), scopeNote }
+				: noted;
+		imported.push(writeProposal(dir, placed));
 	}
 	const repos = importedRepos(dir);
 	if (!repos.includes(label)) {

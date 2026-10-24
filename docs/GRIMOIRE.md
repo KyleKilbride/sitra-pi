@@ -71,8 +71,10 @@ an entry global. Keys sitra doesn't know are kept as they are when an entry is r
 tool call on files there, doesn't switch it. Rules for the other repo need a session started there. With no
 `projects.json` (or no projects in it), nothing is scoped and everything works as it did before projects.
 
-Today Pi sessions and LOOPS rework proposals (from the loop's worktree) use the project. The Claude Code and Codex hooks
-still load every entry and the global root.
+Pi sessions, the Claude Code and Codex hooks, the learner, LOOPS rework proposals (from the loop's worktree) and
+`sitra grimoire` all resolve the project the same way. A hook session resolves it at `SessionStart` from the hook's
+`cwd` and keeps it in `<grimoire>/.sitra/shown/<session>/project.json`, so later hooks in that session use the same
+project. A hook input with no `cwd` gets global entries only, and the hook text says why.
 
 ## Rules tied to actions (`when`)
 
@@ -130,17 +132,35 @@ cached prompt prefix survives from turn to turn.
 | Tool | Root | Catalogue |
 |---|---|---|
 | Pi (sitra) | system prompt section, every run | same section |
-| Claude Code | `@` import of `<grimoire>/.sitra/root.md` in a sitra-managed block of `~/.claude/CLAUDE.md` (hook text is capped at 10,000 characters; imports are not) | `SessionStart` hook (startup, resume, clear, compact), kept under 9,500 characters |
-| Codex | `SessionStart` hook | same hook; at most 46,000 characters, with `additionalContextLimit` set at 2 characters per token so it always fits |
+| Claude Code | `@` import of `<grimoire>/.sitra/root.md` in a sitra-managed block of `~/.claude/CLAUDE.md` (hook text is capped at 10,000 characters; imports are not). With projects in use the import is the global root only, and the project's root comes from the hook | `SessionStart` hook (startup, resume, clear, compact), kept under 9,500 characters. With projects in use the global catalogue is in the import and the hook carries the project's |
+| Codex | `SessionStart` hook (startup, resume, clear, compact, fork): global and project root | same hook; at most 46,000 characters, with `additionalContextLimit` set at 2 characters per token so it always fits |
 
 - `<grimoire>/.sitra/root.md` is the capped root as one file. Claude Code's session-start hook and every sitra session
-  start rewrite it when the root changes, so root files approved later reach Claude Code too.
+  start rewrite it when the root changes, so root files approved later reach Claude Code too. With no projects it is
+  the whole root (32,000 characters); with projects it is the global root (26,000) plus the global catalogue.
+- When a project's entries don't fit Claude Code's hook budget, the hook steps down and says so: full lines, then
+  titles only, then as many titles as fit followed by "…and N more" pointing at
+  `<grimoire>/.sitra/catalogues/<project>.md`, which holds every line. Nothing is cut silently.
 - The hook command carries the Grimoire folder it was installed with (`--dir`), because Claude Code and Codex don't
   have sitra's environment. The person's name comes from `~/.sitra/config.json`.
 - `sitra grimoire install` adds all of this; `sitra grimoire uninstall` removes it. They change only sitra's own hook
   (recognised by its exact command: the quoted `bin/sitra.ts`, then `grimoire hook`) and the marked CLAUDE.md block,
   which is replaced where it sits. A hooks file that isn't a settings object is refused, never rewritten.
 - Codex asks the person to trust new hooks once, in `/hooks`.
+- `sitra grimoire status` (and `/grimoire-ui`) check the installed hooks: a `SessionStart` matcher that leaves out a
+  source (an older install without Codex's `fork`, say) is reported as missing it, with a reminder to rerun install.
+
+## The `sitra grimoire` commands
+
+- `search <words>`, `eval [cases.jsonl]` and `status` use the project of the current folder and print which one they
+  used and why (or why there is none). `--project <id>` picks one, `--global-only` drops project entries, and `--all`
+  covers every project, labelling each line or count with its scope. `eval` with a file and no flag replays every
+  case in it.
+- `scope <files…> --project <id>…` scopes entries or root files (paths relative to the Grimoire folder) to projects;
+  `--global` makes them global again.
+- `projects` lists the projects and which one applies here. `projects add <id> --remote <url>` or
+  `projects add <id> --path <dir>` (with `--label <name>`) adds one, or adds the remote or path to an existing one.
+  Remotes are stored normalized and paths as their real path.
 
 ## The approval loop
 
@@ -173,6 +193,10 @@ hook that `sitra grimoire install` adds). Recording takes a few milliseconds (2.
    a recognisable action, and writes it to `proposals/` as `proposedBy: "sitra-learn"`, quoting the person as
    evidence. If Grimoire already covers it, it records that instead of proposing a duplicate.
 
+The moment records the session's project, and the proposal is scoped to it (or global with a `scopeNote` saying why
+there was no project). Moments recorded before projects stay global. "Already covered" checks the global entries,
+that project's entries, and rejections from every project.
+
 The person only reviews `/grimoire`; the status line counts what's waiting. Agents can also put `when` triggers in
 their own `grimoire_propose` calls.
 
@@ -196,8 +220,8 @@ their own `grimoire_propose` calls.
 ## Moving off `/kb`
 
 - `sitra grimoire import [repo]` copies a repo's `.pi/knowledge` entries (approved and proposed) into
-  `proposals/`, skipping any whose title already exists anywhere in Grimoire, in any project. It never deletes the old
-  folder.
+  `proposals/`, skipping any whose title already exists anywhere in Grimoire, in any project. The proposals are scoped
+  to that repo's project, or global with a note saying why. It never deletes the old folder.
 - When a session starts in a repo that still has a `.pi/knowledge` folder that hasn't been imported, the status line
   says so.
 - `/kb` and `/kb-reflect` still work for now and point to `/grimoire`.

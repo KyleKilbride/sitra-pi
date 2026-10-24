@@ -10,7 +10,13 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readConfig, sitraHome } from "../cli/config.ts";
-import { CLAUDE_CONTEXT_MAX, CODEX_CONTEXT_CHARS, DEFAULT_LEARN_MODEL, hookOutput } from "../cli/grimoire.ts";
+import {
+	CLAUDE_CONTEXT_MAX,
+	CODEX_CONTEXT_CHARS,
+	DEFAULT_LEARN_MODEL,
+	hookOutput,
+	hooksStatus,
+} from "../cli/grimoire.ts";
 import {
 	catalogue,
 	decide,
@@ -27,9 +33,9 @@ import {
 	renderEntry,
 	slug,
 	unreadableProposals,
-	writeClaudeRoot,
 } from "./grimoire.ts";
 import { type Call, type Moment, pauseOutcomes, repeats, tally } from "./learn.ts";
+import { refreshClaudeRoot } from "./project.ts";
 import { actionFromHook, actionFromPi, parseTrigger, triggerMatches } from "./triggers.ts";
 
 export interface BrokenLink {
@@ -67,8 +73,6 @@ const ALLOWED_ROOTS = ["root", "kinds", "proposals", "rejected"] as const;
 type AllowedRoot = (typeof ALLOWED_ROOTS)[number];
 const KIND_FOLDERS = new Set<string>(KINDS.map((k) => `${k}s`));
 const PACKAGE_JSON = fileURLToPath(new URL("../package.json", import.meta.url));
-const OUR_HOOK = /\/bin\/sitra\.ts['"]?\s+grimoire\s+hook\s+(claude|codex)(\s|$)/;
-const CLAUDE_BLOCK_START = "<!-- sitra grimoire: start (managed by `sitra grimoire install`) -->";
 
 const realOrResolve = (p: string) => {
 	try {
@@ -238,7 +242,7 @@ function applyLinkUpdates(
 	}
 	if (updated.some((f) => f.startsWith("root/")) && existsSync(join(dir, ".sitra", "root.md"))) {
 		try {
-			writeClaudeRoot(dir);
+			refreshClaudeRoot(dir);
 		} catch {
 			// Best effort.
 		}
@@ -280,7 +284,7 @@ export function saveRootFile(dir: string, file: string, content: string): { file
 	writeFileSync(join(dir, clean), normalized);
 	if (existsSync(join(dir, ".sitra", "root.md"))) {
 		try {
-			writeClaudeRoot(dir);
+			refreshClaudeRoot(dir);
 		} catch {
 			// Best effort.
 		}
@@ -443,44 +447,6 @@ export function restoreRejected(dir: string, file: string, kind?: Kind): Entry {
 // Snapshot: what agents get, hooks, settings, root, entries, proposals, rejected
 // ---------------------------------------------------------------------------------------------------------------------
 
-function checkHooksFile(filePath: string): {
-	installed: boolean;
-	status: "installed" | "not installed";
-	events: { SessionStart: boolean; UserPromptSubmit: boolean; PreToolUse: boolean };
-} {
-	const empty = {
-		installed: false,
-		status: "not installed" as const,
-		events: { SessionStart: false, UserPromptSubmit: false, PreToolUse: false },
-	};
-	if (!existsSync(filePath)) return empty;
-	try {
-		const raw = JSON.parse(readFileSync(filePath, "utf8")) as {
-			hooks?: Record<string, { hooks?: { command?: string }[] }[]>;
-		};
-		const hooks = raw?.hooks ?? {};
-		const hasEvent = (name: string) =>
-			Array.isArray(hooks[name]) &&
-			hooks[name].some(
-				(g) =>
-					Array.isArray(g?.hooks) && g.hooks.some((h) => typeof h?.command === "string" && OUR_HOOK.test(h.command)),
-			);
-		const events = {
-			SessionStart: hasEvent("SessionStart"),
-			UserPromptSubmit: hasEvent("UserPromptSubmit"),
-			PreToolUse: hasEvent("PreToolUse"),
-		};
-		const installed = events.SessionStart && events.UserPromptSubmit && events.PreToolUse;
-		return {
-			installed,
-			status: installed ? "installed" : "not installed",
-			events,
-		};
-	} catch {
-		return empty;
-	}
-}
-
 function installedExtensions(): string[] {
 	try {
 		const pkg = JSON.parse(readFileSync(PACKAGE_JSON, "utf8")) as { pi?: { extensions?: string[] } };
@@ -519,13 +485,8 @@ export function snapshot(dir: string, env: Record<string, string | undefined> = 
 		// Leave empty if unreadable.
 	}
 
-	const claudeSettingsPath = join(home, ".claude", "settings.json");
-	const claudeMdPath = join(home, ".claude", "CLAUDE.md");
-	const codexHooksPath = join(home, ".codex", "hooks.json");
-	const claudeHooks = checkHooksFile(claudeSettingsPath);
-	const claudeMdHasImport = existsSync(claudeMdPath) && readFileSync(claudeMdPath, "utf8").includes(CLAUDE_BLOCK_START);
-	const claudeInstalled = claudeHooks.installed && claudeMdHasImport;
-	const codexHooks = checkHooksFile(codexHooksPath);
+	const claudeHooks = hooksStatus(home, "claude");
+	const codexHooks = hooksStatus(home, "codex");
 
 	const rootFiles = rootMarkdownFiles(dir).map((rf) => {
 		const content = readFileSync(join(dir, rf), "utf8");
@@ -573,17 +534,19 @@ export function snapshot(dir: string, env: Record<string, string | undefined> = 
 			},
 			hooks: {
 				claudeCode: {
-					path: claudeSettingsPath,
-					claudeMdPath,
-					claudeMdImported: claudeMdHasImport,
-					installed: claudeInstalled,
-					status: claudeInstalled ? "installed" : "not installed",
+					path: claudeHooks.path,
+					claudeMdPath: claudeHooks.claudeMd?.path,
+					claudeMdImported: claudeHooks.claudeMd?.imported ?? false,
+					installed: claudeHooks.installed,
+					status: claudeHooks.status,
+					missing: claudeHooks.missing,
 					events: claudeHooks.events,
 				},
 				codex: {
-					path: codexHooksPath,
+					path: codexHooks.path,
 					installed: codexHooks.installed,
 					status: codexHooks.status,
+					missing: codexHooks.missing,
 					events: codexHooks.events,
 				},
 			},

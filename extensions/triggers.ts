@@ -5,6 +5,7 @@
  */
 import { basename, isAbsolute, join, matchesGlob, relative } from "node:path";
 import type { Entry } from "./grimoire.ts";
+import { visibleEntries } from "./project.ts";
 import { readShell, stripWrappers } from "./shell.ts";
 
 /** What the agent is about to do, the same shape for every tool. */
@@ -174,6 +175,8 @@ export interface TriggerCase {
 	cwd: string;
 	calls: { tool: string; input: Record<string, unknown> }[];
 	expect: string[];
+	/** The project the moment was recorded in; its rules are global plus that project's. */
+	project?: string;
 }
 
 export interface TriggerReport {
@@ -191,8 +194,16 @@ export interface TriggerReport {
 	summary: string;
 }
 
-/** Replays each case's calls through the triggers, pausing each entry at most once, as a live session would. */
-export function evaluateTriggers(entries: readonly Entry[], cases: readonly TriggerCase[]): TriggerReport {
+/**
+ * Replays each case's calls through the triggers, pausing each entry at most once, as a live session would. With
+ * `projects` (projects are in use), each case sees global rules plus its own project's; a case without a project sees
+ * global rules only, and the summary counts those cases.
+ */
+export function evaluateTriggers(
+	entries: readonly Entry[],
+	cases: readonly TriggerCase[],
+	options: { projects?: boolean } = {},
+): TriggerReport {
 	const tied = entries.filter((e) => e.when?.length);
 	const tiedFiles = new Set(tied.map((e) => e.file));
 	const caught: TriggerReport["caught"] = [];
@@ -201,9 +212,10 @@ export function evaluateTriggers(entries: readonly Entry[], cases: readonly Trig
 	let delivered = 0;
 	for (const c of cases) {
 		const shown = new Set<string>();
+		const rules = visibleEntries(tied, c.project, options.projects === true);
 		for (const call of c.calls) {
 			const action = c.harness === "pi" ? actionFromPi(call.tool, call.input) : actionFromHook(call.tool, call.input);
-			const { included } = pauseMessage(entriesForAction(tied, action, c.cwd, shown), "");
+			const { included } = pauseMessage(entriesForAction(rules, action, c.cwd, shown), "");
 			if (included.length > 0) pauses++;
 			for (const e of included) shown.add(e.file);
 		}
@@ -213,6 +225,7 @@ export function evaluateTriggers(entries: readonly Entry[], cases: readonly Trig
 		else if (fired.length > 0) wrongOnly.push({ id: c.id, fired });
 	}
 	const coverable = cases.filter((c) => c.expect.some((f) => tiedFiles.has(f))).length;
+	const unplaced = options.projects ? cases.filter((c) => c.project === undefined).length : 0;
 	return {
 		cases: cases.length,
 		coverable,
@@ -220,6 +233,6 @@ export function evaluateTriggers(entries: readonly Entry[], cases: readonly Trig
 		wrongOnly,
 		pauses,
 		delivered,
-		summary: `Caught ${caught.length} of ${cases.length} corrections (${coverable} have an expected entry with triggers). ${wrongOnly.length} cases paused only on other rules; ${pauses} pauses showing ${delivered} rules in total.`,
+		summary: `Caught ${caught.length} of ${cases.length} corrections (${coverable} have an expected entry with triggers). ${wrongOnly.length} cases paused only on other rules; ${pauses} pauses showing ${delivered} rules in total.${unplaced ? ` ${unplaced} ${unplaced === 1 ? "case" : "cases"} had no project and ran against global rules only.` : ""}`,
 	};
 }
