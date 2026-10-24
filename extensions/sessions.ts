@@ -245,6 +245,11 @@ export function defaultPidAlive(pid: number): boolean {
  * counts as the same project. Outside git, the folder itself.
  */
 export function mainCheckout(cwd: string): string {
+	return gitCheckout(cwd) ?? cwd;
+}
+
+/** Like `mainCheckout`, but undefined outside git, so callers can tell "no git" from a checkout. */
+export function gitCheckout(cwd: string): string | undefined {
 	const git = (...args: string[]) =>
 		execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
 	try {
@@ -253,7 +258,7 @@ export function mainCheckout(cwd: string): string {
 		const common = git("rev-parse", "--path-format=absolute", "--git-common-dir");
 		return basename(common) === ".git" ? dirname(common) : git("rev-parse", "--show-toplevel");
 	} catch {
-		return cwd;
+		return undefined;
 	}
 }
 
