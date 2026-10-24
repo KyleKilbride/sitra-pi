@@ -206,6 +206,13 @@ export function writeProjects(dir: string, registry: ProjectRegistry): void {
 	renameSync(temp, file);
 }
 
+/** Why a project path won't match, if it won't: `projectFor` compares paths with a checkout's main folder only. */
+export function pathWarning(folder: string): string | undefined {
+	const checkout = gitCheckout(folder);
+	if (checkout === undefined || realpathSync(checkout) === folder) return undefined;
+	return `${folder} is inside the git checkout ${checkout}; a path matches only a checkout's main folder, so sessions there won't match it. Attach the checkout's remote, or add ${checkout}.`;
+}
+
 /**
  * The project a session works in, decided once when it starts. `off`: no projects are registered, so nothing is
  * scoped and everything works as before projects. `global`: projects exist but none applies here, or the registry or

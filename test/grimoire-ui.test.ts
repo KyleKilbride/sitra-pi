@@ -257,6 +257,46 @@ describe("HTTP server security: token, Host header and path escape", () => {
 		}
 	});
 
+	test("43. the project and scope routes enforce the token and the Host check too", async () => {
+		const dir = tmp();
+		const srv = await startGrimoireServer({ dir, env: { HOME: dir } });
+		servers.push(srv);
+		const routes: [string, string, unknown?][] = [
+			["GET", "/api/snapshot?project=global"],
+			["POST", "/api/scope", { files: [], scope: null }],
+			["GET", "/api/projects"],
+			["PUT", "/api/projects", { projects: "not a list" }],
+			["POST", "/api/projects/remote-key", { url: "https://github.com/example/app" }],
+		];
+		for (const [method, path, payload] of routes) {
+			const body = payload === undefined ? undefined : JSON.stringify(payload);
+			const sep = path.includes("?") ? "&" : "?";
+			for (const query of ["", `${sep}token=wrong`]) {
+				const res = await rawRequest({
+					port: srv.port,
+					path: `${path}${query}`,
+					method,
+					host: `127.0.0.1:${srv.port}`,
+					body,
+				});
+				expect(res.status, `${method} ${path}${query}`).toBe(401);
+			}
+			for (const host of [`localhost:${srv.port}`, `evil.example:${srv.port}`]) {
+				const res = await rawRequest({ port: srv.port, path: `${path}${sep}token=${srv.token}`, method, host, body });
+				expect(res.status, `${method} ${path} Host ${host}`).toBe(403);
+			}
+			const ok = await rawRequest({
+				port: srv.port,
+				path: `${path}${sep}token=${srv.token}`,
+				method,
+				host: `127.0.0.1:${srv.port}`,
+				body,
+			});
+			expect(ok.status, `${method} ${path} with token and Host`).not.toBe(404);
+		}
+		expect(existsSync(join(dir, "projects.json"))).toBe(false);
+	});
+
 	test("stops automatically after the idle timeout", async () => {
 		const dir = tmp();
 		const srv = await startGrimoireServer({ dir, env: { HOME: dir }, idleMs: 60 });

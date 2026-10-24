@@ -14,28 +14,51 @@ import {
 	CLAUDE_CONTEXT_MAX,
 	CODEX_CONTEXT_CHARS,
 	DEFAULT_LEARN_MODEL,
-	hookOutput,
+	hookContext,
 	hooksStatus,
 } from "../cli/grimoire.ts";
 import {
-	catalogue,
+	type CatalogueFit,
+	claudeImport,
 	decide,
 	type Entry,
+	entriesFor,
 	grimoireSection,
 	KINDS,
 	type Kind,
 	LIMITS,
+	linkReport,
 	listEntries,
 	listProposals,
 	listRejected,
 	loadRoot,
+	type ProjectCatalogue,
 	parseEntry,
+	type RootText,
 	renderEntry,
+	sectionCatalogue,
+	setScope,
 	slug,
 	unreadableProposals,
 } from "./grimoire.ts";
 import { type Call, type Moment, pauseOutcomes, repeats, tally } from "./learn.ts";
-import { refreshClaudeRoot } from "./project.ts";
+import {
+	checkoutRemotes,
+	normalizeRemote,
+	PROJECTS_FILE,
+	type Project,
+	pathWarning,
+	projectIdOf,
+	projectsOn,
+	type Remote,
+	readProjects,
+	refreshClaudeRoot,
+	type SessionProject,
+	sectionScopeOf,
+	sessionProject,
+	writeProjects,
+} from "./project.ts";
+import { gitCheckout } from "./sessions.ts";
 import { actionFromHook, actionFromPi, parseTrigger, triggerMatches } from "./triggers.ts";
 
 export interface BrokenLink {
@@ -55,6 +78,8 @@ export interface EntryInput {
 	tags?: string[];
 	links?: string[];
 	when?: string[];
+	/** Project ids from `projects.json`; `null` makes the entry global. Left out, an edit keeps the entry's scope. */
+	scope?: string[] | null;
 }
 
 export interface LinkActionOptions {
@@ -277,19 +302,43 @@ function uniquePath(dir: string, folder: string, stem: string): string {
 	return rel;
 }
 
+/** Keeps Claude Code's imported root file current once it exists; every Claude Code session start refreshes it too. */
+function refreshImport(dir: string): void {
+	if (!existsSync(join(dir, ".sitra", "root.md"))) return;
+	try {
+		refreshClaudeRoot(dir);
+	} catch {
+		// Best effort.
+	}
+}
+
 export function saveRootFile(dir: string, file: string, content: string): { file: string; chars: number } {
 	const clean = validateGrimoirePath(dir, file, ["root"]);
 	mkdirSync(join(dir, "root"), { recursive: true });
 	const normalized = `${content.replace(/\r\n/g, "\n").trimEnd()}\n`;
 	writeFileSync(join(dir, clean), normalized);
-	if (existsSync(join(dir, ".sitra", "root.md"))) {
-		try {
-			refreshClaudeRoot(dir);
-		} catch {
-			// Best effort.
-		}
-	}
+	refreshImport(dir);
 	return { file: clean, chars: normalized.length };
+}
+
+/**
+ * A scope sent by the page: left out (`undefined`), global (`null`), or ids of projects in `projects.json`. An empty
+ * list, `"global"`, an id that isn't registered or anything else throws, naming the problem.
+ */
+export function checkScope(dir: string, scope: unknown): string[] | null | undefined {
+	if (scope === undefined || scope === null) return scope;
+	if (!Array.isArray(scope) || scope.some((id) => typeof id !== "string"))
+		throw new Error(`scope must be a list of project ids, or null for global, not ${JSON.stringify(scope)}`);
+	if (scope.length === 0) throw new Error("scope is an empty list; send null to make it global");
+	const { projects } = readProjects(dir);
+	if (projects.length === 0)
+		throw new Error(`There are no projects in ${join(dir, PROJECTS_FILE)}; add one in the Projects tab first.`);
+	const unknown = (scope as string[]).filter((id) => !projects.some((p) => p.id === id));
+	if (unknown.length > 0)
+		throw new Error(
+			`No project ${unknown.map((id) => JSON.stringify(id)).join(", ")} in projects.json; the projects are ${projects.map((p) => p.id).join(", ")}.`,
+		);
+	return [...new Set(scope as string[])];
 }
 
 export function addEntry(dir: string, input: EntryInput): Entry {
@@ -297,6 +346,7 @@ export function addEntry(dir: string, input: EntryInput): Entry {
 	const title = input.title?.trim();
 	const body = input.body?.trim();
 	if (!title || !body) throw new Error("Title and body are required.");
+	const scope = checkScope(dir, input.scope);
 	const day =
 		typeof input.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(input.date.slice(0, 10))
 			? input.date.slice(0, 10)
@@ -313,8 +363,10 @@ export function addEntry(dir: string, input: EntryInput): Entry {
 		...(cleanStringList(input.tags) ? { tags: cleanStringList(input.tags) } : {}),
 		...(cleanStringList(input.links) ? { links: cleanStringList(input.links) } : {}),
 		...(cleanTriggers(input.when) ? { when: cleanTriggers(input.when) } : {}),
+		...(scope ? { scope } : {}),
 	};
 	writeFileSync(join(dir, file), renderEntry(entryData));
+	refreshImport(dir);
 	return { ...entryData, file };
 }
 
@@ -336,6 +388,9 @@ export function updateEntry(dir: string, file: string, input: Partial<EntryInput
 	const tags = input.tags !== undefined ? cleanStringList(input.tags) : current.tags;
 	const links = input.links !== undefined ? cleanStringList(input.links) : current.links;
 	const when = input.when !== undefined ? cleanTriggers(input.when) : current.when;
+	const asked = checkScope(dir, input.scope);
+	const scope = asked === undefined ? current.scope : (asked ?? undefined);
+	const scopeNote = asked === undefined ? current.scopeNote : undefined;
 
 	const updated: Omit<Entry, "file"> = {
 		kind,
@@ -348,9 +403,12 @@ export function updateEntry(dir: string, file: string, input: Partial<EntryInput
 		...(tags ? { tags } : {}),
 		...(links ? { links } : {}),
 		...(when ? { when } : {}),
+		...(scope ? { scope } : {}),
+		...(scopeNote ? { scopeNote } : {}),
 		...(current.extra ? { extra: current.extra } : {}),
 	};
 	writeFileSync(full, renderEntry(updated));
+	refreshImport(dir);
 	return { ...updated, file: clean };
 }
 
@@ -413,13 +471,63 @@ export function deleteEntry(
 	return { file: to, updatedLinks };
 }
 
-export function acceptProposal(dir: string, file: string, kind?: Kind): Entry {
+/** Accepts a proposal, optionally as another kind and with a scope (`null`: global; left out: the proposal's own). */
+export function acceptProposal(dir: string, file: string, kind?: Kind, scope?: string[] | null): Entry {
 	const clean = validateGrimoirePath(dir, file, ["proposals"]);
 	if (kind !== undefined && !KINDS.includes(kind)) throw new Error(`Invalid kind: ${String(kind)}`);
-	const to = decide(dir, clean, "accept", { kind });
+	const checked = checkScope(dir, scope);
+	const to = decide(dir, clean, "accept", { kind, ...(checked !== undefined ? { scope: checked } : {}) });
 	const entry = parseEntry(readFileSync(join(dir, to), "utf8"), to);
 	if (!entry) throw new Error(`Failed to read accepted entry: ${to}`);
+	refreshImport(dir);
 	return entry;
+}
+
+/** Sets the scope of entries in `kinds/`, `proposals/` or `rejected/` through `setScope`; `null` makes them global. */
+export function scopeEntries(dir: string, files: unknown, scope: unknown): string[] {
+	if (!Array.isArray(files) || files.length === 0 || files.some((f) => typeof f !== "string"))
+		throw new Error("files must be a non-empty list of entry paths");
+	if (scope === undefined) throw new Error("scope is required: a list of project ids, or null for global");
+	const checked = checkScope(dir, scope);
+	const clean = (files as string[]).map((f) => validateGrimoirePath(dir, f, ["kinds", "proposals", "rejected"]));
+	const changed = setScope(dir, clean, checked ?? undefined);
+	refreshImport(dir);
+	return changed;
+}
+
+/**
+ * Saves the registry the page sends: every path is stored as its real path (it must be an existing folder), then
+ * `writeProjects` validates and writes. Returns what was saved and warnings: paths that won't match, and entries
+ * left scoped to projects no longer listed.
+ */
+export function saveProjects(dir: string, body: unknown): { projects: Project[]; warnings: string[] } {
+	const list = (body as { projects?: unknown } | null)?.projects;
+	if (!Array.isArray(list)) throw new Error('Send { "projects": [ ... ] }.');
+	const projects = list.map((p: unknown) => {
+		const paths = (p as { paths?: unknown } | null)?.paths;
+		if (!Array.isArray(paths)) return p;
+		return {
+			...(p as object),
+			paths: paths.map((path: unknown) => {
+				if (typeof path !== "string" || !isAbsolute(path)) return path;
+				if (!existsSync(path)) throw new Error(`There is no folder at ${path}.`);
+				return realpathSync(path);
+			}),
+		};
+	}) as Project[];
+	writeProjects(dir, { projects });
+	const saved = readProjects(dir).projects;
+	const warnings = saved.flatMap((p) => p.paths.flatMap((path) => pathWarning(path) ?? []));
+	const ids = new Set(saved.map((p) => p.id));
+	const orphaned = [...listEntries(dir), ...listProposals(dir)].filter((e) => e.scope?.some((id) => !ids.has(id)));
+	if (orphaned.length > 0) {
+		const missing = [...new Set(orphaned.flatMap((e) => (e.scope ?? []).filter((id) => !ids.has(id))))];
+		warnings.push(
+			`${orphaned.length} ${orphaned.length === 1 ? "entry is" : "entries are"} scoped to ${missing.join(", ")}, which ${missing.length === 1 ? "isn't" : "aren't"} in projects.json; no session sees them there until their scope changes.`,
+		);
+	}
+	refreshImport(dir);
+	return { projects: saved, warnings };
 }
 
 export function rejectProposal(dir: string, file: string): { file: string } {
@@ -456,34 +564,165 @@ function installedExtensions(): string[] {
 	}
 }
 
-export function snapshot(dir: string, env: Record<string, string | undefined> = process.env) {
+/** One part of what a tool loads (a root part), against its budget, with how much the cap left out. */
+export interface RootPart {
+	files: string[];
+	/** Size before the cap. */
+	chars: number;
+	/** Characters left out by the cap; the agent is told where to read the rest. */
+	cut: number;
+	limit: number;
+	truncated: boolean;
+}
+
+/** A catalogue as a tool gets it: how many entries are listed, and where the rest are, said in `note`. */
+export interface CatalogueView {
+	chars: number;
+	total: number;
+	shown: number;
+	titlesOnly: boolean;
+	overflow?: { count: number; file: string };
+	limit?: number;
+	note: string;
+}
+
+export type ProjectView = SessionProject & { text: string };
+
+/** The Pi session `/grimoire-ui` was opened from: its folder and the project it found when it started. */
+export interface SnapshotSession {
+	cwd?: string;
+	project?: SessionProject;
+}
+
+const part = (r: RootText, limit: number): RootPart => ({
+	files: r.files,
+	chars: r.chars,
+	cut: r.cut,
+	limit,
+	truncated: r.truncated,
+});
+
+const plural = (n: number) => `${n} ${n === 1 ? "entry" : "entries"}`;
+
+function catalogueView(fit: CatalogueFit | ProjectCatalogue, limit?: number): CatalogueView {
+	const extra = limit === undefined ? {} : { limit };
+	if ("titlesOnly" in fit) {
+		const total = fit.shown + (fit.overflow?.count ?? 0);
+		const note = fit.overflow
+			? `${fit.shown} of ${total} listed as titles only; ${plural(fit.overflow.count)} moved to ${fit.overflow.file}`
+			: fit.titlesOnly
+				? `all ${plural(total)} listed as titles only (summaries didn't fit)`
+				: `all ${plural(total)} listed in full`;
+		return {
+			chars: fit.text.length,
+			total,
+			shown: fit.shown,
+			titlesOnly: fit.titlesOnly,
+			...(fit.overflow ? { overflow: fit.overflow } : {}),
+			...extra,
+			note,
+		};
+	}
+	const note =
+		fit.total === 0
+			? "no entries"
+			: fit.shown === fit.total
+				? `all ${plural(fit.total)} listed in full`
+				: `${fit.shown} of ${fit.total} listed in full; ${plural(fit.total - fit.shown)} not listed, counted in the last line for agents to search`;
+	return { chars: fit.text.length, total: fit.total, shown: fit.shown, titlesOnly: false, ...extra, note };
+}
+
+/** How the page names a project choice, saying why when there is no project. */
+export function projectText(project: SessionProject): string {
+	if (project.state === "off") return "No projects in projects.json, so every entry is global, as before projects.";
+	if (project.state === "global") return `No project: global entries only, because ${project.why}.`;
+	const { id, label } = project.project;
+	const from =
+		project.via === "picker"
+			? "chosen on this page"
+			: project.via === "path"
+				? "from its folder, listed in projects.json"
+				: `from remote ${project.via}`;
+	return [`${label} (${id}), ${from}.`, ...project.warnings.map((w) => `Warning: ${w}.`)].join(" ");
+}
+
+const view = (project: SessionProject): ProjectView => ({ ...project, text: projectText(project) });
+
+/** The registry for the page, or why it can't be read. */
+function registryView(dir: string): { file: string; inUse: boolean; list: Project[]; error?: string } {
+	const file = join(dir, PROJECTS_FILE);
+	try {
+		const list = readProjects(dir).projects;
+		return { file, inUse: list.length > 0, list };
+	} catch (error) {
+		return { file, inUse: true, list: [], error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+/** The session's folder, its checkout and remotes (for "attach this checkout's remotes"), or why there are none. */
+function sessionView(_dir: string, session: SnapshotSession) {
+	const base = {
+		...(session.cwd ? { cwd: session.cwd } : {}),
+		...(session.project ? { project: view(session.project) } : {}),
+	};
+	if (!session.cwd) return { ...base, remotes: [] as Remote[], remotesWhy: "/grimoire-ui wasn't given a folder" };
+	const checkout = gitCheckout(session.cwd);
+	if (checkout === undefined) return { ...base, remotes: [] as Remote[], remotesWhy: "not in a git repository" };
+	try {
+		const remotes = checkoutRemotes(checkout);
+		return {
+			...base,
+			checkout,
+			remotes,
+			...(remotes.length === 0 ? { remotesWhy: "the git repository has no remote" } : {}),
+		};
+	} catch (error) {
+		return {
+			...base,
+			checkout,
+			remotes: [] as Remote[],
+			remotesWhy: error instanceof Error ? error.message : String(error),
+		};
+	}
+}
+
+/**
+ * Everything the page shows. What agents get is built for `project` (the preview the page picked; with no projects
+ * registered, `off`, as before projects): the Pi section, the Claude Code import and session hook, and the Codex
+ * session hook, each part against its budget, with what the caps cut and where the rest of a catalogue went.
+ */
+export function snapshot(
+	dir: string,
+	env: Record<string, string | undefined> = process.env,
+	project?: SessionProject,
+	session: SnapshotSession = {},
+) {
 	const home = env.HOME?.trim() || homedir();
 	const sitra = sitraHome(env, home);
 	const config = readConfig(sitra);
 	const who = env.SITRA_USER_NAME?.trim() || config.name?.trim() || "the person you work with";
 
-	const root = loadRoot(dir);
+	const projects = registryView(dir);
+	const preview: SessionProject =
+		project ?? (projects.inUse ? { state: "global", why: "no project was chosen for this preview" } : { state: "off" });
+	const id = projectIdOf(preview);
+	const root = loadRoot(dir, id);
 	const entries = listEntries(dir);
 	const proposals = listProposals(dir);
 	const rejected = listRejected(dir);
 	const unreadable = unreadableProposals(dir);
-	const catText = entries.length > 0 ? catalogue(entries, LIMITS.catalogueChars) : "";
-	const leadPrompt = grimoireSection(dir, root, entries, { who });
+	const piEntries = entriesFor(entries, id);
+	const piOptions = { who, scope: sectionScopeOf(preview) };
+	const leadPrompt = grimoireSection(dir, root, piEntries, piOptions);
+	const piCatalogue = sectionCatalogue(dir, piEntries, piOptions);
+	const globalLimit = id === undefined ? LIMITS.rootChars : LIMITS.globalRootChars;
 
 	const claudeRootPath = join(dir, ".sitra", "root.md");
-	const claudeRootText = existsSync(claudeRootPath) ? readFileSync(claudeRootPath, "utf8") : root.text || null;
-	let claudeHookContext = "";
-	let codexHookContext = "";
-	try {
-		claudeHookContext =
-			(JSON.parse(hookOutput("claude", dir, who)) as { hookSpecificOutput?: { additionalContext?: string } })
-				.hookSpecificOutput?.additionalContext ?? "";
-		codexHookContext =
-			(JSON.parse(hookOutput("codex", dir, who)) as { hookSpecificOutput?: { additionalContext?: string } })
-				.hookSpecificOutput?.additionalContext ?? "";
-	} catch {
-		// Leave empty if unreadable.
-	}
+	const onDisk = existsSync(claudeRootPath) ? readFileSync(claudeRootPath, "utf8") : undefined;
+	const claudeImported = claudeImport(dir, LIMITS.rootChars, projectsOn(dir));
+	const claudeHook = hookContext("claude", dir, who, preview);
+	const codexHook = hookContext("codex", dir, who, preview);
+	const codexRoot = codexHook.root ?? root;
 
 	const claudeHooks = hooksStatus(home, "claude");
 	const codexHooks = hooksStatus(home, "codex");
@@ -501,10 +740,20 @@ export function snapshot(dir: string, env: Record<string, string | undefined> = 
 		dir,
 		who,
 		limits: LIMITS,
+		projects,
+		session: sessionView(dir, session),
+		preview: view(preview),
+		links: linkReport(dir, id),
 		whatAgentsGet: {
 			everyPrompt: {
 				text: leadPrompt,
 				chars: leadPrompt.length,
+			},
+			pi: {
+				globalRoot: part(root.global, globalLimit),
+				...(id !== undefined ? { projectRoot: part(root.project, LIMITS.projectRootChars) } : {}),
+				catalogue: catalogueView(piCatalogue, LIMITS.catalogueChars),
+				rootLimit: LIMITS.rootChars,
 			},
 			root: {
 				text: root.text,
@@ -514,23 +763,39 @@ export function snapshot(dir: string, env: Record<string, string | undefined> = 
 				truncated: root.truncated,
 			},
 			catalogue: {
-				text: catText,
-				chars: catText.length,
+				text: piCatalogue.text,
+				chars: piCatalogue.text.length,
 				limit: LIMITS.catalogueChars,
-				totalEntries: entries.length,
+				totalEntries: piEntries.length,
 			},
 			claudeCode: {
 				rootFile: claudeRootPath,
-				rootText: claudeRootText,
-				hookText: claudeHookContext,
-				hookChars: claudeHookContext.length,
+				rootText: onDisk ?? (root.text || null),
+				/** What the import file holds after the next Claude Code session start (it is rewritten then). */
+				importText: claudeImported.text,
+				importChars: claudeImported.text.length,
+				importLimit: LIMITS.globalRootChars + LIMITS.catalogueChars,
+				importOnDisk: onDisk === undefined ? "missing" : onDisk === claudeImported.text ? "current" : "stale",
+				importRoot: part(claudeImported.root.global, projectsOn(dir) ? LIMITS.globalRootChars : LIMITS.rootChars),
+				...(claudeImported.catalogue
+					? { importCatalogue: catalogueView(claudeImported.catalogue, LIMITS.catalogueChars) }
+					: {}),
+				hookText: claudeHook.text,
+				hookChars: claudeHook.text.length,
 				hookLimit: CLAUDE_CONTEXT_MAX,
+				...(id !== undefined && claudeHook.root
+					? { projectRoot: part(claudeHook.root.project, LIMITS.projectRootChars) }
+					: {}),
+				...(claudeHook.catalogue ? { catalogue: catalogueView(claudeHook.catalogue) } : {}),
 			},
 			codex: {
-				rootText: root.text,
-				hookText: codexHookContext,
-				hookChars: codexHookContext.length,
+				rootText: codexRoot.text,
+				hookText: codexHook.text,
+				hookChars: codexHook.text.length,
 				hookLimit: CODEX_CONTEXT_CHARS,
+				globalRoot: part(codexRoot.global, globalLimit),
+				...(id !== undefined ? { projectRoot: part(codexRoot.project, LIMITS.projectRootChars) } : {}),
+				catalogue: catalogueView(codexHook.catalogue ?? { text: "", shown: 0, total: 0 }, LIMITS.catalogueChars),
 			},
 			hooks: {
 				claudeCode: {
@@ -1052,6 +1317,7 @@ export function renderPage(token: string): string {
 	<button data-tab="proposals">4. Proposals waiting</button>
 	<button data-tab="rejected">5. Rejected</button>
 	<button data-tab="log">6. Today's log</button>
+	<button data-tab="projects">7. Projects</button>
 </nav>
 <main>
 	<section id="tab-agents" class="tab active"></section>
@@ -1060,6 +1326,7 @@ export function renderPage(token: string): string {
 	<section id="tab-proposals" class="tab"></section>
 	<section id="tab-rejected" class="tab"></section>
 	<section id="tab-log" class="tab"></section>
+	<section id="tab-projects" class="tab"></section>
 </main>
 
 <div id="modal-backdrop" class="modal-backdrop">
@@ -1072,6 +1339,12 @@ const TOKEN = ${JSON.stringify(token)};
 let STATE = null;
 let ENTRY_FILTER = "";
 let LOG_DATE = "";
+/** The project the "What agents get" preview is for: null (this session's), a project id, or "global". */
+let PREVIEW = null;
+let SCOPE_FILTER = "all";
+const SELECTED = new Set();
+let PROJECT_DRAFT = null;
+let PROJECT_NOTES = [];
 
 function esc(s) {
 	return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -1097,12 +1370,18 @@ async function api(path, method = "GET", body) {
 }
 
 async function refresh() {
-	const { status, data } = await api("/api/snapshot");
+	const { status, data } = await api("/api/snapshot" + (PREVIEW === null ? "" : "?project=" + encodeURIComponent(PREVIEW)));
 	if (status !== 200) {
 		toast(data.error || "Failed to load Grimoire snapshot");
+		if (PREVIEW !== null) {
+			PREVIEW = null;
+			await refresh();
+		}
 		return;
 	}
 	STATE = data;
+	const files = new Set((data.entries || []).map(e => e.file));
+	for (const f of [...SELECTED]) if (!files.has(f)) SELECTED.delete(f);
 	if (!LOG_DATE) LOG_DATE = data.todayLog?.date || new Date().toISOString().slice(0, 10);
 	document.getElementById("grimoire-dir").textContent = data.dir;
 	const t = data.todayLog?.tally || { caught: 0, learned: 0, repeats: 0 };
@@ -1113,6 +1392,7 @@ async function refresh() {
 	renderEntriesTab();
 	renderProposalsTab();
 	renderRejectedTab();
+	renderProjectsTab();
 	await loadAndRenderLog(LOG_DATE);
 }
 
@@ -1123,28 +1403,147 @@ document.getElementById("tabs").addEventListener("click", (e) => {
 	for (const s of document.querySelectorAll("main .tab")) s.classList.toggle("active", s.id === "tab-" + btn.dataset.tab);
 });
 
+function projectLabel(id) {
+	const found = (STATE.projects.list || []).find(p => p.id === id);
+	return found ? found.label : id + " (not in projects.json)";
+}
+
+function scopeText(e) {
+	return e.scope ? e.scope.map(projectLabel).join(", ") : "Global";
+}
+
+/** Project ids to offer: the registered ones, then any an entry names that aren't registered. */
+function scopeChoices(extra) {
+	const ids = (STATE.projects.list || []).map(p => p.id);
+	for (const id of extra || []) if (!ids.includes(id)) ids.push(id);
+	return ids;
+}
+
+function sameSet(a, b) {
+	return a.length === b.length && a.every(x => b.includes(x));
+}
+
+function partRow(name, p) {
+	if (!p) return "";
+	const badge = p.cut > 0
+		? '<span class="badge repeat">' + p.cut.toLocaleString() + ' characters cut</span>'
+		: '<span class="badge installed">fits</span>';
+	return '<tr><td>' + esc(name) + '<div class="muted">' + esc(p.files.join(", ") || "(no files)") + '</div></td><td>' + p.chars.toLocaleString() + ' / ' + p.limit.toLocaleString() + '</td><td>' + badge + '</td></tr>';
+}
+
+function catalogueRow(name, c) {
+	if (!c) return "";
+	const badge = c.overflow ? "repeat" : c.titlesOnly ? "trigger" : "installed";
+	return '<tr><td>' + esc(name) + '</td><td>' + c.chars.toLocaleString() + (c.limit ? ' / ' + c.limit.toLocaleString() : '') + '</td><td><span class="badge ' + badge + '">' + esc(c.note) + '</span></td></tr>';
+}
+
+function totalRow(name, chars, limit, soft) {
+	const over = chars > limit;
+	const text = over ? (soft ? "over the budget" : "over the limit") : "within " + (soft ? "the budget" : "the limit");
+	return '<tr><td><strong>' + esc(name) + '</strong></td><td><strong>' + chars.toLocaleString() + '</strong> / ' + limit.toLocaleString() + '</td><td><span class="badge ' + (over ? 'repeat' : 'installed') + '">' + text + '</span></td></tr>';
+}
+
+function sizeTable(rows) {
+	return '<table><thead><tr><th>Part</th><th>Characters</th><th></th></tr></thead><tbody>' + rows.join("") + '</tbody></table>';
+}
+
+function previewCard() {
+	const s = STATE.session || {};
+	const reg = STATE.projects;
+	const own = s.project ? "This session: " + s.project.text : "Default: " + STATE.preview.text;
+	const options = ['<option value=""' + (PREVIEW === null ? ' selected' : '') + '>' + esc(own) + '</option>']
+		.concat((reg.list || []).map(p => '<option value="' + esc(p.id) + '"' + (PREVIEW === p.id ? ' selected' : '') + '>' + esc(p.label) + ' (' + esc(p.id) + ')</option>'))
+		.concat(['<option value="global"' + (PREVIEW === "global" ? ' selected' : '') + '>No project: global only</option>']);
+	const before = s.project && s.project.state === "off"
+		? '<div class="muted">This Pi session started before projects.json had projects, so it sees every unscoped entry until it restarts. The preview shows what a session started in this folder gets now.</div>'
+		: '';
+	const broken = reg.error ? '<div><span class="badge repeat">projects.json can&#39;t be read</span> ' + esc(reg.error) + '. Sessions load global entries only until it&#39;s fixed.</div>' : '';
+	return '<div class="card"><div class="row"><label for="preview-project"><strong>Preview for</strong></label>'
+		+ '<select id="preview-project" onchange="PREVIEW = this.value || null; refresh();">' + options.join("") + '</select></div>'
+		+ '<div class="muted">Previewing: ' + esc(STATE.preview.text) + '</div>' + before + broken + '</div>';
+}
+
+function linksCard() {
+	const words = { "missing": "missing", "out-of-scope": "out of scope", "not-an-entry": "not an approved entry" };
+	const who = STATE.preview.state === "matched" ? STATE.preview.project.label + " sessions" : "sessions with no project";
+	const rows = (STATE.links || []).map(l => '<tr><td><code>' + esc(l.from) + '</code></td><td><code>' + esc(l.target) + '</code></td><td><span class="badge ' + (l.problem === 'out-of-scope' ? 'trigger' : 'repeat') + '">' + esc(words[l.problem] || l.problem) + '</span></td></tr>').join("");
+	return '<div class="card"><h3>Links ' + esc(who) + ' won&#39;t follow</h3>'
+		+ '<div class="muted">Links never load their target. These point at a file that is missing, isn&#39;t an approved entry, or is scoped to another project.</div>'
+		+ (rows ? '<table><thead><tr><th>From</th><th>Links to</th><th>Problem</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="muted" style="margin-top:6px">None: every link goes to something these sessions see.</div>')
+		+ '</div>';
+}
+
 function renderAgentsTab() {
 	const w = STATE.whatAgentsGet;
-	const rootPct = Math.min(100, Math.round((w.root.chars / w.root.limit) * 100));
-	const catPct = Math.min(100, Math.round((w.catalogue.chars / w.catalogue.limit) * 100));
+	const inUse = STATE.projects.inUse;
 	const claudeStatus = w.hooks.claudeCode.status;
 	const codexStatus = w.hooks.codex.status;
+	const importState = {
+		current: "",
+		stale: '<span class="badge warning">the file on disk is older; Claude Code rewrites it at its next session start</span>',
+		missing: '<span class="badge warning">not written yet; run sitra grimoire install</span>',
+	}[w.claudeCode.importOnDisk];
+
+	let sizes;
+	if (inUse) {
+		const noProject = '<tr><td colspan="3" class="muted">No project, so no project root or project entries: ' + esc(STATE.preview.text) + '</td></tr>';
+		sizes = \`
+			<div class="grid-2">
+				<div class="card">
+					<h3>Pi: every prompt</h3>
+					\${sizeTable([
+						partRow("Global root", w.pi.globalRoot),
+						w.pi.projectRoot ? partRow("Project root", w.pi.projectRoot) : noProject,
+						catalogueRow("Catalogue (global + project entries)", w.pi.catalogue),
+						totalRow("Whole section", w.everyPrompt.chars, w.pi.rootLimit + w.pi.catalogue.limit, true),
+					])}
+				</div>
+				<div class="card">
+					<h3>Claude Code</h3>
+					\${sizeTable([
+						partRow("Import: global root", w.claudeCode.importRoot),
+						catalogueRow("Import: global entries", w.claudeCode.importCatalogue),
+						totalRow("CLAUDE.md import (same for every project)", w.claudeCode.importChars, w.claudeCode.importLimit, true),
+						w.claudeCode.projectRoot ? partRow("Session hook: project root", w.claudeCode.projectRoot) : noProject,
+						catalogueRow("Session hook: project entries", w.claudeCode.catalogue),
+						totalRow("Session hook", w.claudeCode.hookChars, w.claudeCode.hookLimit, false),
+					])}
+				</div>
+				<div class="card">
+					<h3>Codex: session hook</h3>
+					\${sizeTable([
+						partRow("Global root", w.codex.globalRoot),
+						w.codex.projectRoot ? partRow("Project root", w.codex.projectRoot) : noProject,
+						catalogueRow("Catalogue (global + project entries)", w.codex.catalogue),
+						totalRow("Session hook", w.codex.hookChars, w.codex.hookLimit, false),
+					])}
+				</div>
+			</div>
+		\`;
+	} else {
+		const rootPct = Math.min(100, Math.round((w.root.chars / w.root.limit) * 100));
+		const catPct = Math.min(100, Math.round((w.catalogue.chars / w.catalogue.limit) * 100));
+		sizes = \`
+			<div class="grid-2">
+				<div class="card">
+					<h3>Root size against limit</h3>
+					<div><strong>\${w.root.chars.toLocaleString()}</strong> / \${w.root.limit.toLocaleString()} characters \${w.root.truncated ? '<span class="badge repeat">cut off over limit</span>' : '<span class="badge installed">fits in prompt</span>'}</div>
+					<div class="meter"><div class="\${w.root.truncated ? 'over' : ''}" style="width:\${rootPct}%"></div></div>
+					<div class="muted">Files loaded (README first): \${w.root.files.map(esc).join(", ") || "(none)"}</div>
+				</div>
+				<div class="card">
+					<h3>Catalogue size against limit</h3>
+					<div><strong>\${w.catalogue.chars.toLocaleString()}</strong> / \${w.catalogue.limit.toLocaleString()} characters (\${w.catalogue.totalEntries} approved entries)</div>
+					<div class="meter"><div class="\${w.catalogue.chars >= w.catalogue.limit ? 'over' : ''}" style="width:\${catPct}%"></div></div>
+					<div class="muted">\${esc(w.pi.catalogue.note)} · Query cap: \${STATE.limits.queryChars.toLocaleString()} characters</div>
+				</div>
+			</div>
+		\`;
+	}
 
 	document.getElementById("tab-agents").innerHTML = \`
-		<div class="grid-2">
-			<div class="card">
-				<h3>Root size against limit</h3>
-				<div><strong>\${w.root.chars.toLocaleString()}</strong> / \${w.root.limit.toLocaleString()} characters \${w.root.truncated ? '<span class="badge repeat">cut off over limit</span>' : '<span class="badge installed">fits in prompt</span>'}</div>
-				<div class="meter"><div class="\${w.root.truncated ? 'over' : ''}" style="width:\${rootPct}%"></div></div>
-				<div class="muted">Files loaded (README first): \${w.root.files.map(esc).join(", ") || "(none)"}</div>
-			</div>
-			<div class="card">
-				<h3>Catalogue size against limit</h3>
-				<div><strong>\${w.catalogue.chars.toLocaleString()}</strong> / \${w.catalogue.limit.toLocaleString()} characters (\${w.catalogue.totalEntries} approved entries)</div>
-				<div class="meter"><div class="\${w.catalogue.chars >= w.catalogue.limit ? 'over' : ''}" style="width:\${catPct}%"></div></div>
-				<div class="muted">Query cap: \${STATE.limits.queryChars.toLocaleString()} characters</div>
-			</div>
-		</div>
+		\${inUse ? previewCard() : ""}
+		\${sizes}
 
 		<div class="card">
 			<h2>Every prompt (exact text the lead agent receives)</h2>
@@ -1155,17 +1554,19 @@ function renderAgentsTab() {
 		<div class="grid-2">
 			<div class="card">
 				<h3>What Claude Code gets</h3>
-				<div class="muted">Root file (\${esc(w.claudeCode.rootFile)}):</div>
-				<pre>\${esc(w.claudeCode.rootText || "(not present)")}</pre>
-				<div class="muted" style="margin-top:8px">SessionStart hook context (\${w.claudeCode.hookChars.toLocaleString()} / \${w.claudeCode.hookLimit.toLocaleString()} chars):</div>
+				<div class="muted">Imported from CLAUDE.md (\${esc(w.claudeCode.rootFile)}, \${w.claudeCode.importChars.toLocaleString()} chars) \${importState}</div>
+				<pre>\${esc(w.claudeCode.importText)}</pre>
+				<div class="muted" style="margin-top:8px">SessionStart hook context (\${w.claudeCode.hookChars.toLocaleString()} / \${w.claudeCode.hookLimit.toLocaleString()} chars)\${w.claudeCode.catalogue ? ": " + esc(w.claudeCode.catalogue.note) : ""}</div>
 				<pre>\${esc(w.claudeCode.hookText)}</pre>
 			</div>
 			<div class="card">
 				<h3>What Codex gets</h3>
-				<div class="muted">SessionStart hook (root + catalogue, \${w.codex.hookChars.toLocaleString()} / \${w.codex.hookLimit.toLocaleString()} chars):</div>
+				<div class="muted">SessionStart hook (root + catalogue, \${w.codex.hookChars.toLocaleString()} / \${w.codex.hookLimit.toLocaleString()} chars)</div>
 				<pre>\${esc(w.codex.hookText)}</pre>
 			</div>
 		</div>
+
+		\${inUse ? linksCard() : ""}
 
 		<div class="grid-2">
 			<div class="card">
@@ -1240,21 +1641,62 @@ async function createRootFile() {
 	await refresh();
 }
 
-function renderEntriesTab() {
-	const kinds = ["warning", "decision", "lesson", "fact", "setup"];
+function scopeMatches(e) {
+	if (SCOPE_FILTER === "all") return true;
+	if (SCOPE_FILTER === "global") return !e.scope;
+	return (e.scope || []).includes(SCOPE_FILTER);
+}
+
+function filteredEntries() {
 	const q = ENTRY_FILTER.trim().toLowerCase();
-	const filtered = (STATE.entries || []).filter(e => {
+	const scoped = STATE.projects.inUse;
+	return (STATE.entries || []).filter(e => {
+		if (scoped && !scopeMatches(e)) return false;
 		if (!q) return true;
 		const hay = [e.title, e.summary, e.body, ...(e.tags || []), ...(e.when || []), e.file].join(" ").toLowerCase();
 		return hay.includes(q);
 	});
+}
+
+function toggleSelected(file, on) {
+	if (on) SELECTED.add(file);
+	else SELECTED.delete(file);
+	renderEntriesTab();
+}
+
+function selectAllFiltered(on) {
+	for (const e of filteredEntries()) {
+		if (on) SELECTED.add(e.file);
+		else SELECTED.delete(e.file);
+	}
+	renderEntriesTab();
+}
+
+async function bulkScope(global) {
+	const files = [...SELECTED];
+	if (files.length === 0) return toast("Select entries first");
+	const picked = (STATE.projects.list || []).map(p => p.id).filter(id => document.getElementById("bulk-scope-" + id).checked);
+	if (!global && picked.length === 0) return toast("Check at least one project, or use Make global");
+	const { status, data } = await api("/api/scope", "POST", { files, scope: global ? null : picked });
+	if (status !== 200) return toast(data.error || "Failed to set scope");
+	SELECTED.clear();
+	toast((global ? "Made global: " : "Scoped to " + picked.join(", ") + ": ") + data.files.length + " entries");
+	await refresh();
+}
+
+function renderEntriesTab() {
+	const kinds = ["warning", "decision", "lesson", "fact", "setup"];
+	const scoped = STATE.projects.inUse;
+	const filtered = filteredEntries();
 
 	const groups = kinds.map(k => {
 		const list = filtered.filter(e => e.kind === k);
 		if (list.length === 0) return "";
 		const rows = list.map(e => \`
 			<tr class="clickable" onclick="openEditModal(\${ esc(JSON.stringify(e.file)) })">
+				\${scoped ? '<td onclick="event.stopPropagation()"><input type="checkbox"' + (SELECTED.has(e.file) ? ' checked' : '') + ' onchange="toggleSelected(' + esc(JSON.stringify(e.file)) + ', this.checked)"></td>' : ''}
 				<td><strong>\${esc(e.title)}</strong><div class="muted">\${esc(e.file)}</div></td>
+				\${scoped ? '<td>' + esc(scopeText(e)) + '</td>' : ''}
 				<td>\${esc(e.summary || "")}</td>
 				<td>\${(e.tags || []).map(t => '<span class="badge">' + esc(t) + '</span>').join(" ")}</td>
 				<td>\${(e.when || []).map(w => '<span class="badge trigger">' + esc(w) + '</span>').join(" ")}</td>
@@ -1271,18 +1713,46 @@ function renderEntriesTab() {
 			<div class="card">
 				<h3>\${esc(k)}s (\${list.length})</h3>
 				<table>
-					<thead><tr><th>Title</th><th>Summary</th><th>Tags</th><th>When triggers</th><th>Actions</th></tr></thead>
+					<thead><tr>\${scoped ? '<th></th>' : ''}<th>Title</th>\${scoped ? '<th>Scope</th>' : ''}<th>Summary</th><th>Tags</th><th>When triggers</th><th>Actions</th></tr></thead>
 					<tbody>\${rows}</tbody>
 				</table>
 			</div>
 		\`;
 	}).join("");
 
+	const ids = scopeChoices((STATE.entries || []).flatMap(e => e.scope || []));
+	const filter = scoped
+		? '<select id="scope-filter" onchange="SCOPE_FILTER = this.value; renderEntriesTab();">'
+			+ [["all", "All scopes"], ["global", "Global"]].concat(ids.map(id => [id, projectLabel(id)]))
+				.map(([v, l]) => '<option value="' + esc(v) + '"' + (SCOPE_FILTER === v ? ' selected' : '') + '>' + esc(l) + '</option>').join("")
+			+ '</select>'
+		: '';
+	const allSelected = filtered.length > 0 && filtered.every(e => SELECTED.has(e.file));
+	const bulk = scoped
+		? '<div class="card row">'
+			+ '<label><input type="checkbox" id="select-all"' + (allSelected ? ' checked' : '') + ' onchange="selectAllFiltered(this.checked)"> Select all filtered (' + filtered.length + ')</label>'
+			+ '<span class="muted">' + SELECTED.size + ' selected</span>'
+			+ '<span>Set scope to:</span>'
+			+ (STATE.projects.list || []).map(p => '<label><input type="checkbox" id="bulk-scope-' + esc(p.id) + '"> ' + esc(p.label) + '</label>').join(" ")
+			+ '<button class="btn primary" onclick="bulkScope(false)">Set scope</button>'
+			+ '<button class="btn" onclick="bulkScope(true)">Make global</button>'
+			+ '</div>'
+		: '';
+	const hiddenScoped = scoped ? 0 : (STATE.entries || []).filter(e => e.scope).length;
+	const hiddenNote = hiddenScoped
+		? '<div class="card"><span class="badge warning">' + hiddenScoped + ' scoped entries</span> name projects, but projects.json has none, so no session sees them. Create projects in the Projects tab.</div>'
+		: '';
+
 	document.getElementById("tab-entries").innerHTML = \`
 		<div class="card row" style="justify-content:space-between">
-			<input type="search" id="entry-search" placeholder="Filter entries by title, summary, tag or trigger…" value="\${esc(ENTRY_FILTER)}" oninput="ENTRY_FILTER=this.value; renderEntriesTab();" style="width:380px">
+			<div class="row" style="margin:0">
+				<input type="search" id="entry-search" placeholder="Filter entries by title, summary, tag or trigger…" value="\${esc(ENTRY_FILTER)}" oninput="ENTRY_FILTER=this.value; renderEntriesTab();" style="width:380px">
+				\${filter}
+			</div>
 			<button class="btn primary" onclick="openAddModal()">+ Add approved entry</button>
 		</div>
+		\${hiddenNote}
+		\${bulk}
 		\${groups || '<div class="card muted">No matching approved entries.</div>'}
 	\`;
 	const searchInput = document.getElementById("entry-search");
@@ -1311,6 +1781,7 @@ function openEntryForm(title, entry, onSave) {
 			<textarea id="f-when" style="min-height:70px">\${esc((entry.when || []).join("\\n"))}</textarea>
 		</div>
 		<div class="field"><label>Links (comma-separated relative paths)</label><input type="text" id="f-links" value="\${esc((entry.links || []).join(", "))}"></div>
+		\${STATE.projects.inUse ? '<div class="field"><label>Scope (check none for global)</label><div class="row">' + scopeChoices(entry.scope).map(id => '<label><input type="checkbox" id="f-scope-' + esc(id) + '"' + ((entry.scope || []).includes(id) ? ' checked' : '') + '> ' + esc(projectLabel(id)) + '</label>').join(" ") + '</div>' + (!entry.scope && entry.scopeNote ? '<div class="muted">' + esc(entry.scopeNote) + '</div>' : '') + '</div>' : ''}
 		<div class="field"><label>Evidence</label><input type="text" id="f-evidence" value="\${esc(entry.evidence || "")}"></div>
 		<div class="field"><label>Body</label><textarea id="f-body">\${esc(entry.body || "")}</textarea></div>
 		<div class="row" style="justify-content:flex-end">
@@ -1329,6 +1800,10 @@ function openEntryForm(title, entry, onSave) {
 			evidence: document.getElementById("f-evidence").value,
 			body: document.getElementById("f-body").value,
 		};
+		if (STATE.projects.inUse) {
+			const picked = scopeChoices(entry.scope).filter(id => document.getElementById("f-scope-" + id).checked);
+			if (!sameSet(picked, entry.scope || [])) payload.scope = picked.length ? picked : null;
+		}
 		onSave(payload);
 	};
 	document.getElementById("modal-backdrop").classList.add("open");
@@ -1428,11 +1903,12 @@ function renderProposalsTab() {
 					<select id="prop-kind-\${i}">
 						\${kinds.map(k => '<option value="' + k + '"' + (k === p.kind ? ' selected' : '') + '>Accept as ' + k + '</option>').join("")}
 					</select>
-					<button class="btn ok" onclick="acceptProp(\${esc(JSON.stringify(p.file))}, document.getElementById('prop-kind-\${i}').value)">Accept</button>
+					<button class="btn ok" onclick="acceptProp(\${i}, document.getElementById('prop-kind-\${i}').value)">Accept</button>
 					<button class="btn" onclick="openEditModal(\${esc(JSON.stringify(p.file))})">Edit</button>
 					<button class="btn danger" onclick="rejectProp(\${esc(JSON.stringify(p.file))})">Reject</button>
 				</div>
 			</div>
+			\${STATE.projects.inUse ? proposalScope(p, i) : ''}
 			\${p.summary ? '<div>' + esc(p.summary) + '</div>' : ''}
 			<div>\${(p.when || []).map(w => '<span class="badge trigger">' + esc(w) + '</span>').join(" ")}</div>
 			<pre>\${esc(p.body)}</pre>
@@ -1443,8 +1919,21 @@ function renderProposalsTab() {
 	document.getElementById("tab-proposals").innerHTML = cards || '<div class="card muted">No proposals waiting for review.</div>';
 }
 
-async function acceptProp(file, kind) {
-	const { status, data } = await api("/api/accept", "POST", { file, kind });
+function proposalScope(p, i) {
+	const note = !p.scope && p.scopeNote ? ' <span class="muted">(' + esc(p.scopeNote) + ')</span>' : '';
+	const boxes = scopeChoices(p.scope).map(id => '<label><input type="checkbox" id="prop-scope-' + i + '-' + esc(id) + '"' + ((p.scope || []).includes(id) ? ' checked' : '') + '> ' + esc(projectLabel(id)) + '</label>').join(" ");
+	return '<div class="row" style="margin:6px 0"><span><strong>Scope: ' + esc(scopeText(p)) + '</strong>' + note + '</span><span class="muted">Accept with scope (none checked = global):</span>' + boxes + '</div>';
+}
+
+async function acceptProp(i, kind) {
+	const p = STATE.proposals[i];
+	const file = p.file;
+	const body = { file, kind };
+	if (STATE.projects.inUse) {
+		const picked = scopeChoices(p.scope).filter(id => document.getElementById("prop-scope-" + i + "-" + id).checked);
+		if (!sameSet(picked, p.scope || [])) body.scope = picked.length ? picked : null;
+	}
+	const { status, data } = await api("/api/accept", "POST", body);
 	if (status !== 200) return toast(data.error || "Accept failed");
 	toast("Accepted → " + data.entry.file);
 	await refresh();
@@ -1476,6 +1965,125 @@ async function restoreEntry(file) {
 	if (status !== 200) return toast(data.error || "Restore failed");
 	toast("Restored → " + data.entry.file);
 	await refresh();
+}
+
+function projectDraft() {
+	if (!PROJECT_DRAFT) PROJECT_DRAFT = JSON.parse(JSON.stringify(STATE.projects.list || []));
+	return PROJECT_DRAFT;
+}
+
+function removeRemote(i, j) {
+	projectDraft()[i].remotes.splice(j, 1);
+	renderProjectsTab();
+}
+
+function removePath(i, j) {
+	projectDraft()[i].paths.splice(j, 1);
+	renderProjectsTab();
+}
+
+function removeProject(i) {
+	projectDraft().splice(i, 1);
+	renderProjectsTab();
+}
+
+function attachRemotes(i) {
+	const p = projectDraft()[i];
+	for (const r of STATE.session.remotes || []) if (!p.remotes.includes(r.key)) p.remotes.push(r.key);
+	renderProjectsTab();
+}
+
+async function addRemote(i) {
+	const url = document.getElementById("pj-remote-" + i).value.trim();
+	if (!url) return;
+	const { status, data } = await api("/api/projects/remote-key", "POST", { url });
+	if (status !== 200) return toast(data.error || "Not a remote URL");
+	const p = projectDraft()[i];
+	if (!p.remotes.includes(data.key)) p.remotes.push(data.key);
+	renderProjectsTab();
+}
+
+function addPath(i) {
+	const path = document.getElementById("pj-path-" + i).value.trim();
+	if (!path) return;
+	const p = projectDraft()[i];
+	if (!p.paths.includes(path)) p.paths.push(path);
+	renderProjectsTab();
+}
+
+function addProject() {
+	const id = document.getElementById("new-project-id").value.trim();
+	const label = document.getElementById("new-project-label").value.trim();
+	if (!id) return toast("Give the project an id, like demo-app");
+	projectDraft().push({ id, label: label || id, remotes: [], paths: [] });
+	renderProjectsTab();
+}
+
+async function saveProjects(list) {
+	const { status, data } = await api("/api/projects", "PUT", { projects: list || projectDraft() });
+	if (status !== 200) return toast(data.error || "Failed to save projects.json");
+	PROJECT_DRAFT = null;
+	PROJECT_NOTES = data.warnings || [];
+	toast("Saved " + data.file + ". Sessions started from now on use it.");
+	await refresh();
+}
+
+async function createRegistry() {
+	const id = document.getElementById("new-project-id").value.trim();
+	const label = document.getElementById("new-project-label").value.trim();
+	if (!id) return toast("Give the project an id, like demo-app");
+	const attach = document.getElementById("new-project-attach");
+	const remotes = attach && attach.checked ? (STATE.session.remotes || []).map(r => r.key) : [];
+	await saveProjects([{ id, label: label || id, remotes, paths: [] }]);
+}
+
+function renderProjectsTab() {
+	const el = document.getElementById("tab-projects");
+	const reg = STATE.projects;
+	const s = STATE.session || {};
+	if (reg.error) {
+		el.innerHTML = '<div class="card"><h3>projects.json can&#39;t be read</h3><div>' + esc(reg.error) + '</div><div class="muted">Fix or remove ' + esc(reg.file) + '; this page won&#39;t overwrite it. Until then every session loads global entries only.</div></div>';
+		return;
+	}
+	const list = PROJECT_DRAFT || reg.list || [];
+	const remotes = s.remotes || [];
+	const here = remotes.length
+		? remotes.map(r => '<code>' + esc(r.name) + '</code> ' + esc(r.key)).join(", ")
+		: esc(s.remotesWhy || "no remotes");
+	const notes = PROJECT_NOTES.map(n => '<div><span class="badge warning">warning</span> ' + esc(n) + '</div>').join("");
+	const checkout = '<div class="card"><h3>Attach this checkout&#39;s remotes</h3>'
+		+ '<div class="muted">' + esc(s.checkout || s.cwd || "(no folder)") + ': ' + here + '</div>'
+		+ (remotes.length && list.length ? '<div class="row" style="margin-top:8px">' + list.map((p, i) => '<button class="btn" onclick="attachRemotes(' + i + ')">Attach to ' + esc(p.label) + '</button>').join(" ") + '</div>' : '')
+		+ '</div>';
+	const newFields = '<input type="text" id="new-project-id" placeholder="id, like demo-app" style="width:180px">'
+		+ '<input type="text" id="new-project-label" placeholder="Label, like Demo app" style="width:220px">';
+
+	if (list.length === 0 && !PROJECT_DRAFT) {
+		el.innerHTML = '<div class="card"><h3>No projects yet</h3>'
+			+ '<p class="muted">Every entry and root file is global, as before projects. A project holds entries and root files that apply only in some repositories; a session finds its project from its checkout&#39;s git remotes, once, when it starts.</p>'
+			+ '<div class="row">' + newFields
+			+ (remotes.length ? '<label><input type="checkbox" id="new-project-attach" checked> attach this checkout&#39;s remotes (' + esc(remotes.map(r => r.key).join(", ")) + ')</label>' : '<span class="muted">This folder has no remotes to attach: ' + esc(s.remotesWhy || "") + '</span>')
+			+ '<button class="btn primary" onclick="createRegistry()">Create projects.json</button></div>'
+			+ '<div class="muted">Saved to ' + esc(reg.file) + '.</div></div>';
+		return;
+	}
+
+	const cards = list.map((p, i) => '<div class="card">'
+		+ '<div class="row" style="justify-content:space-between"><h3>' + esc(p.id) + '</h3><button class="btn danger" onclick="removeProject(' + i + ')">Remove project</button></div>'
+		+ '<div class="field"><label>Label</label><input type="text" id="pj-label-' + i + '" value="' + esc(p.label) + '" oninput="projectDraft()[' + i + '].label = this.value"></div>'
+		+ '<div class="field"><label>Remotes (a session is in this project when one of its checkout&#39;s remotes is listed)</label>'
+		+ (p.remotes.map((r, j) => '<div class="row" style="margin:0 0 4px"><code>' + esc(r) + '</code><button class="btn" onclick="removeRemote(' + i + ', ' + j + ')">Remove</button></div>').join("") || '<div class="muted">none</div>')
+		+ '<div class="row"><input type="text" id="pj-remote-' + i + '" placeholder="Remote URL, like git@github.com:example/app.git" style="width:380px"><button class="btn" onclick="addRemote(' + i + ')">Add remote</button></div></div>'
+		+ '<div class="field"><label>Paths (only for folders without a git remote; stored as the real path)</label>'
+		+ (p.paths.map((f, j) => '<div class="row" style="margin:0 0 4px"><code>' + esc(f) + '</code><button class="btn" onclick="removePath(' + i + ', ' + j + ')">Remove</button></div>').join("") || '<div class="muted">none</div>')
+		+ '<div class="row"><input type="text" id="pj-path-' + i + '" placeholder="Absolute folder path" style="width:380px"><button class="btn" onclick="addPath(' + i + ')">Add path</button></div></div>'
+		+ '</div>').join("");
+
+	el.innerHTML = notes + checkout + cards
+		+ '<div class="card row">' + newFields + '<button class="btn" onclick="addProject()">Add project</button></div>'
+		+ '<div class="card row"><button class="btn primary" onclick="saveProjects()">Save projects.json</button>'
+		+ (PROJECT_DRAFT ? '<span class="badge warning">unsaved changes</span>' : '')
+		+ '<span class="muted">' + esc(reg.file) + ' · sessions already running keep the project they started with</span></div>';
 }
 
 async function loadAndRenderLog(date) {
@@ -1608,9 +2216,37 @@ export async function startGrimoireServer(options: {
 	env?: Record<string, string | undefined>;
 	token?: string;
 	idleMs?: number;
+	/** The folder of the session that opened the page, for its remotes and the default preview. */
+	cwd?: string;
+	/** That session's project, found when it started. */
+	project?: SessionProject;
 }): Promise<GrimoireServer> {
 	const dir = options.dir;
 	const env = options.env ?? process.env;
+	const session: SnapshotSession = {
+		...(options.cwd ? { cwd: options.cwd } : {}),
+		...(options.project ? { project: options.project } : {}),
+	};
+
+	/**
+	 * The preview the page asks for: `?project=<id>`, `?project=global` (no project; `global` is never a project id),
+	 * or, with neither, the session's project. A session that started before any project existed previews what a
+	 * session started in its folder gets now; the page says so.
+	 */
+	const previewFor = (asked: string | null): SessionProject => {
+		if (asked === "global") return { state: "global", why: "chosen on this page: no project, global only" };
+		if (asked !== null) {
+			const found = readProjects(dir).projects.find((p) => p.id === asked);
+			if (!found) throw new Error(`No project ${JSON.stringify(asked)} in ${join(dir, PROJECTS_FILE)}.`);
+			return { state: "matched", project: found, via: "picker", warnings: [] };
+		}
+		const own = options.project;
+		if (own && !(own.state === "off" && projectsOn(dir))) return own;
+		if (options.cwd) return sessionProject(options.cwd, dir).project;
+		return projectsOn(dir)
+			? { state: "global", why: "/grimoire-ui wasn't given a folder, so no project is chosen" }
+			: { state: "off" };
+	};
 	const token = options.token ?? randomBytes(24).toString("hex");
 	const idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
 
@@ -1655,7 +2291,36 @@ export async function startGrimoireServer(options: {
 			}
 
 			if (method === "GET" && path === "/api/snapshot") {
-				sendJson(res, 200, snapshot(dir, env));
+				sendJson(res, 200, snapshot(dir, env, previewFor(url.searchParams.get("project")), session));
+				return;
+			}
+
+			if (method === "POST" && path === "/api/scope") {
+				const body = await readBody(req);
+				sendJson(res, 200, { files: scopeEntries(dir, body.files, body.scope) });
+				return;
+			}
+
+			if (method === "GET" && path === "/api/projects") {
+				const registry = registryView(dir);
+				sendJson(res, 200, {
+					file: registry.file,
+					projects: registry.list,
+					...(registry.error ? { error: registry.error } : {}),
+					session: sessionView(dir, session),
+				});
+				return;
+			}
+
+			if (method === "PUT" && path === "/api/projects") {
+				const body = await readBody(req);
+				sendJson(res, 200, { file: join(dir, PROJECTS_FILE), ...saveProjects(dir, body) });
+				return;
+			}
+
+			if (method === "POST" && path === "/api/projects/remote-key") {
+				const body = await readBody(req);
+				sendJson(res, 200, { key: normalizeRemote(String(body.url ?? ""), options.cwd) });
 				return;
 			}
 
@@ -1685,6 +2350,7 @@ export async function startGrimoireServer(options: {
 					tags: Array.isArray(body.tags) ? (body.tags as string[]) : undefined,
 					links: Array.isArray(body.links) ? (body.links as string[]) : undefined,
 					when: Array.isArray(body.when) ? (body.when as string[]) : undefined,
+					scope: body.scope as EntryInput["scope"],
 				});
 				sendJson(res, 200, { file: entry.file, entry });
 				return;
@@ -1703,6 +2369,7 @@ export async function startGrimoireServer(options: {
 					tags: Array.isArray(body.tags) ? (body.tags as string[]) : undefined,
 					links: Array.isArray(body.links) ? (body.links as string[]) : undefined,
 					when: Array.isArray(body.when) ? (body.when as string[]) : undefined,
+					scope: body.scope as EntryInput["scope"],
 				});
 				sendJson(res, 200, { file: entry.file, entry });
 				return;
@@ -1742,6 +2409,7 @@ export async function startGrimoireServer(options: {
 					dir,
 					String(body.file ?? ""),
 					typeof body.kind === "string" ? (body.kind as Kind) : undefined,
+					body.scope as EntryInput["scope"],
 				);
 				sendJson(res, 200, { file: entry.file, entry });
 				return;
