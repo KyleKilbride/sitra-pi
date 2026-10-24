@@ -28,6 +28,8 @@ export interface Entry {
 	when?: string[];
 	/** Path from the Grimoire folder, e.g. `kinds/lessons/2026-10-08-read-evals.md`. */
 	file: string;
+	/** Frontmatter lines whose key sitra doesn't know, verbatim and in order, so a rewrite never drops them. */
+	extra?: { key: string; raw: string }[];
 }
 
 export interface RootText {
@@ -101,6 +103,7 @@ export function renderEntry(entry: Omit<Entry, "file">): string {
 		if (value === undefined || (Array.isArray(value) && value.length === 0)) continue;
 		lines.push(`${key}: ${JSON.stringify(value)}`);
 	}
+	for (const { raw } of entry.extra ?? []) lines.push(raw);
 	lines.push("---", "", entry.body.trim(), "");
 	return lines.join("\n");
 }
@@ -124,9 +127,11 @@ export function parseEntry(raw: string, file: string): Entry | undefined {
 	const parts = splitFrontmatter(raw);
 	if (!parts) return undefined;
 	const meta: Record<string, unknown> = {};
+	const extra: { key: string; raw: string }[] = [];
 	for (const line of parts.meta.split("\n")) {
 		const kv = /^(\w+):\s*(.*)$/.exec(line);
 		if (!kv?.[1]) continue;
+		if (!(FIELDS as readonly string[]).includes(kv[1])) extra.push({ key: kv[1], raw: line });
 		const value = (kv[2] ?? "").trim();
 		try {
 			meta[kv[1]] = value.startsWith('"') || value.startsWith("[") ? JSON.parse(value) : value;
@@ -156,6 +161,7 @@ export function parseEntry(raw: string, file: string): Entry | undefined {
 		...(tags ? { tags } : {}),
 		...(links ? { links } : {}),
 		...(when ? { when } : {}),
+		...(extra.length > 0 ? { extra } : {}),
 		file,
 	};
 }

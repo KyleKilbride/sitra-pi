@@ -95,6 +95,29 @@ describe("Grimoire entries", () => {
 		expect(parseEntry(text, "kinds/lessons/x.md")).toEqual({ ...lesson, file: "kinds/lessons/x.md" });
 	});
 
+	test("keys it doesn't know survive parse and render, in order, even when the value isn't valid JSON", () => {
+		const raw = [
+			"---",
+			'kind: "fact"',
+			'title: "Keeps extras"',
+			'date: "2026-10-01"',
+			'rejectedReason: "dup"',
+			"rejectedBy: demo-reviewer",
+			"status: [not json",
+			'rejectedOn: "2026-10-02"',
+			"---",
+			"",
+			"Body.",
+			"",
+		].join("\n");
+		const entry = parseEntry(raw, "x.md");
+		expect(entry?.extra?.map((e) => e.key)).toEqual(["rejectedReason", "rejectedBy", "status", "rejectedOn"]);
+		expect(entry?.extra?.[2]?.raw).toBe("status: [not json");
+		const { file: _file, ...rest } = entry as Entry;
+		expect(renderEntry(rest)).toBe(raw);
+		expect(parseEntry(renderEntry(rest), "x.md")).toEqual(entry);
+	});
+
 	test("old /kb entries still parse, and plain comma lists are read as tags", () => {
 		const old = "---\nkind: warning\ntitle: Don't force push\ndate: 2026-10-01\n---\nBody.";
 		expect(parseEntry(old, "x.md")).toEqual({

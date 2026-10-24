@@ -344,6 +344,7 @@ export function updateEntry(dir: string, file: string, input: Partial<EntryInput
 		...(tags ? { tags } : {}),
 		...(links ? { links } : {}),
 		...(when ? { when } : {}),
+		...(current.extra ? { extra: current.extra } : {}),
 	};
 	writeFileSync(full, renderEntry(updated));
 	return { ...updated, file: clean };
