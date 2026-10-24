@@ -54,8 +54,8 @@ describe("radar snapshot and frame", () => {
 			id: "lead-1",
 			role: "lead",
 			pid: process.pid,
-			cwd: "/work/travelagent-ai/.worktrees/flights",
-			repo: "/work/travelagent-ai",
+			cwd: "/work/demo-app/.worktrees/search",
+			repo: "/work/demo-app",
 			branch: "sre",
 			sessionFile: "/tmp/lead-1.jsonl",
 			paneId: "wF:p1",
@@ -142,7 +142,7 @@ describe("radar snapshot and frame", () => {
 		}
 		expect(frame0).not.toContain("⚡");
 		expect(frame0).toContain("Ron");
-		expect(frame0).toContain("travelagent-ai");
+		expect(frame0).toContain("demo-app");
 		expect(frame1).toBe(frame0);
 		expect(frame0).not.toMatch(/[▀▄]/u);
 		expect(renderRadarFrame(snap, { cols: 88, rows: 34, state: { view: "runs", selected: 0, scroll: 0 } })).toContain(
@@ -340,7 +340,7 @@ fi
 if [ "$1" = "workspace" ] && [ "$2" = "list" ]; then
   echo '{"result":{"workspaces":[{"workspace_id":"wH","number":3,"label":"[3] Flight-tips review","active_tab_id":"wH:t2","agent_status":"idle"}]}}'
 elif [ "$1" = "tab" ] && [ "$2" = "list" ]; then
-  echo '{"result":{"tabs":[{"tab_id":"wH:t1","label":"[1] travelagent › pi"},{"tab_id":"wH:t2","label":"[2] [app-tester] Test travel tips"}]}}'
+  echo '{"result":{"tabs":[{"tab_id":"wH:t1","label":"[1] demo-app › pi"},{"tab_id":"wH:t2","label":"[2] [app-tester] Test travel tips"}]}}'
 elif [ "$1" = "agent" ] && [ "$2" = "list" ]; then
   echo '{"result":{"agents":[{"workspace_id":"wH","tab_id":"wH:t1","pane_id":"wH:p1","agent":"pi","agent_status":"idle","cwd":"/work/app","agent_session":{"value":"${leadTranscript}"}},{"workspace_id":"wH","tab_id":"wH:t2","pane_id":"wH:p4","agent":"pi","agent_status":"idle","cwd":"/work/app","agent_session":{"value":"${teammate.sessionFile}"}}]}}'
 fi
