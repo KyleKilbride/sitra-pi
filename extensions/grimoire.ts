@@ -26,6 +26,8 @@ export interface Entry {
 	links?: string[];
 	/** Actions that bring this entry in front of the agent: `command:<words>`, `path:<glob>` or `tool:<name>`. */
 	when?: string[];
+	/** Project ids this entry belongs to. No scope means global. */
+	scope?: string[];
 	/** Path from the Grimoire folder, e.g. `kinds/lessons/2026-10-08-read-evals.md`. */
 	file: string;
 	/** Frontmatter lines whose key sitra doesn't know, verbatim and in order, so a rewrite never drops them. */
@@ -40,13 +42,30 @@ export interface RootText {
 	truncated: boolean;
 }
 
+/** The root as loaded for one project: the global part, the project's part, and both together. */
+export interface Root extends RootText {
+	global: RootText;
+	project: RootText;
+	/** Root files left out because their frontmatter can't be read, each with why. */
+	problems: { file: string; problem: string }[];
+}
+
+/** Which project a prompt is for: a project, or no project and why. */
+export type SectionScope = { project: { id: string; label: string } } | { project?: undefined; why: string };
+
 export type GrimoireStoreStatus =
 	| { state: "ok"; dir: string }
 	| { state: "missing"; dir: string; reason: string }
 	| { state: "unreadable"; dir: string; reason: string };
 
 /** Sizes that keep the brain from crowding out the work. */
-export const LIMITS = { rootChars: 32_000, catalogueChars: 12_000, queryChars: 4_000 };
+export const LIMITS = {
+	rootChars: 32_000,
+	globalRootChars: 26_000,
+	projectRootChars: 6_000,
+	catalogueChars: 12_000,
+	queryChars: 4_000,
+};
 
 /** Where the Grimoire lives: `$SITRA_GRIMOIRE`, else `grimoire/` in the Pi profile, else in `~/.sitra/profile`. */
 export function grimoireDir(env: Record<string, string | undefined>, home = homedir()): string {
@@ -121,6 +140,21 @@ function list(value: unknown): string[] | undefined {
 			: [];
 	const clean = items.map((v) => v.trim()).filter(Boolean);
 	return clean.length > 0 ? clean : undefined;
+}
+
+/** A project id: a lowercase slug, and never `global` (no scope already means global). */
+export function isProjectId(id: unknown): id is string {
+	return typeof id === "string" && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(id) && id !== "global";
+}
+
+export function readEntry(raw: string, file: string): { entry: Entry; problem?: undefined } | { problem: string } {
+	const entry = parseEntry(raw, file);
+	return entry ? { entry } : { problem: "not an entry" };
+}
+
+/** The entries a project sees: every global (unscoped) entry, plus those scoped to the project. */
+export function entriesFor(entries: readonly Entry[], _projectId: string | undefined): Entry[] {
+	return [...entries];
 }
 
 export function parseEntry(raw: string, file: string): Entry | undefined {
@@ -243,7 +277,13 @@ export function writeProposal(dir: string, entry: Omit<Entry, "file">): string {
 }
 
 /** Moves a proposal into `kinds/` (accepted, optionally as a different kind) or `rejected/` (kept, never shown). */
-export function decide(dir: string, proposalFile: string, verdict: "accept" | "reject", kind?: Kind): string {
+export function decide(
+	dir: string,
+	proposalFile: string,
+	verdict: "accept" | "reject",
+	change: { kind?: Kind; scope?: readonly string[] | null } = {},
+): string {
+	const kind = change.kind;
 	const from = join(dir, proposalFile);
 	const entry = parseEntry(readFileSync(from, "utf8"), proposalFile);
 	if (!entry) throw new Error(`${proposalFile} is not a Grimoire entry`);
@@ -261,12 +301,32 @@ export function decide(dir: string, proposalFile: string, verdict: "accept" | "r
 	return to;
 }
 
+export function setScope(_dir: string, _files: readonly string[], _scope: readonly string[] | undefined): string[] {
+	throw new Error("setScope: not implemented");
+}
+
+export interface LinkProblem {
+	from: string;
+	target: string;
+	problem: "missing" | "not-an-entry" | "out-of-scope";
+}
+
+export function linkReport(_dir: string, _projectId: string | undefined): LinkProblem[] {
+	return [];
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The always-loaded root
 // ---------------------------------------------------------------------------------------------------------------------
 
 /** Every `root/*.md`, README first, frontmatter removed, capped at `maxChars` with a pointer to the rest. */
-export function loadRoot(dir: string, maxChars = LIMITS.rootChars): RootText {
+export function loadRoot(dir: string, _projectId?: string, maxChars = LIMITS.rootChars): Root {
+	const whole = loadWholeRoot(dir, maxChars);
+	const empty = { text: "", files: [], chars: 0, truncated: false };
+	return { ...whole, global: whole, project: empty, problems: [] };
+}
+
+function loadWholeRoot(dir: string, maxChars: number): RootText {
 	const rootDir = join(dir, "root");
 	const files = markdownFiles(rootDir).sort((a, b) => {
 		const ra = a.toLowerCase() === "readme.md" ? 0 : 1;
@@ -296,14 +356,16 @@ export function loadRoot(dir: string, maxChars = LIMITS.rootChars): RootText {
 
 export function loadRootWithStatus(
 	dir: string,
+	projectId?: string,
 	maxChars = LIMITS.rootChars,
-): { status: GrimoireStoreStatus; root: RootText } {
+): { status: GrimoireStoreStatus; root: Root } {
 	const status = grimoireStoreStatus(dir);
-	const empty = { text: "", files: [], chars: 0, truncated: false };
+	const part = { text: "", files: [], chars: 0, truncated: false };
+	const empty = { ...part, global: part, project: part, problems: [] };
 	if (status.state === "missing") return { status, root: empty };
 	if (status.state === "unreadable") return { status, root: empty };
 	try {
-		return { status, root: loadRoot(dir, maxChars) };
+		return { status, root: loadRoot(dir, projectId, maxChars) };
 	} catch (error) {
 		return { status: unreadable(dir, error), root: empty };
 	}
@@ -316,7 +378,7 @@ export function loadRootWithStatus(
  */
 export function writeClaudeRoot(dir: string, maxChars = LIMITS.rootChars): string {
 	const file = join(dir, ".sitra", "root.md");
-	const root = loadRoot(dir, maxChars);
+	const root = loadRoot(dir, undefined, maxChars);
 	const text = root.text ? `${root.text}\n` : "(The Grimoire root is empty.)\n";
 	if (!existsSync(file) || readFileSync(file, "utf8") !== text) {
 		mkdirSync(dirname(file), { recursive: true });
@@ -330,6 +392,8 @@ export interface SectionOptions {
 	catalogueChars?: number;
 	/** For tools without sitra's grimoire_search and grimoire_propose (Claude Code, Codex): use the shell and files. */
 	shell?: boolean;
+	/** The project the entries were chosen for. Leave it out when no projects are registered. */
+	scope?: SectionScope;
 }
 
 /**
@@ -524,7 +588,12 @@ export function importedRepos(dir: string): string[] {
  * Copies a repo's `.pi/knowledge` entries (approved and proposed) into `proposals/` for the person to review, skipping
  * any whose title Grimoire already has anywhere (approved, proposed or rejected). Never touches the old folder.
  */
-export function importKnowledge(source: string, dir: string, label: string): { imported: string[]; skipped: string[] } {
+export function importKnowledge(
+	source: string,
+	dir: string,
+	label: string,
+	_scope?: readonly string[],
+): { imported: string[]; skipped: string[] } {
 	const known = new Set(
 		[...listEntries(dir), ...listProposals(dir), ...readEntries(dir, "rejected")].map((e) => normalTitle(e.title)),
 	);

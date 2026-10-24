@@ -37,6 +37,7 @@ import {
 import type { AdvisorRole, LoopState } from "./loop.ts";
 import { advisorTask, roleForAgent } from "./loop.ts";
 import { loopStatePath, readLoopStateFile } from "./loop-state.ts";
+import type { projectFor } from "./project.ts";
 import { mainCheckout, readLastLines } from "./sessions.ts";
 import { childAgent, objectRecord, subagentChildren } from "./subagent-tools.ts";
 import { actionFromPi, entriesForAction, parseTrigger, pauseMessage } from "./triggers.ts";
@@ -177,7 +178,12 @@ function loopPendingSubagentDispatch(
 	return { exempt: true };
 }
 
-export default function sitraKnowledge(pi: Pi): void {
+export interface KnowledgeDeps {
+	/** How a folder's project is found; injectable so tests can count the lookups. */
+	projectFor?: typeof projectFor;
+}
+
+export default function sitraKnowledge(pi: Pi, _deps: KnowledgeDeps = {}): void {
 	const dir = () => grimoireDir(process.env);
 	const who = () => process.env.SITRA_USER_NAME?.trim() || "the person you work with";
 

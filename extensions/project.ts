@@ -205,6 +205,23 @@ export function writeProjects(dir: string, registry: ProjectRegistry): void {
 }
 
 /**
+ * The project a session works in, decided once when it starts. `off`: no projects are registered, so nothing is
+ * scoped. `global`: projects exist but none applies here (or the registry or a remote can't be read), with why.
+ */
+export type SessionProject =
+	| { state: "off" }
+	| { state: "matched"; project: Project; via: string; warnings: string[] }
+	| { state: "global"; why: string; error?: boolean };
+
+export function sessionProject(
+	_cwd: string,
+	_dir: string,
+	_resolve: typeof projectFor = projectFor,
+): { project: SessionProject; registry: ProjectRegistry } {
+	return { project: { state: "off" }, registry: { projects: [] } };
+}
+
+/**
  * The project a folder is in. In order: the project `origin` is attached to (warning about other remotes attached
  * elsewhere); else the one project the other remotes are attached to; else `ambiguous` if they point at several; else
  * a project listing the checkout in `paths`; else none.
