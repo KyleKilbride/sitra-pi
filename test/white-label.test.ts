@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
@@ -12,32 +12,83 @@ type FoundList = { path?: string; text?: string; tried: string[] };
 const SCANNED_DIRS = ["test/", "extensions/", "cli/", "bin/", "docs/", "templates/"];
 const SCANNED_FILES = ["README.md", "AGENTS.md", "package.json"];
 
+const SEPARATOR = "\0";
+
 function tokenize(text: string): string[] {
-	return [];
+	return text
+		.toLowerCase()
+		.split(/[^\p{L}\p{N}]+/u)
+		.filter((t) => t !== "");
 }
 
 function parseList(text: string): ForbiddenList {
-	return { names: [], allow: [] };
+	const list: ForbiddenList = { names: [], allow: [] };
+	text.split(/\r?\n/).forEach((raw, index) => {
+		const allow = /^\s*allow:(.*)$/i.exec(raw);
+		const tokens = tokenize(allow ? (allow[1] ?? "") : raw);
+		if (tokens.length === 0) return;
+		if (allow) list.allow.push(tokens);
+		else list.names.push({ tokens, line: index + 1 });
+	});
+	list.allow.sort((x, y) => y.length - x.length);
+	return list;
 }
 
 function listPaths(env: Record<string, string | undefined>, home = homedir()): string[] {
-	return [];
+	const file = env.SITRA_FORBIDDEN_NAMES_FILE?.trim();
+	if (file) return [file];
+	const profile = env.PI_CODING_AGENT_DIR?.trim() || join(env.SITRA_HOME?.trim() || join(home, ".sitra"), "profile");
+	return [join(profile, "white-label-names.txt")];
 }
 
 function findList(env: Record<string, string | undefined>, home = homedir()): FoundList {
-	return { tried: [] };
+	const tried = listPaths(env, home);
+	for (const path of tried) {
+		if (existsSync(path)) return { path, text: readFileSync(path, "utf8"), tried };
+	}
+	return { tried };
 }
 
 function skipNote(tried: string[]): string {
-	return "";
+	return `no forbidden-names list at ${tried.join(", ")}; set SITRA_FORBIDDEN_NAMES_FILE to run the white-label check`;
+}
+
+function indexOfSequence(tokens: string[], sequence: string[], from = 0): number {
+	for (let i = from; i + sequence.length <= tokens.length; i++) {
+		if (sequence.every((t, j) => tokens[i + j] === t)) return i;
+	}
+	return -1;
+}
+
+function withoutAllowed(tokens: string[], allow: string[][]): string[] {
+	let result = tokens;
+	for (const phrase of allow) {
+		let at = indexOfSequence(result, phrase);
+		while (at !== -1) {
+			result = [...result.slice(0, at), SEPARATOR, ...result.slice(at + phrase.length)];
+			at = indexOfSequence(result, phrase, at + 1);
+		}
+	}
+	return result;
 }
 
 function scanFiles(root: string, files: string[], list: ForbiddenList): Hit[] {
-	return [];
+	const hits: Hit[] = [];
+	for (const file of files) {
+		readFileSync(join(root, file), "utf8")
+			.split(/\r?\n/)
+			.forEach((text, index) => {
+				const tokens = withoutAllowed(tokenize(text), list.allow);
+				for (const name of list.names) {
+					if (indexOfSequence(tokens, name.tokens) !== -1) hits.push({ file, line: index + 1, listLine: name.line });
+				}
+			});
+	}
+	return hits;
 }
 
 function describeHit(hit: Hit): string {
-	return "";
+	return `${hit.file}:${hit.line} matches a forbidden name (list line ${hit.listLine})`;
 }
 
 const trackedFiles = (root: string): string[] =>
