@@ -146,7 +146,8 @@ cached prompt prefix survives from turn to turn.
 
 1. An agent learns something future agents need and calls `grimoire_propose` (kind, title, summary, tags, links, body,
    evidence). It lands in `proposals/`, scoped to the session's project unless the agent passes `scope: "global"`. In a
-   session with no project it is global, and the tool's answer says so.
+   session with no project it is global, and the tool's answer says so. When projects exist but none applies (here, or
+   in a LOOPS worktree), the proposal records why in `scopeNote`, and the review shows it next to `Scope: Global`.
 2. The person reviews with `/grimoire`, which shows each proposal's scope (`Scope: Global` or `Scope: App`): Accept
    (with the scope shown), "Accept as global", "Accept for <current project>", Reject, Skip, "Accept this and all the
    rest" (each keeps its own scope), Stop. Accepted entries move to `kinds/<kind>s/`; rejected ones to `rejected/`.

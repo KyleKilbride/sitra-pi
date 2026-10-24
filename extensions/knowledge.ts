@@ -40,7 +40,7 @@ import {
 import type { AdvisorRole, LoopState } from "./loop.ts";
 import { advisorTask, roleForAgent } from "./loop.ts";
 import { loopStatePath, readLoopStateFile } from "./loop-state.ts";
-import { type ProjectRegistry, projectFor, type SessionProject, sessionProject } from "./project.ts";
+import { type ProjectRegistry, projectFor, proposalScope, type SessionProject, sessionProject } from "./project.ts";
 import { mainCheckout, readLastLines } from "./sessions.ts";
 import { childAgent, objectRecord, subagentChildren } from "./subagent-tools.ts";
 import { actionFromPi, entriesForAction, parseTrigger, pauseMessage } from "./triggers.ts";
@@ -525,11 +525,12 @@ export default function sitraKnowledge(pi: Pi, deps: KnowledgeDeps = {}): void {
 			};
 			const when = p.when?.filter((w) => parseTrigger(w));
 			const here = current(ctx).project;
-			const scope = wanted !== "global" && here.state === "matched" ? [here.project.id] : undefined;
+			const scoped = wanted === "global" ? {} : proposalScope(here);
+			const scope = scoped.scope;
 			const file = writeProposal(dir(), {
 				...p,
 				...(when?.length ? { when } : { when: undefined }),
-				...(scope ? { scope } : {}),
+				...scoped,
 				proposedBy: "agent",
 				date: new Date().toISOString(),
 			});
@@ -605,7 +606,10 @@ export default function sitraKnowledge(pi: Pi, deps: KnowledgeDeps = {}): void {
 			const lines = [
 				`(${i + 1}/${proposals.length}) [${p.kind}] ${p.title}`,
 				...(here.state !== "off" || p.scope
-					? ["", `Scope: ${p.scope ? p.scope.map(labelOf).join(", ") : "Global"}`]
+					? [
+							"",
+							`Scope: ${p.scope ? p.scope.map(labelOf).join(", ") : `Global${p.scopeNote ? ` (${p.scopeNote})` : ""}`}`,
+						]
 					: []),
 				...(p.summary ? ["", p.summary] : []),
 				"",

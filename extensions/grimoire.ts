@@ -127,6 +127,7 @@ const FIELDS = [
 	"links",
 	"when",
 	"scope",
+	"scopeNote",
 ] as const;
 
 export function renderEntry(entry: Omit<Entry, "file">): string {
@@ -213,6 +214,7 @@ export function readEntry(
 	const evidence = str("evidence");
 	const proposedBy = str("proposedBy");
 	const summary = str("summary");
+	const scopeNote = str("scopeNote");
 	const tags = list(meta.tags);
 	const links = list(meta.links);
 	const when = list(meta.when);
@@ -229,6 +231,7 @@ export function readEntry(
 			...(links ? { links } : {}),
 			...(when ? { when } : {}),
 			...(scope ? { scope } : {}),
+			...(scopeNote ? { scopeNote } : {}),
 			...(extra.length > 0 ? { extra } : {}),
 			file,
 		},
@@ -244,9 +247,12 @@ export function entriesFor(entries: readonly Entry[], projectId: string | undefi
 	return entries.filter((e) => !e.scope || (projectId !== undefined && e.scope.includes(projectId)));
 }
 
-/** The entry with a new scope (`undefined`: global). An invalid scope throws, naming the file. */
+/**
+ * The entry with a new scope (`undefined`: global), dropping any note on why it was proposed as global: the person
+ * has now chosen. An invalid scope throws, naming the file.
+ */
 function withScope<T extends Omit<Entry, "file">>(entry: T, scope: readonly string[] | undefined, file: string): T {
-	const { scope: _old, ...rest } = entry;
+	const { scope: _old, scopeNote: _note, ...rest } = entry;
 	if (scope === undefined) return rest as T;
 	const checked = readScope({ scope });
 	if (checked.problem) throw new Error(`${file}: ${checked.problem}`);

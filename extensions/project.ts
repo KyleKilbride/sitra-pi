@@ -254,6 +254,16 @@ export function sessionProject(
 	return { project: { state: "global", why }, registry };
 }
 
+/**
+ * The scope a new proposal gets from the session's project: the project's id, or, when projects exist but none
+ * applies here, no scope and a note saying why, so the review shows it. With no projects registered, neither.
+ */
+export function proposalScope(project: SessionProject): { scope?: string[]; scopeNote?: string } {
+	if (project.state === "matched") return { scope: [project.project.id] };
+	if (project.state === "global") return { scopeNote: `proposed as global: ${project.why}` };
+	return {};
+}
+
 function message(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }

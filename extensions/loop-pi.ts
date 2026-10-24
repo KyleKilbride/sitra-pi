@@ -50,7 +50,7 @@ import {
 	startLoop,
 	tokensFromSubagentResult,
 } from "./loop.ts";
-import { sessionProject } from "./project.ts";
+import { proposalScope, sessionProject } from "./project.ts";
 
 export {
 	abandonLoopStateFile,
@@ -769,10 +769,7 @@ function materializeEffects(state: LoopState, effects: LoopEffect[]): { state: L
 		const proposal = reworkProposal(current, effect.reworkIndex, new Date().toISOString());
 		// The loop's worktree, not the lead's folder, says which project the lesson is about.
 		const { project } = sessionProject(current.worktree, grimoire);
-		const proposalPath = writeProposal(
-			grimoire,
-			project.state === "matched" ? { ...proposal, scope: [project.project.id] } : proposal,
-		);
+		const proposalPath = writeProposal(grimoire, { ...proposal, ...proposalScope(project) });
 		const recorded = recordReworkProposal(current, { reworkIndex: effect.reworkIndex, proposalPath });
 		current = recorded.state;
 		rendered.push(...recorded.effects);
