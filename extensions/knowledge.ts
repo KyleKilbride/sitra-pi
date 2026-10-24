@@ -21,10 +21,9 @@ import {
 	listEntriesWithStatus,
 	listProposals,
 	loadRootWithStatus,
-	type SectionScope,
+	scopeLabel,
 	searchEntries,
 	unreadableEntries,
-	writeClaudeRoot,
 	writeProposal,
 } from "./grimoire.ts";
 import {
@@ -40,7 +39,15 @@ import {
 import type { AdvisorRole, LoopState } from "./loop.ts";
 import { advisorTask, roleForAgent } from "./loop.ts";
 import { loopStatePath, readLoopStateFile } from "./loop-state.ts";
-import { type ProjectRegistry, projectFor, proposalScope, type SessionProject, sessionProject } from "./project.ts";
+import {
+	type ProjectRegistry,
+	projectFor,
+	proposalScope,
+	refreshClaudeRoot,
+	type SessionProject,
+	sectionScopeOf,
+	sessionProject,
+} from "./project.ts";
 import { mainCheckout, readLastLines } from "./sessions.ts";
 import { childAgent, objectRecord, subagentChildren } from "./subagent-tools.ts";
 import { actionFromPi, entriesForAction, parseTrigger, pauseMessage } from "./triggers.ts";
@@ -210,12 +217,6 @@ export default function sitraKnowledge(pi: Pi, deps: KnowledgeDeps = {}): void {
 		const p = current(ctx).project;
 		return p.state === "matched" ? p.project.id : undefined;
 	};
-	const sectionScope = (p: SessionProject): SectionScope | undefined =>
-		p.state === "matched"
-			? { project: { id: p.project.id, label: p.project.label } }
-			: p.state === "global"
-				? { why: p.why }
-				: undefined;
 
 	/** A repo whose old `/kb` folder hasn't been moved into Grimoire yet. */
 	const oldKnowledgeBase = (cwd: string): string | undefined => {
@@ -405,7 +406,7 @@ export default function sitraKnowledge(pi: Pi, deps: KnowledgeDeps = {}): void {
 		const g = dir();
 		if (existsSync(join(g, ".sitra", "root.md"))) {
 			try {
-				writeClaudeRoot(g);
+				refreshClaudeRoot(g);
 			} catch {
 				// Claude Code's copy is a convenience; never block a Pi session on it.
 			}
@@ -422,6 +423,7 @@ export default function sitraKnowledge(pi: Pi, deps: KnowledgeDeps = {}): void {
 				cwd: ctx?.cwd ?? process.cwd(),
 				message: event.text,
 				transcript: file ? readLastLines(file, 400, { maxBytes: 1_000_000 }) : "",
+				placement: proposalScope(current(ctx).project),
 			});
 		} catch {
 			// Learning never gets in the way of the turn.
@@ -468,7 +470,7 @@ export default function sitraKnowledge(pi: Pi, deps: KnowledgeDeps = {}): void {
 			}
 			event.systemPromptOptions.sections.grimoire = grimoireSection(g, root.root, entriesFor(loaded.entries, id), {
 				who: who(),
-				scope: sectionScope(current(ctx).project),
+				scope: sectionScopeOf(current(ctx).project),
 			});
 		} catch (error) {
 			const s = { state: "unreadable" as const, dir: dir(), reason: String(error) };
@@ -573,7 +575,7 @@ export default function sitraKnowledge(pi: Pi, deps: KnowledgeDeps = {}): void {
 			const g = dir();
 			const id = projectId(ctx);
 			const pick = (entries: Entry[]) => (p.allProjects ? entries : entriesFor(entries, id));
-			const label = p.allProjects ? (e: Entry) => (e.scope ? `scope: ${e.scope.join(", ")}` : "global") : undefined;
+			const label = p.allProjects ? scopeLabel : undefined;
 			const approved = searchEntries(pick(listEntries(g)), p.query, 8, label);
 			const text = p.proposals
 				? `${approved}\n\nUnapproved proposals (leads, not rules):\n${searchEntries(pick(listProposals(g)), p.query, 8, label)}`

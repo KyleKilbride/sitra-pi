@@ -537,7 +537,7 @@ describe("project scope", () => {
 		const repoKb = tmp();
 		put(repoKb, "decisions/a.md", { kind: "decision", title: "Ship on Fridays", body: "b", date: "2026-10-07" });
 		put(repoKb, "decisions/b.md", { kind: "decision", title: "Ship on Mondays", body: "b", date: "2026-10-07" });
-		const result = importKnowledge(repoKb, dir, "/work/demo-app", ["app"]);
+		const result = importKnowledge(repoKb, dir, "/work/demo-app", { scope: ["app"] });
 		expect(result.skipped).toEqual(["decisions/a.md"]);
 		expect(result.imported).toHaveLength(1);
 		expect(listProposals(dir)[0]?.scope).toEqual(["app"]);

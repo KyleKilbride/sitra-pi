@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -132,7 +132,9 @@ function pi(grimoire: string, resolve: typeof projectFor = projectFor, choices: 
 	const run = async (name: string, params: Record<string, unknown>, cwd: string) =>
 		(await tools.get(name)?.execute("1", params, undefined, undefined, ctx(cwd)))?.content[0]?.text ?? "";
 	const review = (cwd: string) => commands.get("grimoire")?.handler("", ctx(cwd));
-	return { start, prompt, call, run, review, statuses, notes, asked };
+	const say = (cwd: string, text: string) =>
+		handlers.get("input")?.({ type: "input", source: "interactive", text }, ctx(cwd));
+	return { start, prompt, call, run, review, say, statuses, notes, asked };
 }
 
 afterEach(() => {
@@ -331,5 +333,27 @@ describe("Pi sessions see global entries plus their project's", () => {
 		expect(accepted["a-tools-lesson"]).toBeUndefined();
 		expect("a-tools-lesson" in accepted).toBe(true);
 		expect(accepted["b-global-lesson"]).toEqual(["app"]);
+	});
+
+	test("a moment the person sends in Pi records the session's project, or why it has none", () => {
+		const g = store();
+		const moments = () =>
+			readdirSync(join(g, ".sitra", "moments")).map((f) =>
+				JSON.parse(readFileSync(join(g, ".sitra", "moments", f), "utf8")),
+			);
+		const app = repo(APP_REMOTE);
+		const s = pi(g);
+		vi.stubEnv("SITRA_GRIMOIRE_LEARN", "1");
+		s.start(app);
+		s.say(app, "no, open it as a draft");
+		expect(moments()[0]).toMatchObject({ message: "no, open it as a draft", project: "app" });
+		const other = pi(g);
+		vi.stubEnv("SITRA_GRIMOIRE_LEARN", "1");
+		const outside = repo({ origin: "https://github.com/example/demo-app.git" });
+		other.start(outside);
+		other.say(outside, "stop that");
+		const noted = moments().find((m) => m.message === "stop that");
+		expect(noted?.project).toBeUndefined();
+		expect(noted?.scopeNote).toContain("remote not attached: github.com/example/demo-app");
 	});
 });

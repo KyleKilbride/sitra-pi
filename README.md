@@ -208,7 +208,9 @@ every tool. Entries are global by default; one that only holds in one repo can b
 - **Coming from `/kb`:** `sitra grimoire import` copies a repo's old `.pi/knowledge` into `proposals/`, skipping what
   Grimoire already has. `/kb` still works and opens `/grimoire`.
 - The status line shows `grimoire 18 global + 16 App · 3 to review (/grimoire)`, or `grimoire 18 global · no project
-  (remote not attached: github.com/example/app)`. `sitra grimoire status` shows the sizes.
+  (remote not attached: github.com/example/app)`. `sitra grimoire status` shows the sizes. `sitra grimoire projects`
+  lists and adds projects, `sitra grimoire scope` moves entries between them, and `search`, `eval` and `status` take
+  `--project <id>` or `--all`.
 
 Details, sizes and the reasons behind them: [docs/GRIMOIRE.md](docs/GRIMOIRE.md).
 

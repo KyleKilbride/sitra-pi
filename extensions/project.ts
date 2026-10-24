@@ -6,7 +6,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import { isProjectId } from "./grimoire.ts";
+import { type Entry, entriesFor, isProjectId, LIMITS, type SectionScope, writeClaudeRoot } from "./grimoire.ts";
 import { gitCheckout } from "./sessions.ts";
 
 export interface Project {
@@ -216,18 +216,29 @@ export type SessionProject =
 	| { state: "matched"; project: Project; via: string; warnings: string[] }
 	| { state: "global"; why: string; error?: boolean };
 
+/** The registry, or why it can't be read; never throws. */
+function readRegistry(dir: string): { registry: ProjectRegistry; error?: string } {
+	try {
+		return { registry: readProjects(dir) };
+	} catch (error) {
+		return { registry: { projects: [] }, error: message(error) };
+	}
+}
+
+/** Whether projects are in use: a registry with projects, or one that can't be read (which loads global only). */
+export function projectsOn(dir: string): boolean {
+	const { registry, error } = readRegistry(dir);
+	return error !== undefined || registry.projects.length > 0;
+}
+
 /** Reads the registry and finds the folder's project, turning every failure into a `global` answer that says why. */
 export function sessionProject(
 	cwd: string,
 	dir: string,
 	resolve: typeof projectFor = projectFor,
 ): { project: SessionProject; registry: ProjectRegistry } {
-	let registry: ProjectRegistry;
-	try {
-		registry = readProjects(dir);
-	} catch (error) {
-		return { project: { state: "global", why: message(error), error: true }, registry: { projects: [] } };
-	}
+	const { registry, error } = readRegistry(dir);
+	if (error !== undefined) return { project: { state: "global", why: error, error: true }, registry };
 	if (registry.projects.length === 0) return { project: { state: "off" }, registry };
 	let match: ProjectMatch;
 	try {
@@ -262,6 +273,33 @@ export function proposalScope(project: SessionProject): { scope?: string[]; scop
 	if (project.state === "matched") return { scope: [project.project.id] };
 	if (project.state === "global") return { scopeNote: `proposed as global: ${project.why}` };
 	return {};
+}
+
+/** How a prompt names the session's project (`grimoireSection`): the project, or why there is none; nothing when off. */
+export function sectionScopeOf(project: SessionProject): SectionScope | undefined {
+	if (project.state === "matched") return { project: { id: project.project.id, label: project.project.label } };
+	return project.state === "global" ? { why: project.why } : undefined;
+}
+
+/** The session's project id, if it has one. */
+export function projectIdOf(project: SessionProject): string | undefined {
+	return project.state === "matched" ? project.project.id : undefined;
+}
+
+/**
+ * The entries a session in `projectId` sees. With projects not in use, all of them, exactly as before projects;
+ * otherwise global plus the project's (`entriesFor`).
+ */
+export function visibleEntries(entries: readonly Entry[], projectId: string | undefined, inUse: boolean): Entry[] {
+	return inUse ? entriesFor(entries, projectId) : [...entries];
+}
+
+/**
+ * Rewrites Claude Code's imported root file for the store: with projects in use it holds the global root and the
+ * global catalogue (the session hook adds the project's part); without, the root alone, as before projects.
+ */
+export function refreshClaudeRoot(dir: string): string {
+	return writeClaudeRoot(dir, LIMITS.rootChars, projectsOn(dir));
 }
 
 function message(error: unknown): string {

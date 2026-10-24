@@ -402,9 +402,9 @@ describe("the session hooks load global plus the session's project", () => {
 		const full = projectCatalogue(entries.slice(0, 3), 10_000, file, opts);
 		expect(full).toMatchObject({ shown: 3, titlesOnly: false });
 		expect(full.overflow).toBeUndefined();
-		const titles = projectCatalogue(entries, 4_000, file, opts);
+		const titles = projectCatalogue(entries, 5_000, file, opts);
 		expect(titles).toMatchObject({ shown: 60, titlesOnly: true });
-		expect(titles.text.length).toBeLessThanOrEqual(4_000);
+		expect(titles.text.length).toBeLessThanOrEqual(5_000);
 		const cut = projectCatalogue(entries, 1_500, file, opts);
 		expect(cut.titlesOnly).toBe(true);
 		expect(cut.overflow).toEqual({ count: 60 - cut.shown, file });

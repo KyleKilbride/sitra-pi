@@ -31,6 +31,7 @@ import {
 	loadRoot,
 	writeProposal,
 } from "./grimoire.ts";
+import { projectsOn, visibleEntries } from "./project.ts";
 import { parseTrigger, type TriggerCase } from "./triggers.ts";
 
 export interface Call {
@@ -293,14 +294,17 @@ export async function learnFromMoment(
 			return { verdict: "other" };
 		}
 		const line = (e: Entry) => `- [${e.kind}] ${e.title}${e.summary ? `: ${e.summary}` : ""}`;
-		const root = loadRoot(dir).text;
+		// What the moment's session saw: global plus its project's. Rejections count in every project.
+		const inUse = moment.project !== undefined || projectsOn(dir);
+		const visible = (entries: Entry[]) => visibleEntries(entries, moment.project, inUse);
+		const root = loadRoot(dir, moment.project).text;
 		const catalogue = [
 			...(root ? ["Always-loaded root:", root, ""] : []),
 			"Approved entries:",
-			...listEntries(dir).map(line),
+			...visible(listEntries(dir)).map(line),
 			"",
 			"Already proposed, waiting for review:",
-			...listProposals(dir).map(line),
+			...visible(listProposals(dir)).map(line),
 			"",
 			"Rejected by the person (never propose these again):",
 			...listRejected(dir).map(line),
@@ -314,6 +318,8 @@ export async function learnFromMoment(
 		}
 		const proposal = writeProposal(dir, {
 			...draft,
+			...(moment.project !== undefined ? { scope: [moment.project] } : {}),
+			...(moment.project === undefined && moment.scopeNote ? { scopeNote: moment.scopeNote } : {}),
 			proposedBy: "sitra-learn",
 			date: moment.at,
 			evidence: `The person, correcting an agent (${moment.harness}, ${moment.cwd}): "${clip(moment.message, 400)}" (moment ${moment.id})`,
@@ -339,7 +345,14 @@ export function casesFromMoments(dir: string): TriggerCase[] {
 		}
 		if (m.verdict !== "correction") continue;
 		const approved = m.proposal ? accepted.get(basename(m.proposal)) : undefined;
-		out.push({ id: m.id, harness: m.harness, cwd: m.cwd, calls: m.calls, expect: approved ? [approved] : [] });
+		out.push({
+			id: m.id,
+			harness: m.harness,
+			cwd: m.cwd,
+			calls: m.calls,
+			expect: approved ? [approved] : [],
+			...(m.project !== undefined ? { project: m.project } : {}),
+		});
 	}
 	return out;
 }
@@ -530,15 +543,26 @@ export function startLearner(dir: string, env: Record<string, string | undefined
 export function captureMoment(
 	dir: string,
 	env: Record<string, string | undefined>,
-	parts: { harness: Moment["harness"]; cwd: string; message: string; transcript: string },
+	parts: {
+		harness: Moment["harness"];
+		cwd: string;
+		message: string;
+		transcript: string;
+		/** Where the session's proposals go (`proposalScope`): its project, or why it has none. */
+		placement?: { scope?: string[]; scopeNote?: string };
+	},
 ): string | undefined {
 	try {
 		if (!learningOn(env) || !parts.message.trim() || !existsSync(dir)) return undefined;
 		const at = new Date();
+		const project = parts.placement?.scope?.[0];
+		const scopeNote = parts.placement?.scopeNote;
 		const moment: Moment = {
 			id: newMomentId(at),
 			at: at.toISOString(),
 			...momentFromTranscript(parts.transcript, parts),
+			...(project !== undefined ? { project } : {}),
+			...(scopeNote ? { scopeNote } : {}),
 		};
 		recordMoment(dir, moment);
 		startLearner(dir, env);
