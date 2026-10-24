@@ -297,7 +297,7 @@ describe("Pi sessions see global entries plus their project's", () => {
 	test("review shows each proposal's scope and can accept it as global or for the current project", async () => {
 		const g = store();
 		const app = repo(APP_REMOTE);
-		const s = pi(g, projectFor, ["Accept as global", "Accept for App"]);
+		const s = pi(g, projectFor, ["Accept as global", "Accept for App", "Skip"]);
 		const propose = (title: string, scope?: string[]) =>
 			writeFileSync(
 				join(g, "proposals", `${title}.md`),
@@ -306,6 +306,16 @@ describe("Pi sessions see global entries plus their project's", () => {
 		mkdirSync(join(g, "proposals"), { recursive: true });
 		propose("a-tools-lesson", ["tools"]);
 		propose("b-global-lesson");
+		writeFileSync(
+			join(g, "proposals", "c-noted-lesson.md"),
+			renderEntry({
+				kind: "lesson",
+				title: "c-noted-lesson",
+				body: "b",
+				date: "2026-10-06",
+				scopeNote: "proposed as global: remote not attached: github.com/example/other",
+			}),
+		);
 		s.start(app);
 		await s.review(app);
 		expect(s.asked[0]?.title).toContain("Scope: Tools");
@@ -314,6 +324,9 @@ describe("Pi sessions see global entries plus their project's", () => {
 		);
 		expect(s.asked[1]?.title).toContain("Scope: Global");
 		expect(s.asked[1]?.options).not.toContain("Accept as global");
+		expect(s.asked[2]?.title).toContain(
+			"Scope: Global (proposed as global: remote not attached: github.com/example/other)",
+		);
 		const accepted = Object.fromEntries(listEntries(g).map((e) => [e.title, e.scope]));
 		expect(accepted["a-tools-lesson"]).toBeUndefined();
 		expect("a-tools-lesson" in accepted).toBe(true);

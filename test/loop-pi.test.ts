@@ -2968,11 +2968,13 @@ describe("Pi wiring", () => {
 			proposedBy: "sitra-loops",
 			tags: ["loops", "rework", "context-missed"],
 		});
+		expect(readFileSync(join(profile, "grimoire", proposals[0]?.file ?? ""), "utf8")).not.toMatch(/scope/);
 		expect(existsSync(join(profile, "grimoire", "kinds"))).toBe(false);
 		expect(userMessages.join("\n")).toContain("LOOPS needs one answer before continuing");
 	});
 
-	test("a rework proposal from a loop worktree gets its main checkout's project, whatever the folder is called", async () => {
+	/** Runs a loop in a linked worktree (folder name unlike its main checkout) to a verifier miss; returns the proposals. */
+	async function reworkFromWorktree(remotesFor: (main: string) => string[]) {
 		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
 		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
 		const { commands, handlers, tools } = fakePi();
@@ -2981,7 +2983,7 @@ describe("Pi wiring", () => {
 		const cwd = join(realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-other-"))), "elsewhere", "feature-x-7f3");
 		execFileSync("git", ["worktree", "add", "-q", cwd, "feature"], { cwd: main, stdio: "ignore" });
 		writeProjects(join(profile, "grimoire"), {
-			projects: [{ id: "app", label: "App", remotes: [`file:${main}`], paths: [] }],
+			projects: [{ id: "app", label: "App", remotes: remotesFor(main), paths: [] }],
 		});
 		approvedLoop(profile, cwd);
 		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
@@ -3027,7 +3029,19 @@ describe("Pi wiring", () => {
 
 		const proposals = listProposals(join(profile, "grimoire"));
 		expect(proposals).toHaveLength(1);
+		return { proposals, raw: readFileSync(join(profile, "grimoire", proposals[0]?.file ?? ""), "utf8") };
+	}
+
+	test("a rework proposal from a loop worktree gets its main checkout's project, whatever the folder is called", async () => {
+		const { proposals, raw } = await reworkFromWorktree((main) => [`file:${main}`]);
 		expect(proposals[0]?.scope).toEqual(["app"]);
+		expect(raw).not.toContain("scopeNote");
+	});
+
+	test("a rework proposal from a worktree no project claims says why it was proposed as global", async () => {
+		const { proposals } = await reworkFromWorktree(() => ["github.com/example/app"]);
+		expect(proposals[0]?.scope).toBeUndefined();
+		expect(proposals[0]?.scopeNote).toMatch(/^proposed as global: remote not attached: file:/);
 	});
 
 	test("verifier intake requires clean worktree and the recorded verifier dispatch", async () => {

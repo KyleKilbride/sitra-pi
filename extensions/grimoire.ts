@@ -29,6 +29,8 @@ export interface Entry {
 	when?: string[];
 	/** Project ids this entry belongs to. No scope means global. */
 	scope?: string[];
+	/** Why a proposal ended up global when it was meant for a project, shown at review. */
+	scopeNote?: string;
 	/** Path from the Grimoire folder, e.g. `kinds/lessons/2026-10-08-read-evals.md`. */
 	file: string;
 	/** Frontmatter lines whose key sitra doesn't know, verbatim and in order, so a rewrite never drops them. */
