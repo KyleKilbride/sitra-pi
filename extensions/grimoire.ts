@@ -755,6 +755,27 @@ export function catalogue(
 	return lines.join("\n").slice(0, maxChars);
 }
 
+export interface ProjectCatalogue {
+	text: string;
+	shown: number;
+	titlesOnly: boolean;
+	overflow?: { count: number; file: string };
+}
+
+/** Where a project's full catalogue goes when the hook can't show every title. */
+export function catalogueOverflowFile(dir: string, projectId: string): string {
+	return join(dir, ".sitra", "catalogues", `${projectId}.md`);
+}
+
+export function projectCatalogue(
+	entries: readonly Entry[],
+	budget: number,
+	_overflowFile: string,
+	_options: { label: string; search: string },
+): ProjectCatalogue {
+	return { text: catalogue(entries, budget), shown: entries.length, titlesOnly: false };
+}
+
 /** grimoire_search's answer: the best matches as catalogue lines, or a plain "nothing found". */
 export function searchEntries(
 	entries: readonly Entry[],

@@ -43,6 +43,7 @@ import {
 	releaseMoment,
 	undecidedMoments,
 } from "../extensions/learn.ts";
+import type { SessionProject } from "../extensions/project.ts";
 import { shellQuote } from "../extensions/runs.ts";
 import { mainCheckout, readLastLines } from "../extensions/sessions.ts";
 import {
@@ -60,13 +61,54 @@ export const CODEX_CONTEXT_CHARS = 46_000;
 /** Codex's limit is in tokens; at a conservative 2 characters per token, the whole text always fits. */
 export const CODEX_CONTEXT_TOKENS = CODEX_CONTEXT_CHARS / 2;
 const MATCHER = "startup|resume|clear|compact";
+export const CLAUDE_SESSION_MATCHER = MATCHER;
+export const CODEX_SESSION_MATCHER = MATCHER;
+
+export interface HooksCheck {
+	installed: boolean;
+	status: string;
+	events: { SessionStart: boolean; UserPromptSubmit: boolean; PreToolUse: boolean };
+	/** SessionStart sources sitra's session hook doesn't run on. */
+	missing: string[];
+}
+
+/** Whether a Claude Code settings.json or Codex hooks.json has sitra's three hooks. */
+export function checkHooksFile(filePath: string, _tool: "claude" | "codex"): HooksCheck {
+	const empty: HooksCheck = {
+		installed: false,
+		status: "not installed",
+		events: { SessionStart: false, UserPromptSubmit: false, PreToolUse: false },
+		missing: [],
+	};
+	if (!existsSync(filePath)) return empty;
+	try {
+		const raw = JSON.parse(readFileSync(filePath, "utf8")) as HooksFile;
+		const hooks = raw?.hooks ?? {};
+		const hasEvent = (name: string) =>
+			Array.isArray(hooks[name]) && hooks[name].some((g) => Array.isArray(g?.hooks) && g.hooks.some((h) => isOurs(h)));
+		const events = {
+			SessionStart: hasEvent("SessionStart"),
+			UserPromptSubmit: hasEvent("UserPromptSubmit"),
+			PreToolUse: hasEvent("PreToolUse"),
+		};
+		const installed = events.SessionStart && events.UserPromptSubmit && events.PreToolUse;
+		return { installed, status: installed ? "installed" : "not installed", events, missing: [] };
+	} catch {
+		return empty;
+	}
+}
 /** sitra's own hook command: the quoted sitra executable, then `grimoire hook <tool>`. Nothing else matches. */
 const OURS = /^'[^']*\/bin\/sitra\.ts' grimoire hook (claude|codex)( |$)/;
 const BLOCK_START = "<!-- sitra grimoire: start (managed by `sitra grimoire install`) -->";
 const BLOCK_END = "<!-- sitra grimoire: end -->";
 
 /** The SessionStart hook's answer for each tool, as the JSON both tools read from stdout. */
-export function hookOutput(tool: "claude" | "codex", dir: string, who?: string): string {
+export function hookOutput(
+	tool: "claude" | "codex",
+	dir: string,
+	who?: string,
+	_project: SessionProject = { state: "off" },
+): string {
 	const entries = existsSync(dir) ? listEntries(dir) : [];
 	let text: string;
 	const base = { shell: true, ...(who ? { who } : {}) };

@@ -49,6 +49,10 @@ export interface Moment {
 	agentReply: string;
 	/** The agent's most recent tool calls, oldest first. */
 	calls: Call[];
+	/** The session's project id, when it had one. */
+	project?: string;
+	/** Why the session had no project although projects exist. */
+	scopeNote?: string;
 	verdict?: "correction" | "other";
 	proposal?: string;
 	skipped?: string;

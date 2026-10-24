@@ -174,6 +174,8 @@ export interface TriggerCase {
 	cwd: string;
 	calls: { tool: string; input: Record<string, unknown> }[];
 	expect: string[];
+	/** The project the moment was recorded in; its rules are global plus that project's. */
+	project?: string;
 }
 
 export interface TriggerReport {
