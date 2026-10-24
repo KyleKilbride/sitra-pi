@@ -412,7 +412,7 @@ export function deleteEntry(
 export function acceptProposal(dir: string, file: string, kind?: Kind): Entry {
 	const clean = validateGrimoirePath(dir, file, ["proposals"]);
 	if (kind !== undefined && !KINDS.includes(kind)) throw new Error(`Invalid kind: ${String(kind)}`);
-	const to = decide(dir, clean, "accept", kind);
+	const to = decide(dir, clean, "accept", { kind });
 	const entry = parseEntry(readFileSync(join(dir, to), "utf8"), to);
 	if (!entry) throw new Error(`Failed to read accepted entry: ${to}`);
 	return entry;

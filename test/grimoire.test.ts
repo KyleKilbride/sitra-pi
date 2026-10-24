@@ -6,16 +6,21 @@ import {
 	catalogue,
 	decide,
 	type Entry,
+	entriesFor,
 	grimoireDir,
 	grimoireSection,
 	importKnowledge,
+	LIMITS,
+	linkReport,
 	listEntries,
 	listProposals,
 	loadRoot,
 	parseEntry,
 	rankEntries,
+	readEntry,
 	renderEntry,
 	searchEntries,
+	setScope,
 	slug,
 	unreadableProposals,
 	writeProposal,
@@ -168,7 +173,7 @@ describe("Grimoire store", () => {
 	test("accepting can change the kind, and a proposal that can't be read is reported, not hidden", () => {
 		const dir = tmp();
 		const file = writeProposal(dir, lesson);
-		const accepted = decide(dir, file, "accept", "warning");
+		const accepted = decide(dir, file, "accept", { kind: "warning" });
 		expect(accepted).toMatch(/^kinds\/warnings\//);
 		expect(listEntries(dir).find((e) => e.file === accepted)?.kind).toBe("warning");
 		writeFileSync(join(dir, "proposals", "2026-10-09-odd.md"), "---\nkind: direction\ntitle: t\ndate: d\n---\nb");
@@ -199,12 +204,12 @@ describe("the always-loaded root", () => {
 		expect(root.text).not.toContain("kind: fact");
 		expect(root.truncated).toBe(false);
 
-		const capped = loadRoot(dir, 300);
+		const capped = loadRoot(dir, undefined, 300);
 		expect(capped.truncated).toBe(true);
 		expect(capped.text.length).toBeLessThanOrEqual(300);
 		expect(capped.text).toContain("Start here");
 		expect(capped.text).toContain(join(dir, "root"));
-		expect(loadRoot(tmp())).toEqual({ text: "", files: [], chars: 0, truncated: false });
+		expect(loadRoot(tmp())).toMatchObject({ text: "", files: [], chars: 0, truncated: false });
 	});
 
 	test("the system prompt section holds the root, a one-line catalogue of approved entries, and how to propose", () => {
@@ -313,5 +318,228 @@ describe("what an imported or proposed entry can't do", () => {
 		const result = importKnowledge(repoKb, tmp(), "/work/app");
 		expect(result.imported).toHaveLength(2);
 		expect(result.skipped).toEqual(["decisions/c.md"]);
+	});
+});
+
+describe("project scope", () => {
+	const head = '---\nkind: "fact"\ntitle: "T"\ndate: "2026-10-01"\n';
+	const scoped = (scope: string) => `${head}scope: ${scope}\n---\n\nB\n`;
+
+	/** A store with one global entry, one for app, one for tools and one for both. */
+	function scopedGrimoire(): string {
+		const dir = tmp();
+		put(dir, "kinds/facts/global.md", { kind: "fact", title: "Global fact", body: "everywhere", date: "2026-10-01" });
+		put(dir, "kinds/facts/app.md", {
+			kind: "fact",
+			title: "App fact",
+			body: "app only",
+			date: "2026-10-02",
+			scope: ["app"],
+		});
+		put(dir, "kinds/facts/tools.md", {
+			kind: "fact",
+			title: "Tools fact",
+			body: "TOOLS-ONLY-BODY",
+			date: "2026-10-03",
+			scope: ["tools"],
+		});
+		put(dir, "kinds/facts/both.md", {
+			kind: "fact",
+			title: "Shared fact",
+			body: "app and tools",
+			date: "2026-10-04",
+			scope: ["app", "tools"],
+		});
+		return dir;
+	}
+
+	test("scope names project ids, no scope is global, and an empty list or a magic value is refused with a reason", () => {
+		const entry = parseEntry(scoped('["app"]'), "x.md");
+		expect(entry?.scope).toEqual(["app"]);
+		expect(entry?.extra).toBeUndefined();
+		const { file: _f, ...rest } = entry as Entry;
+		expect(renderEntry(rest)).toContain('scope: ["app"]');
+		const global = parseEntry(`${head}---\n\nB\n`, "x.md");
+		expect(global).toBeDefined();
+		expect(global?.scope).toBeUndefined();
+		for (const [value, why] of [
+			["[]", /empty/],
+			['["global"]', /global/],
+			['["app", 3]', /project id/],
+			['[" App "]', /project id/],
+			['"app"', /list/],
+			["app", /list/],
+		] as const) {
+			expect(parseEntry(scoped(value), "x.md"), value).toBeUndefined();
+			const read = readEntry(scoped(value), "x.md");
+			expect(read.problem, value).toMatch(/scope/);
+			expect(read.problem, value).toMatch(why);
+		}
+	});
+
+	test("entriesFor gives global entries plus the project's, never another project's", () => {
+		const entries = listEntries(scopedGrimoire());
+		const titles = (id: string | undefined) => entriesFor(entries, id).map((e) => e.title);
+		expect(titles("app").sort()).toEqual(["App fact", "Global fact", "Shared fact"]);
+		expect(titles("tools").sort()).toEqual(["Global fact", "Shared fact", "Tools fact"]);
+		expect(titles(undefined)).toEqual(["Global fact"]);
+	});
+
+	test("loadRoot gives the global root plus the project's, each within its own cap and the combined cap", () => {
+		const dir = tmp();
+		mkdirSync(join(dir, "root"));
+		writeFileSync(join(dir, "root", "README.md"), "# Global start\nEveryone reads this.\n");
+		writeFileSync(join(dir, "root", "app.md"), '---\nscope: ["app"]\n---\n# App root\nApp only.\n');
+		writeFileSync(join(dir, "root", "tools.md"), '---\nscope: ["tools"]\n---\n# Tools root\nTools only.\n');
+		writeFileSync(join(dir, "root", "broken.md"), "---\nscope: []\n---\n# Broken\n");
+		const app = loadRoot(dir, "app");
+		expect(app.global.files).toEqual(["root/README.md"]);
+		expect(app.project.files).toEqual(["root/app.md"]);
+		expect(app.text).toContain("Everyone reads this.");
+		expect(app.text).toContain("App only.");
+		expect(app.text).not.toContain("Tools only.");
+		expect(app.text).not.toContain("# Broken");
+		expect(app.problems).toEqual([{ file: "root/broken.md", problem: expect.stringMatching(/scope/) }]);
+		expect(loadRoot(dir).text).not.toContain("App only.");
+
+		expect(LIMITS).toMatchObject({ rootChars: 32_000, globalRootChars: 26_000, projectRootChars: 6_000 });
+		writeFileSync(join(dir, "root", "README.md"), `# Global start\n${"Global line.\n".repeat(2_500)}`);
+		writeFileSync(join(dir, "root", "app.md"), `---\nscope: ["app"]\n---\n# App root\n${"App line.\n".repeat(800)}`);
+		const big = loadRoot(dir, "app");
+		expect(big.global.truncated).toBe(true);
+		expect(big.global.text.length).toBeLessThanOrEqual(LIMITS.globalRootChars);
+		expect(big.global.text).toContain(join(dir, "root"));
+		expect(big.project.truncated).toBe(true);
+		expect(big.project.text.length).toBeLessThanOrEqual(LIMITS.projectRootChars);
+		expect(big.project.text).toContain(join(dir, "root"));
+		expect(big.text.length).toBeLessThanOrEqual(LIMITS.rootChars);
+		expect(big.truncated).toBe(true);
+		const small = loadRoot(dir, "app", 10_000);
+		expect(small.text.length).toBeLessThanOrEqual(10_000);
+		// With no project the global root may use the whole combined cap, as before projects existed.
+		const solo = tmp();
+		mkdirSync(join(solo, "root"));
+		writeFileSync(join(solo, "root", "README.md"), "x".repeat(30_000));
+		expect(loadRoot(solo).truncated).toBe(false);
+	});
+
+	test("the section for a project lists only its entries and global ones, names it, and says why when there is none", () => {
+		const dir = scopedGrimoire();
+		const all = listEntries(dir);
+		const app = { project: { id: "app", label: "App" } };
+		const section = grimoireSection(dir, undefined, entriesFor(all, "app"), { who: "Sam", scope: app });
+		expect(section).toContain("App fact");
+		expect(section).toContain("Shared fact");
+		expect(section).not.toContain("Tools fact");
+		expect(section).toContain("1 global + 2 for App");
+		const shell = grimoireSection(dir, undefined, entriesFor(all, "app"), { shell: true, scope: app });
+		expect(shell).toContain("--project app");
+		const why = "remote not attached: github.com/example/other";
+		const none = grimoireSection(dir, undefined, entriesFor(all, undefined), { scope: { why } });
+		expect(none).toContain("global only");
+		expect(none).toContain(why);
+		expect(none).not.toContain("App fact");
+		expect(grimoireSection(dir, undefined, entriesFor(all, undefined), { shell: true, scope: { why } })).toContain(
+			"--global-only",
+		);
+	});
+
+	test("a link never loads its target, and the link report lists out-of-scope and missing targets", () => {
+		const dir = scopedGrimoire();
+		put(dir, "kinds/lessons/links.md", {
+			kind: "lesson",
+			title: "Global lesson with links",
+			body: "See kinds/facts/tools.md for the details.",
+			date: "2026-10-05",
+			links: ["kinds/facts/tools.md", "kinds/facts/gone.md", "kinds/facts/global.md"],
+		});
+		const app = entriesFor(listEntries(dir), "app");
+		const section = grimoireSection(dir, loadRoot(dir, "app"), app, {
+			scope: { project: { id: "app", label: "App" } },
+		});
+		expect(section).not.toContain("Tools fact");
+		expect(section).not.toContain("TOOLS-ONLY-BODY");
+		expect(searchEntries(app, "tools only body")).not.toContain("Tools fact");
+		const report = linkReport(dir, "app");
+		expect(report).toContainEqual({
+			from: "kinds/lessons/links.md",
+			target: "kinds/facts/tools.md",
+			problem: "out-of-scope",
+		});
+		expect(report).toContainEqual({
+			from: "kinds/lessons/links.md",
+			target: "kinds/facts/gone.md",
+			problem: "missing",
+		});
+		expect(report.filter((r) => r.target === "kinds/facts/global.md")).toEqual([]);
+		expect(linkReport(dir, "tools").filter((r) => r.problem === "out-of-scope")).toEqual([]);
+	});
+
+	test("decide can set or clear the scope on accept and keeps keys it doesn't know", () => {
+		const dir = tmp();
+		const withExtra = (title: string, scope?: string[]) => {
+			const file = writeProposal(dir, {
+				kind: "lesson",
+				title,
+				body: "b",
+				date: "2026-10-06",
+				...(scope ? { scope } : {}),
+			});
+			writeFileSync(
+				join(dir, file),
+				readFileSync(join(dir, file), "utf8").replace("\n---\n", '\nowner: "someone"\n---\n'),
+			);
+			return file;
+		};
+		const set = decide(dir, withExtra("Set scope"), "accept", { scope: ["app"] });
+		expect(readFileSync(join(dir, set), "utf8")).toContain('scope: ["app"]');
+		expect(readFileSync(join(dir, set), "utf8")).toContain('owner: "someone"');
+		const cleared = decide(dir, withExtra("Clear scope", ["tools"]), "accept", { scope: null });
+		expect(readFileSync(join(dir, cleared), "utf8")).not.toContain("scope:");
+		expect(readFileSync(join(dir, cleared), "utf8")).toContain('owner: "someone"');
+		const kept = decide(dir, withExtra("Keep scope", ["tools"]), "accept", { kind: "warning" });
+		expect(kept).toMatch(/^kinds\/warnings\//);
+		expect(parseEntry(readFileSync(join(dir, kept), "utf8"), kept)?.scope).toEqual(["tools"]);
+		expect(() => decide(dir, withExtra("Bad scope"), "accept", { scope: [] })).toThrow(/scope/);
+	});
+
+	test("setScope rewrites only the scope of the listed entries, and writes nothing when any of them can't be changed", () => {
+		const dir = scopedGrimoire();
+		const tools = join(dir, "kinds/facts/tools.md");
+		writeFileSync(tools, readFileSync(tools, "utf8").replace("\n---\n", '\nstatus: "kept"\n---\n'));
+		const before = readFileSync(join(dir, "kinds/facts/app.md"), "utf8");
+		expect(setScope(dir, ["kinds/facts/global.md", "kinds/facts/tools.md"], ["app"])).toEqual([
+			"kinds/facts/global.md",
+			"kinds/facts/tools.md",
+		]);
+		expect(listEntries(dir).find((e) => e.title === "Global fact")?.scope).toEqual(["app"]);
+		expect(readFileSync(tools, "utf8")).toContain('status: "kept"');
+		expect(readFileSync(tools, "utf8")).toContain('scope: ["app"]');
+		expect(readFileSync(join(dir, "kinds/facts/app.md"), "utf8")).toBe(before);
+		setScope(dir, ["kinds/facts/tools.md"], undefined);
+		expect(readFileSync(tools, "utf8")).not.toContain("scope:");
+		expect(() => setScope(dir, ["kinds/facts/app.md"], ["global"])).toThrow(/global/);
+		expect(() => setScope(dir, ["kinds/facts/app.md", "kinds/facts/missing.md"], ["tools"])).toThrow(/missing\.md/);
+		expect(() => setScope(dir, ["../outside.md"], ["tools"])).toThrow();
+		expect(readFileSync(join(dir, "kinds/facts/app.md"), "utf8")).toBe(before);
+	});
+
+	test("a rejection in one project still blocks importing the same title for another", () => {
+		const dir = tmp();
+		const file = writeProposal(dir, {
+			kind: "decision",
+			title: "Ship on Fridays",
+			body: "b",
+			date: "2026-10-07",
+			scope: ["tools"],
+		});
+		decide(dir, file, "reject");
+		const repoKb = tmp();
+		put(repoKb, "decisions/a.md", { kind: "decision", title: "Ship on Fridays", body: "b", date: "2026-10-07" });
+		put(repoKb, "decisions/b.md", { kind: "decision", title: "Ship on Mondays", body: "b", date: "2026-10-07" });
+		const result = importKnowledge(repoKb, dir, "/work/demo-app", ["app"]);
+		expect(result.skipped).toEqual(["decisions/a.md"]);
+		expect(result.imported).toHaveLength(1);
+		expect(listProposals(dir)[0]?.scope).toEqual(["app"]);
 	});
 });

@@ -72,7 +72,12 @@ export function hookOutput(tool: "claude" | "codex", dir: string, who?: string):
 	const base = { shell: true, ...(who ? { who } : {}) };
 	if (tool === "codex") {
 		const frame = grimoireSection(dir, undefined, entries, base).length + 300;
-		text = grimoireSection(dir, loadRoot(dir, Math.min(LIMITS.rootChars, CODEX_CONTEXT_CHARS - frame)), entries, base);
+		text = grimoireSection(
+			dir,
+			loadRoot(dir, undefined, Math.min(LIMITS.rootChars, CODEX_CONTEXT_CHARS - frame)),
+			entries,
+			base,
+		);
 	} else {
 		const frame = grimoireSection(dir, undefined, [], base).length + 200;
 		text = grimoireSection(dir, undefined, entries, {

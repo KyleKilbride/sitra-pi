@@ -1,11 +1,12 @@
 /**
- * Grimoire: one approved brain per person, shared by every agent they run. Plain markdown in `root/` (always loaded),
- * `kinds/` (approved entries, pulled in by relevance), `proposals/` (agents write only here) and `rejected/`.
- * No Pi imports: the Pi extension, the CLI and the Claude Code / Codex hooks all build on this file.
+ * Grimoire: one approved store per person, shared by every agent they run. Plain markdown in `root/` (always loaded),
+ * `kinds/` (approved entries, pulled in by relevance), `proposals/` (agents write only here) and `rejected/`. An entry
+ * or root file is global unless its `scope` names projects (`projects.json`, see project.ts); a session sees global
+ * plus its own project's (`entriesFor`). No Pi imports: the Pi extension, the CLI and the hooks all build on this file.
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { shellQuote } from "./runs.ts";
 
 /** What an entry is. `setup` entries are about the agent setup itself (extensions, config, prompts). */
@@ -26,6 +27,10 @@ export interface Entry {
 	links?: string[];
 	/** Actions that bring this entry in front of the agent: `command:<words>`, `path:<glob>` or `tool:<name>`. */
 	when?: string[];
+	/** Project ids this entry belongs to. No scope means global. */
+	scope?: string[];
+	/** Why a proposal ended up global when it was meant for a project, shown at review. */
+	scopeNote?: string;
 	/** Path from the Grimoire folder, e.g. `kinds/lessons/2026-10-08-read-evals.md`. */
 	file: string;
 	/** Frontmatter lines whose key sitra doesn't know, verbatim and in order, so a rewrite never drops them. */
@@ -40,13 +45,30 @@ export interface RootText {
 	truncated: boolean;
 }
 
+/** The root as loaded for one project: the global part, the project's part, and both together. */
+export interface Root extends RootText {
+	global: RootText;
+	project: RootText;
+	/** Root files left out because their frontmatter can't be read, each with why. */
+	problems: { file: string; problem: string }[];
+}
+
+/** Which project a prompt is for: a project, or no project and why. */
+export type SectionScope = { project: { id: string; label: string } } | { project?: undefined; why: string };
+
 export type GrimoireStoreStatus =
 	| { state: "ok"; dir: string }
 	| { state: "missing"; dir: string; reason: string }
 	| { state: "unreadable"; dir: string; reason: string };
 
 /** Sizes that keep the brain from crowding out the work. */
-export const LIMITS = { rootChars: 32_000, catalogueChars: 12_000, queryChars: 4_000 };
+export const LIMITS = {
+	rootChars: 32_000,
+	globalRootChars: 26_000,
+	projectRootChars: 6_000,
+	catalogueChars: 12_000,
+	queryChars: 4_000,
+};
 
 /** Where the Grimoire lives: `$SITRA_GRIMOIRE`, else `grimoire/` in the Pi profile, else in `~/.sitra/profile`. */
 export function grimoireDir(env: Record<string, string | undefined>, home = homedir()): string {
@@ -94,7 +116,19 @@ export function slug(title: string): string {
 	);
 }
 
-const FIELDS = ["kind", "title", "date", "proposedBy", "evidence", "summary", "tags", "links", "when"] as const;
+const FIELDS = [
+	"kind",
+	"title",
+	"date",
+	"proposedBy",
+	"evidence",
+	"summary",
+	"tags",
+	"links",
+	"when",
+	"scope",
+	"scopeNote",
+] as const;
 
 export function renderEntry(entry: Omit<Entry, "file">): string {
 	const lines = ["---"];
@@ -123,12 +157,16 @@ function list(value: unknown): string[] | undefined {
 	return clean.length > 0 ? clean : undefined;
 }
 
-export function parseEntry(raw: string, file: string): Entry | undefined {
-	const parts = splitFrontmatter(raw);
-	if (!parts) return undefined;
+/** A project id: a lowercase slug, and never `global` (no scope already means global). */
+export function isProjectId(id: unknown): id is string {
+	return typeof id === "string" && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(id) && id !== "global";
+}
+
+/** One `key: value` per line; JSON-style values are parsed, others kept as text. Unknown keys are kept verbatim. */
+function readMeta(text: string): { meta: Record<string, unknown>; extra: { key: string; raw: string }[] } {
 	const meta: Record<string, unknown> = {};
 	const extra: { key: string; raw: string }[] = [];
-	for (const line of parts.meta.split("\n")) {
+	for (const line of text.split("\n")) {
 		const kv = /^(\w+):\s*(.*)$/.exec(line);
 		if (!kv?.[1]) continue;
 		if (!(FIELDS as readonly string[]).includes(kv[1])) extra.push({ key: kv[1], raw: line });
@@ -139,31 +177,86 @@ export function parseEntry(raw: string, file: string): Entry | undefined {
 			meta[kv[1]] = value;
 		}
 	}
+	return { meta, extra };
+}
+
+/** The `scope` frontmatter value: absent is global; anything but a non-empty list of project ids is refused. */
+function readScope(meta: Record<string, unknown>): { scope?: string[]; problem?: string } {
+	if (!("scope" in meta)) return {};
+	const value = meta.scope;
+	if (!Array.isArray(value))
+		return { problem: `scope must be a JSON list of project ids, like ["app"], not ${JSON.stringify(value)}` };
+	if (value.length === 0) return { problem: "scope is an empty list; remove the scope line to make it global" };
+	const bad = value.find((id) => !isProjectId(id));
+	if (bad === "global") return { problem: 'scope can\'t name "global"; remove the scope line to make it global' };
+	if (bad !== undefined) return { problem: `scope item ${JSON.stringify(bad)} isn't a project id (a lowercase slug)` };
+	return { scope: [...new Set(value as string[])] };
+}
+
+/** The entry, or why the file isn't one (no frontmatter, unknown kind, no title or date, an unreadable scope). */
+export function readEntry(
+	raw: string,
+	file: string,
+): { entry: Entry; problem?: undefined } | { entry?: undefined; problem: string } {
+	const parts = splitFrontmatter(raw);
+	if (!parts) return { problem: "no frontmatter between --- lines" };
+	const { meta, extra } = readMeta(parts.meta);
 	const str = (k: string) => (typeof meta[k] === "string" && meta[k] ? (meta[k] as string) : undefined);
 	const kind = str("kind");
 	const title = str("title");
 	const date = str("date");
-	if (!KINDS.includes(kind as Kind) || !title || !date) return undefined;
+	if (!KINDS.includes(kind as Kind))
+		return { problem: `kind ${JSON.stringify(kind)} isn't one of ${KINDS.join(", ")}` };
+	if (!title) return { problem: "no title" };
+	if (!date) return { problem: "no date" };
+	const { scope, problem } = readScope(meta);
+	if (problem) return { problem };
 	const evidence = str("evidence");
 	const proposedBy = str("proposedBy");
 	const summary = str("summary");
+	const scopeNote = str("scopeNote");
 	const tags = list(meta.tags);
 	const links = list(meta.links);
 	const when = list(meta.when);
 	return {
-		kind: kind as Kind,
-		title,
-		body: parts.body.trim(),
-		date,
-		...(evidence ? { evidence } : {}),
-		...(proposedBy ? { proposedBy } : {}),
-		...(summary ? { summary } : {}),
-		...(tags ? { tags } : {}),
-		...(links ? { links } : {}),
-		...(when ? { when } : {}),
-		...(extra.length > 0 ? { extra } : {}),
-		file,
+		entry: {
+			kind: kind as Kind,
+			title,
+			body: parts.body.trim(),
+			date,
+			...(evidence ? { evidence } : {}),
+			...(proposedBy ? { proposedBy } : {}),
+			...(summary ? { summary } : {}),
+			...(tags ? { tags } : {}),
+			...(links ? { links } : {}),
+			...(when ? { when } : {}),
+			...(scope ? { scope } : {}),
+			...(scopeNote ? { scopeNote } : {}),
+			...(extra.length > 0 ? { extra } : {}),
+			file,
+		},
 	};
+}
+
+export function parseEntry(raw: string, file: string): Entry | undefined {
+	return readEntry(raw, file).entry;
+}
+
+/** The entries a project sees: every global (unscoped) entry, plus those scoped to the project. */
+export function entriesFor(entries: readonly Entry[], projectId: string | undefined): Entry[] {
+	return entries.filter((e) => !e.scope || (projectId !== undefined && e.scope.includes(projectId)));
+}
+
+/**
+ * The entry with a new scope (`undefined`: global), dropping any note on why it was proposed as global: the person
+ * has now chosen. An invalid scope throws, naming the file.
+ */
+function withScope<T extends Omit<Entry, "file">>(entry: T, scope: readonly string[] | undefined, file: string): T {
+	const { scope: _old, scopeNote: _note, ...rest } = entry;
+	if (scope === undefined) return rest as T;
+	const checked = readScope({ scope });
+	if (checked.problem) throw new Error(`${file}: ${checked.problem}`);
+	return { ...rest, scope: checked.scope } as T;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -222,10 +315,25 @@ export function listRejected(dir: string): Entry[] {
 
 /** Proposal files that aren't valid entries (unknown kind, no frontmatter), so a review can say so instead of hiding them. */
 export function unreadableProposals(dir: string): string[] {
-	const ok = new Set(listProposals(dir).map((p) => p.file));
-	return markdownFiles(join(dir, "proposals"))
-		.map((f) => `proposals/${f}`)
-		.filter((f) => !ok.has(f));
+	return unreadableEntries(dir, ["proposals"]).map((u) => u.file);
+}
+
+/** Files in `kinds/` and `proposals/` that aren't valid entries, each with why, so they're reported instead of hidden. */
+export function unreadableEntries(
+	dir: string,
+	folders: readonly string[] = [...KINDS.map((k) => `kinds/${k}s`), "proposals"],
+): { file: string; problem: string }[] {
+	return folders.flatMap((rel) =>
+		markdownFiles(join(dir, rel)).flatMap((f) => {
+			const file = `${rel}/${f}`;
+			try {
+				const read = readEntry(readFileSync(join(dir, file), "utf8"), file);
+				return read.problem ? [{ file, problem: read.problem }] : [];
+			} catch (error) {
+				return [{ file, problem: reason(error) }];
+			}
+		}),
+	);
 }
 
 export function writeProposal(dir: string, entry: Omit<Entry, "file">): string {
@@ -242,47 +350,142 @@ export function writeProposal(dir: string, entry: Omit<Entry, "file">): string {
 	return `proposals/${name}`;
 }
 
-/** Moves a proposal into `kinds/` (accepted, optionally as a different kind) or `rejected/` (kept, never shown). */
-export function decide(dir: string, proposalFile: string, verdict: "accept" | "reject", kind?: Kind): string {
+/**
+ * Moves a proposal into `kinds/` (accepted) or `rejected/` (kept, never shown). Accepting can change the kind, and set
+ * the scope (a list of project ids) or clear it (`null`: global); leaving `scope` out keeps the proposal's own.
+ */
+export function decide(
+	dir: string,
+	proposalFile: string,
+	verdict: "accept" | "reject",
+	change: { kind?: Kind; scope?: readonly string[] | null } = {},
+): string {
 	const from = join(dir, proposalFile);
-	const entry = parseEntry(readFileSync(from, "utf8"), proposalFile);
-	if (!entry) throw new Error(`${proposalFile} is not a Grimoire entry`);
-	let text = readFileSync(from, "utf8");
-	if (verdict === "accept" && kind && kind !== entry.kind) {
-		text = text.replace(/^kind:.*$/m, `kind: ${JSON.stringify(kind)}`);
+	const raw = readFileSync(from, "utf8");
+	const read = readEntry(raw, proposalFile);
+	if (read.problem !== undefined) throw new Error(`${proposalFile} is not a Grimoire entry: ${read.problem}`);
+	const kind = change.kind ?? read.entry.kind;
+	let text = raw;
+	if (verdict === "accept" && (kind !== read.entry.kind || change.scope !== undefined)) {
+		const changed = { ...read.entry, kind };
+		text = renderEntry(
+			change.scope === undefined ? changed : withScope(changed, change.scope ?? undefined, proposalFile),
+		);
 	}
-	const target = verdict === "accept" ? `kinds/${kind ?? entry.kind}s` : "rejected";
+	const target = verdict === "accept" ? `kinds/${kind}s` : "rejected";
 	mkdirSync(join(dir, target), { recursive: true });
 	const name = basename(proposalFile, ".md");
 	let to = `${target}/${name}.md`;
 	for (let n = 2; existsSync(join(dir, to)); n++) to = `${target}/${name}-${n}.md`;
 	renameSync(from, join(dir, to));
-	if (text !== readFileSync(join(dir, to), "utf8")) writeFileSync(join(dir, to), text);
+	if (text !== raw) writeFileSync(join(dir, to), text);
 	return to;
+}
+
+const ENTRY_FOLDERS = [...KINDS.map((k) => `kinds/${k}s`), "proposals", "rejected"];
+
+/**
+ * The one writer for scope changes: sets the scope of each listed entry (paths from the Grimoire folder, in `kinds/`,
+ * `proposals/` or `rejected/`) to these project ids, or makes it global (`undefined`). Every file is checked before
+ * any is written, so a bad path, an unreadable entry or an invalid scope changes nothing. Returns the files.
+ */
+export function setScope(dir: string, files: readonly string[], scope: readonly string[] | undefined): string[] {
+	const planned = files.map((file) => {
+		const folder = dirname(file);
+		if (isAbsolute(file) || !ENTRY_FOLDERS.includes(folder))
+			throw new Error(
+				`${file} isn't an entry in kinds/, proposals/ or rejected/; root files carry their scope in their own frontmatter`,
+			);
+		const full = join(dir, file);
+		if (!existsSync(full)) throw new Error(`${file} doesn't exist in ${dir}`);
+		const raw = readFileSync(full, "utf8");
+		const read = readEntry(raw, file);
+		if (read.problem !== undefined) throw new Error(`${file} is not a Grimoire entry: ${read.problem}`);
+		return { file, full, raw, text: renderEntry(withScope(read.entry, scope, file)) };
+	});
+	for (const p of planned) if (p.text !== p.raw) writeFileSync(p.full, p.text);
+	return planned.map((p) => p.file);
+}
+
+export interface LinkProblem {
+	/** The root file or entry that links. */
+	from: string;
+	/** The path it links to, from the Grimoire folder. */
+	target: string;
+	/** `missing`: no such file. `not-an-entry`: a proposal, a rejected entry or a file that isn't an entry. `out-of-scope`: another project's. */
+	problem: "missing" | "not-an-entry" | "out-of-scope";
+}
+
+/**
+ * Links from the root files and approved entries a project sees whose target it won't see: missing, not an approved
+ * entry or root file, or scoped to other projects. A link is a path in an entry's `links`, or a store file's path
+ * written in the text (as `/grimoire-ui` finds them), so a missing target is found from `links` only. Loads nothing.
+ */
+export function linkReport(dir: string, projectId: string | undefined): LinkProblem[] {
+	const sees = (scope: string[] | undefined) => !scope || (projectId !== undefined && scope.includes(projectId));
+	const approved = listEntries(dir);
+	const root = rootFiles(dir).filter((r) => r.problem === undefined);
+	const visible = new Set([
+		...entriesFor(approved, projectId).map((e) => e.file),
+		...root.filter((r) => sees(r.scope)).map((r) => r.file),
+	]);
+	const known = new Set([...approved.map((e) => e.file), ...root.map((r) => r.file)]);
+	const storeFiles = [...ENTRY_FOLDERS, "root"].flatMap((rel) =>
+		markdownFiles(join(dir, rel)).map((f) => `${rel}/${f}`),
+	);
+	const sources = [
+		...root.filter((r) => sees(r.scope)).map((r) => ({ file: r.file, text: r.raw, links: [] as string[] })),
+		...entriesFor(approved, projectId).map((e) => ({ file: e.file, text: e.body, links: e.links ?? [] })),
+	];
+	const out: LinkProblem[] = [];
+	for (const source of sources) {
+		const targets = new Set([
+			...source.links,
+			...storeFiles.filter((f) => f !== source.file && source.text.includes(f)),
+		]);
+		for (const target of targets) {
+			if (visible.has(target)) continue;
+			const problem = known.has(target) ? "out-of-scope" : existsSync(join(dir, target)) ? "not-an-entry" : "missing";
+			out.push({ from: source.file, target, problem });
+		}
+	}
+	return out;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The always-loaded root
 // ---------------------------------------------------------------------------------------------------------------------
 
-/** Every `root/*.md`, README first, frontmatter removed, capped at `maxChars` with a pointer to the rest. */
-export function loadRoot(dir: string, maxChars = LIMITS.rootChars): RootText {
+/** Every `root/*.md`, README first, with its body and scope, or why its frontmatter can't be read. */
+function rootFiles(dir: string): { file: string; raw: string; body: string; scope?: string[]; problem?: string }[] {
 	const rootDir = join(dir, "root");
-	const files = markdownFiles(rootDir).sort((a, b) => {
+	const names = markdownFiles(rootDir).sort((a, b) => {
 		const ra = a.toLowerCase() === "readme.md" ? 0 : 1;
 		const rb = b.toLowerCase() === "readme.md" ? 0 : 1;
 		return ra - rb || a.localeCompare(b);
 	});
-	if (files.length === 0) return { text: "", files: [], chars: 0, truncated: false };
-	const parts = files.map((f) => {
-		const raw = readFileSync(join(rootDir, f), "utf8");
-		return (splitFrontmatter(raw)?.body ?? raw).trim();
+	return names.map((name) => {
+		const raw = readFileSync(join(rootDir, name), "utf8");
+		const parts = splitFrontmatter(raw);
+		const { scope, problem } = parts ? readScope(readMeta(parts.meta).meta) : {};
+		return {
+			file: `root/${name}`,
+			raw,
+			body: (parts?.body ?? raw).trim(),
+			...(scope ? { scope } : {}),
+			...(problem ? { problem } : {}),
+		};
 	});
-	const full = parts.join("\n\n");
-	const rel = files.map((f) => `root/${f}`);
-	if (full.length <= maxChars) return { text: full, files: rel, chars: full.length, truncated: false };
+}
+
+/** Joins root files and caps them at `maxChars`, ending with where to read the rest; never cut without saying so. */
+function capRoot(files: { file: string; body: string }[], maxChars: number, label: string, rootDir: string): RootText {
+	const full = files.map((f) => f.body).join("\n\n");
+	const rel = files.map((f) => f.file);
+	if (full.length <= Math.max(0, maxChars)) return { text: full, files: rel, chars: full.length, truncated: false };
 	const notice = (shown: number) =>
-		`\n\n[The root is cut off here, at ${shown} of ${full.length} characters. Read the rest in ${rootDir}.]`;
+		`\n\n[The ${label} is cut off here, at ${shown} of ${full.length} characters. Read the rest in ${rootDir}.]`;
+	if (maxChars <= 0) return { text: "", files: rel, chars: full.length, truncated: true };
 	const budget = Math.max(0, maxChars - notice(full.length).length);
 	const cut = full.lastIndexOf("\n", budget);
 	const kept = full.slice(0, cut > budget / 2 ? cut : budget).trimEnd();
@@ -294,16 +497,52 @@ export function loadRoot(dir: string, maxChars = LIMITS.rootChars): RootText {
 	};
 }
 
+/**
+ * The root for a project: unscoped root files (the global root, at most `LIMITS.globalRootChars`) and the files
+ * scoped to the project (at most `LIMITS.projectRootChars`), README first, frontmatter removed, together at most
+ * `maxChars`. Each part over its cap ends with a pointer to the rest. With no project the global root may use all of
+ * `maxChars`, as it did before projects. Root files whose scope can't be read are left out and listed in `problems`.
+ */
+export function loadRoot(dir: string, projectId?: string, maxChars = LIMITS.rootChars): Root {
+	const rootDir = join(dir, "root");
+	const files = rootFiles(dir);
+	const usable = files.filter((f) => f.problem === undefined);
+	const global = capRoot(
+		usable.filter((f) => !f.scope),
+		projectId === undefined ? maxChars : Math.min(LIMITS.globalRootChars, maxChars),
+		projectId === undefined ? "root" : "global root",
+		rootDir,
+	);
+	const projectFiles = projectId === undefined ? [] : usable.filter((f) => f.scope?.includes(projectId));
+	const project = capRoot(
+		projectFiles,
+		Math.min(LIMITS.projectRootChars, maxChars - global.text.length - (global.text ? 2 : 0)),
+		`root for project ${projectId}`,
+		rootDir,
+	);
+	return {
+		text: [global.text, project.text].filter(Boolean).join("\n\n"),
+		files: [...global.files, ...project.files],
+		chars: global.chars + project.chars,
+		truncated: global.truncated || project.truncated,
+		global,
+		project,
+		problems: files.flatMap((f) => (f.problem === undefined ? [] : [{ file: f.file, problem: f.problem }])),
+	};
+}
+
 export function loadRootWithStatus(
 	dir: string,
+	projectId?: string,
 	maxChars = LIMITS.rootChars,
-): { status: GrimoireStoreStatus; root: RootText } {
+): { status: GrimoireStoreStatus; root: Root } {
 	const status = grimoireStoreStatus(dir);
-	const empty = { text: "", files: [], chars: 0, truncated: false };
+	const part = { text: "", files: [], chars: 0, truncated: false };
+	const empty = { ...part, global: part, project: part, problems: [] };
 	if (status.state === "missing") return { status, root: empty };
 	if (status.state === "unreadable") return { status, root: empty };
 	try {
-		return { status, root: loadRoot(dir, maxChars) };
+		return { status, root: loadRoot(dir, projectId, maxChars) };
 	} catch (error) {
 		return { status: unreadable(dir, error), root: empty };
 	}
@@ -316,7 +555,7 @@ export function loadRootWithStatus(
  */
 export function writeClaudeRoot(dir: string, maxChars = LIMITS.rootChars): string {
 	const file = join(dir, ".sitra", "root.md");
-	const root = loadRoot(dir, maxChars);
+	const root = loadRoot(dir, undefined, maxChars);
 	const text = root.text ? `${root.text}\n` : "(The Grimoire root is empty.)\n";
 	if (!existsSync(file) || readFileSync(file, "utf8") !== text) {
 		mkdirSync(dirname(file), { recursive: true });
@@ -330,31 +569,56 @@ export interface SectionOptions {
 	catalogueChars?: number;
 	/** For tools without sitra's grimoire_search and grimoire_propose (Claude Code, Codex): use the shell and files. */
 	shell?: boolean;
+	/** The project the entries were chosen for. Leave it out when no projects are registered. */
+	scope?: SectionScope;
 }
 
 /**
  * What every agent starts with: the root, the catalogue of approved entries, and how to find and propose more.
  * Stable across turns (it only changes when Grimoire does), so it stays in the cached part of the prompt. Pass no root
- * when the tool loads the root another way (Claude Code imports it from CLAUDE.md).
+ * when the tool loads the root another way (Claude Code imports it from CLAUDE.md). With `scope`, the entries are
+ * expected to be `entriesFor` that project; the section names it, or says why there is none.
  */
 export function grimoireSection(
 	dir: string,
-	root: RootText | undefined,
+	root: RootText | Root | undefined,
 	entries: readonly Entry[],
 	options: SectionOptions = {},
 ): string {
 	const who = options.who ?? "the person you work with";
+	const scope = options.scope;
+	const flag = !scope ? "" : scope.project ? ` --project ${scope.project.id}` : " --global-only";
 	const search = options.shell
-		? `\`sitra grimoire search --dir ${shellQuote(dir)} "<words>"\` in the shell`
+		? `\`sitra grimoire search --dir ${shellQuote(dir)}${flag} "<words>"\` in the shell`
 		: "grimoire_search";
+	const scopeField = scope?.project
+		? `; scope, ["${scope.project.id}"] for ${scope.project.label} only, or leave it out when it applies everywhere`
+		: "";
 	const propose = options.shell
-		? `add a file to ${join(dir, "proposals")} named YYYY-MM-DD-short-title.md: frontmatter between --- lines with one JSON-style value per line (kind: lesson, fact, decision, warning or setup; title; date; proposedBy; evidence; summary, one sentence; tags; links, paths of related entries), then a short body`
+		? `add a file to ${join(dir, "proposals")} named YYYY-MM-DD-short-title.md: frontmatter between --- lines with one JSON-style value per line (kind: lesson, fact, decision, warning or setup; title; date; proposedBy; evidence; summary, one sentence; tags; links, paths of related entries${scopeField}), then a short body`
 		: "use grimoire_propose";
 	const out = [`# Grimoire: ${who}'s approved knowledge`];
-	if (root?.text) out.push("", root.text, "", "---");
+	const projectRoot = root && "project" in root && scope?.project ? root.project.text : "";
+	const rootText = projectRoot && root && "global" in root ? root.global.text : root?.text;
+	if (rootText) out.push("", rootText);
+	if (projectRoot) out.push("", `## Root for ${scope?.project?.label}`, "", projectRoot);
+	if (rootText || projectRoot) out.push("", "---");
+	const globalCount = entries.filter((e) => !e.scope).length;
+	const count = !scope
+		? `${entries.length}`
+		: scope.project
+			? `${globalCount} global + ${entries.length - globalCount} for ${scope.project.label}`
+			: `${globalCount} global`;
 	out.push(
 		"",
-		`## Approved entries (${entries.length}, in ${dir})`,
+		`## Approved entries (${count}, in ${dir})`,
+		...(scope?.project
+			? [
+					`This session is in project ${scope.project.label} (${scope.project.id}), fixed when it started: you get global entries and ${scope.project.label}'s, not other projects'.`,
+				]
+			: scope
+				? [`No project here, so global only: ${scope.why}.`]
+				: []),
 		`Before each step, check whether an entry below touches what you are about to do; if one might, read it in full before acting. Don't guess what ${who} would want: look it up (${search}) or ask.`,
 	);
 	if (entries.length > 0) out.push("", catalogue(entries, options.catalogueChars, search));
@@ -492,10 +756,15 @@ export function catalogue(
 }
 
 /** grimoire_search's answer: the best matches as catalogue lines, or a plain "nothing found". */
-export function searchEntries(entries: readonly Entry[], query: string, limit = 8): string {
+export function searchEntries(
+	entries: readonly Entry[],
+	query: string,
+	limit = 8,
+	label?: (entry: Entry) => string,
+): string {
 	const ranked = rankEntries(entries, query).slice(0, limit);
 	if (ranked.length === 0) return `Nothing in Grimoire matches "${query}".`;
-	return ranked.map((r) => catalogueLine(r.entry)).join("\n");
+	return ranked.map((r) => `${catalogueLine(r.entry)}${label ? ` [${label(r.entry)}]` : ""}`).join("\n");
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -522,9 +791,15 @@ export function importedRepos(dir: string): string[] {
 
 /**
  * Copies a repo's `.pi/knowledge` entries (approved and proposed) into `proposals/` for the person to review, skipping
- * any whose title Grimoire already has anywhere (approved, proposed or rejected). Never touches the old folder.
+ * any whose title Grimoire already has anywhere (approved, proposed or rejected, in every scope). With `scope`, the
+ * proposals are scoped to those projects. Never touches the old folder.
  */
-export function importKnowledge(source: string, dir: string, label: string): { imported: string[]; skipped: string[] } {
+export function importKnowledge(
+	source: string,
+	dir: string,
+	label: string,
+	scope?: readonly string[],
+): { imported: string[]; skipped: string[] } {
 	const known = new Set(
 		[...listEntries(dir), ...listProposals(dir), ...readEntries(dir, "rejected")].map((e) => normalTitle(e.title)),
 	);
@@ -539,7 +814,8 @@ export function importKnowledge(source: string, dir: string, label: string): { i
 		}
 		known.add(key);
 		const note = `imported from ${label} (.pi/knowledge/${file})`;
-		imported.push(writeProposal(dir, { ...entry, evidence: entry.evidence ? `${entry.evidence}; ${note}` : note }));
+		const noted = { ...entry, evidence: entry.evidence ? `${entry.evidence}; ${note}` : note };
+		imported.push(writeProposal(dir, scope ? withScope(noted, scope, file) : noted));
 	}
 	const repos = importedRepos(dir);
 	if (!repos.includes(label)) {

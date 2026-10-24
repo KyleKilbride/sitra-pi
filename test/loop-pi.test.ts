@@ -17,6 +17,7 @@ import { ASK_USER_TOOL } from "../extensions/ask-user-tool.ts";
 import { listProposals } from "../extensions/grimoire.ts";
 import { briefHash, buildBrief, createLoopState, type LoopState, staleReason } from "../extensions/loop.ts";
 import sitraLoop, { loopStatePath, readLoopStateFile, writeLoopStateFile } from "../extensions/loop-pi.ts";
+import { writeProjects } from "../extensions/project.ts";
 import { EXIT_MARKER, HEADER_MARKER, readRunHeader } from "../extensions/runs.ts";
 
 vi.setConfig({ testTimeout: 30_000 });
@@ -75,10 +76,24 @@ function gitWorktree(options: { originHead?: boolean } = { originHead: true }): 
 	execFileSync("git", ["init", "-b", "main"], { cwd, stdio: "ignore" });
 	writeFileSync(join(cwd, "README.md"), "test\n");
 	execFileSync("git", ["add", "README.md"], { cwd, stdio: "ignore" });
-	execFileSync("git", ["-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", "initial"], {
-		cwd,
-		stdio: "ignore",
-	});
+	execFileSync(
+		"git",
+		[
+			"-c",
+			"user.name=Test User",
+			"-c",
+			"user.email=test@example.com",
+			"-c",
+			"commit.gpgsign=false",
+			"commit",
+			"-m",
+			"initial",
+		],
+		{
+			cwd,
+			stdio: "ignore",
+		},
+	);
 	const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
 	execFileSync("git", ["remote", "add", "origin", cwd], { cwd, stdio: "ignore" });
 	execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd, stdio: "ignore" });
@@ -173,10 +188,24 @@ function moveBase(cwd: string): string {
 
 function commitAll(cwd: string, message: string): string {
 	execFileSync("git", ["add", "."], { cwd, stdio: "ignore" });
-	execFileSync("git", ["-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", message], {
-		cwd,
-		stdio: "ignore",
-	});
+	execFileSync(
+		"git",
+		[
+			"-c",
+			"user.name=Test User",
+			"-c",
+			"user.email=test@example.com",
+			"-c",
+			"commit.gpgsign=false",
+			"commit",
+			"-m",
+			message,
+		],
+		{
+			cwd,
+			stdio: "ignore",
+		},
+	);
 	return execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
 }
 
@@ -2939,8 +2968,80 @@ describe("Pi wiring", () => {
 			proposedBy: "sitra-loops",
 			tags: ["loops", "rework", "context-missed"],
 		});
+		expect(readFileSync(join(profile, "grimoire", proposals[0]?.file ?? ""), "utf8")).not.toMatch(/scope/);
 		expect(existsSync(join(profile, "grimoire", "kinds"))).toBe(false);
 		expect(userMessages.join("\n")).toContain("LOOPS needs one answer before continuing");
+	});
+
+	/** Runs a loop in a linked worktree (folder name unlike its main checkout) to a verifier miss; returns the proposals. */
+	async function reworkFromWorktree(remotesFor: (main: string) => string[]) {
+		const profile = realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-profile-")));
+		vi.stubEnv("PI_CODING_AGENT_DIR", profile);
+		const { commands, handlers, tools } = fakePi();
+		const { cwd: main } = gitWorktree();
+		execFileSync("git", ["checkout", "-q", "main"], { cwd: main, stdio: "ignore" });
+		const cwd = join(realpathSync(mkdtempSync(join(tmpdir(), "sitra-loop-other-"))), "elsewhere", "feature-x-7f3");
+		execFileSync("git", ["worktree", "add", "-q", cwd, "feature"], { cwd: main, stdio: "ignore" });
+		writeProjects(join(profile, "grimoire"), {
+			projects: [{ id: "app", label: "App", remotes: remotesFor(main), paths: [] }],
+		});
+		approvedLoop(profile, cwd);
+		writeFileSync(join(cwd, "loop.test.ts"), "red\n");
+		const redCommit = commitAll(cwd, "add tests");
+		writeFileSync(join(cwd, "impl.ts"), "green\n");
+		const greenCommit = commitAll(cwd, "implement");
+		await commands.get("loop")?.handler("build", ctx(cwd));
+		const hash = sha256sum(cwd, "loop.test.ts");
+		const redLog = join(profile, "red.log");
+		const greenLog = join(profile, "green.log");
+		writeHeaderLoopLog(redLog, {
+			commit: redCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 1,
+		});
+		writeHeaderLoopLog(greenLog, {
+			commit: greenCommit,
+			testHashes: [{ file: "loop.test.ts", sha256: hash }],
+			exitCode: 0,
+		});
+		await recordBuildWithLogs(tools, profile, redLog, greenLog, cwd);
+		await handlers.get("message_end")?.(
+			subagentResult(
+				"verifier",
+				sessionFileWithVerifierReport(
+					{
+						...helperReport("verifier", {
+							checksRun: [],
+							rerunChecks: [],
+							acceptedLogs: [],
+							testHashesChecked: ["loop.test.ts"],
+							goalMatched: false,
+							missClass: "context-missed",
+						}),
+						summary: "Verifier found a context miss.",
+						evidence: ["extensions/loop.ts:1"],
+					},
+					readLoopStateFile(loopStatePath(profile, cwd, "feature")).verifierRequest?.task ?? "",
+				),
+			),
+			ctx(cwd),
+		);
+
+		const proposals = listProposals(join(profile, "grimoire"));
+		expect(proposals).toHaveLength(1);
+		return { proposals, raw: readFileSync(join(profile, "grimoire", proposals[0]?.file ?? ""), "utf8") };
+	}
+
+	test("a rework proposal from a loop worktree gets its main checkout's project, whatever the folder is called", async () => {
+		const { proposals, raw } = await reworkFromWorktree((main) => [`file:${main}`]);
+		expect(proposals[0]?.scope).toEqual(["app"]);
+		expect(raw).not.toContain("scopeNote");
+	});
+
+	test("a rework proposal from a worktree no project claims says why it was proposed as global", async () => {
+		const { proposals } = await reworkFromWorktree(() => ["github.com/example/app"]);
+		expect(proposals[0]?.scope).toBeUndefined();
+		expect(proposals[0]?.scopeNote).toMatch(/^proposed as global: remote not attached: file:/);
 	});
 
 	test("verifier intake requires clean worktree and the recorded verifier dispatch", async () => {

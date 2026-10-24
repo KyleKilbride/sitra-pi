@@ -1,14 +1,16 @@
-# Grimoire: one approved brain for every agent
+# Grimoire: one approved store for every agent
 
-Grimoire replaces the per-repo knowledge base (`/kb`, `.pi/knowledge`). It is one folder of plain markdown per person,
-shared by every agent they run (Pi, Claude Code, Codex), across every project. Agents propose; only the person
-approves. sitra ships the machinery and an empty starter; what goes in it is the person's own and stays in their
+Grimoire replaces the per-repo knowledge base (`/kb`, `.pi/knowledge`). It is one store of plain markdown per person,
+shared by every agent they run (Pi, Claude Code, Codex). Entries are global by default; an entry or root file can be
+scoped to one or more projects, and a session sees global entries plus its own project's. Agents propose; only the
+person approves. sitra ships the machinery and an empty starter; what goes in it is the person's own and stays in their
 private folder (agents and the background learner read it through the person's own model provider).
 
 ## Why it replaced `/kb`
 
-- **One brain, not one per repo.** How someone works, their review rules and their hard-won lessons apply in every repo.
-  Per-repo knowledge bases split that up, and every new repo started empty.
+- **One store, global by default.** How someone works, their review rules and their hard-won lessons apply in every
+  repo. Per-repo knowledge bases split that up, and every new repo started empty. So an entry is global unless it is
+  scoped to a project, and facts that only hold in one repo stay out of the others.
 - **Every tool, not only Pi.** People switch between Pi, Claude Code and Codex. The same entries reach all three.
 - **A size limit on everything that's always loaded.** `/kb` put every title into every prompt with no limit. Grimoire
   caps the root and the one-line catalogue; past the cap, agents search.
@@ -17,10 +19,12 @@ private folder (agents and the background learner read it through the person's o
 
 ```
 <profile>/grimoire/            (default ~/.sitra/profile/grimoire, or $SITRA_GRIMOIRE)
-  root/        always loaded: a short, high-level picture (who, what, the big decisions, how the person works)
-  kinds/       approved entries: decisions/ facts/ lessons/ setups/ warnings/
-  proposals/   waiting for the person; agents only ever write here
-  rejected/    turned down, kept so nobody proposes them again
+  root/          always loaded: a short, high-level picture (who, what, the big decisions, how the person works);
+                 files without `scope` are the global root, files with `scope: ["app"]` are app's root
+  kinds/         approved entries: decisions/ facts/ lessons/ setups/ warnings/
+  proposals/     waiting for the person; agents only ever write here
+  rejected/      turned down, kept so nobody proposes them again (in any project)
+  projects.json  the projects: { "projects": [{ "id": "app", "label": "App", "remotes": ["github.com/example/app"], "paths": [] }] }
 ```
 
 Anything else in the folder (research notes, evals, tools) is ignored by sitra.
@@ -38,12 +42,37 @@ summary: "One plain sentence: what to do and when."         # new: shown in sear
 tags: ["evals", "debugging"]                                   # new: what it's about
 links: ["kinds/decisions/2026-10-19-some-rule.md"]             # new: related entries, paths from the Grimoire folder
 when: ["command:gh pr create", "tool:bash + command:pnpm test"] # new: actions that bring this entry up (below)
+scope: ["app"]                                                # optional: project ids; no scope means global
 ---
 
 Body: what to know and why, in a few sentences.
 ```
 
-Values are one line each, JSON style. Old `/kb` entries parse unchanged; the new fields are optional.
+Values are one line each, JSON style. Old `/kb` entries parse unchanged; the new fields are optional. `scope` must be a
+non-empty JSON list of project ids. There is no magic value: `scope: []` and `scope: ["global"]` are refused, and the
+file is reported as unreadable (in the status line and in `/grimoire`), never loaded as global. Leave `scope` out to make
+an entry global. Keys sitra doesn't know are kept as they are when an entry is rewritten.
+
+## Which project a session is in
+
+1. sitra finds the main checkout of the session's folder (so every worktree and subfolder of a repo counts as the same
+   checkout), then every git remote of it, normalized: `https://github.com/Example/App.git`,
+   `git@github.com:example/app.git` and `ssh://git@github.com:22/example/app` are all `github.com/example/app`.
+2. The project whose `remotes` lists one of them is the session's project. If `origin` matches a project, that project
+   wins, and the status line warns which other remote matched which other project. If `origin` matches none (or there
+   is no `origin`) and two other remotes match different projects, it's ambiguous: global only, and the status line
+   names them. One other remote matching one project is a plain match.
+3. Otherwise, a project whose `paths` explicitly lists the checkout. Folders are never matched by name.
+4. Otherwise there is no project and the session loads global entries only. The status line says why: not in a git
+   repository, no remote, or a remote not attached to any project. A `projects.json` or remote that can't be read is
+   shown the same way, and as a warning, never skipped quietly.
+
+**The project is fixed when the session starts.** A `cd` into another repo partway through (`cd ../tools && …`), or a
+tool call on files there, doesn't switch it. Rules for the other repo need a session started there. With no
+`projects.json` (or no projects in it), nothing is scoped and everything works as it did before projects.
+
+Today Pi sessions and LOOPS rework proposals (from the loop's worktree) use the project. The Claude Code and Codex hooks
+still load every entry and the global root.
 
 ## Rules tied to actions (`when`)
 
@@ -71,10 +100,17 @@ editing an eval, starting a helper. An entry with `when` triggers reaches the ag
 
 | | What | How big |
 |---|---|---|
-| Always | Every file in `root/`, frontmatter removed, README first | Capped at 32,000 characters, including the "cut off here" note; the status line warns when the root is over |
-| Always | The catalogue: one line per approved entry (kind, title, summary, path), warnings first, newest first | Capped at 12,000 characters; past that, a count of the rest and how to search for them |
+| Always | The global root: every unscoped file in `root/`, frontmatter removed, README first | Capped at 26,000 characters when the session has a project (at 32,000 without one), including the "cut off here" note |
+| Always | The project's root: the files in `root/` scoped to the session's project, under a `## Root for <label>` heading | Capped at 6,000 characters; global and project root together stay within 32,000 |
+| Always | The catalogue: one line per approved entry the session sees (global plus its project's), warnings first, newest first | Capped at 12,000 characters; past that, a count of the rest and how to search for them |
 | Always | How to search and how to propose | A few lines |
-| On demand | Search (`grimoire_search` in Pi, `sitra grimoire search` in the shell) | One line per match |
+| On demand | Search (`grimoire_search` in Pi, `sitra grimoire search` in the shell): global plus the project's entries; `allProjects: true` searches every project, each line labelled with its scope | One line per match |
+
+A part over its cap ends with "cut off here, read the rest in `<path>`", and the status line warns per part (`global
+root over its limit`, `App root over its limit`). The section heading counts both kinds (`3 global + 2 for App`), or
+says "no project here, so global only" and why. Links between entries never load their target: a global entry linking
+to an entry of another project shows only the path, and `linkReport` lists such links, and missing targets, without
+loading anything.
 
 The agent reads an entry in full when the work touches it. Nothing is added per message.
 
@@ -109,9 +145,13 @@ cached prompt prefix survives from turn to turn.
 ## The approval loop
 
 1. An agent learns something future agents need and calls `grimoire_propose` (kind, title, summary, tags, links, body,
-   evidence). It lands in `proposals/`.
-2. The person reviews with `/grimoire`: Accept, Reject, Skip, "Accept this and all the rest", Stop.
-   Accepted entries move to `kinds/<kind>s/`; rejected ones to `rejected/`.
+   evidence). It lands in `proposals/`, scoped to the session's project unless the agent passes `scope: "global"`. In a
+   session with no project it is global, and the tool's answer says so. When projects exist but none applies (here, or
+   in a LOOPS worktree), the proposal records why in `scopeNote`, and the review shows it next to `Scope: Global`.
+2. The person reviews with `/grimoire`, which shows each proposal's scope (`Scope: Global` or `Scope: App`): Accept
+   (with the scope shown), "Accept as global", "Accept for <current project>", Reject, Skip, "Accept this and all the
+   rest" (each keeps its own scope), Stop. Accepted entries move to `kinds/<kind>s/`; rejected ones to `rejected/`.
+   A rejection counts in every project, so it isn't proposed again from another.
 3. `/grimoire-reflect` asks the agent to look back over the session and propose at most three entries. Lessons follow
    the shape: what failed, the verified cause, the fix, whether it held, what would catch it next time.
 4. `/grimoire-ui` opens a local browser page (`127.0.0.1` on a random port, with a one-time URL token and a `Host`
@@ -156,7 +196,8 @@ their own `grimoire_propose` calls.
 ## Moving off `/kb`
 
 - `sitra grimoire import [repo]` copies a repo's `.pi/knowledge` entries (approved and proposed) into
-  `proposals/`, skipping any whose title already exists anywhere in Grimoire. It never deletes the old folder.
+  `proposals/`, skipping any whose title already exists anywhere in Grimoire, in any project. It never deletes the old
+  folder.
 - When a session starts in a repo that still has a `.pi/knowledge` folder that hasn't been imported, the status line
   says so.
 - `/kb` and `/kb-reflect` still work for now and point to `/grimoire`.

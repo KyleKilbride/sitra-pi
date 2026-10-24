@@ -173,22 +173,28 @@ context with a structured summary (`/handover` on demand).
 An empty `skills` list means Pi's normal skill discovery. `handoverTokens` is optional; when set, it must be a
 positive integer no larger than the active model's context window.
 
-## Grimoire: one approved brain for every agent
+## Grimoire: one approved store for every agent
 
 Agents forget between sessions, and agents that write their own memory confidently record wrong things. sitra
-splits it: agents **propose**, you **approve**. Grimoire is one folder of plain markdown, yours across every repo and
-every tool.
+splits it: agents **propose**, you **approve**. Grimoire is one store of plain markdown, yours across every repo and
+every tool. Entries are global by default; one that only holds in one repo can be scoped to that project.
 
     ~/.sitra/profile/grimoire/
-      root/        always loaded: who you are, what you build, the decisions that shape it, how you work
-      kinds/       approved entries: warnings/ decisions/ lessons/ facts/ setups/
-      proposals/   waiting for your review
-      rejected/    kept, so you can see what was turned down
+      root/          always loaded: who you are, what you build, the decisions that shape it, how you work
+      kinds/         approved entries: warnings/ decisions/ lessons/ facts/ setups/
+      proposals/     waiting for your review
+      rejected/      kept, so you can see what was turned down
+      projects.json  your projects and the git remotes that identify them
 
 - Every agent, teammates included, starts with the root and a one-line catalogue of approved entries (kind, title,
   summary, path), and opens the entries that apply.
+- **Projects:** an entry or root file with `scope: ["app"]` reaches only sessions in app; one without `scope` reaches
+  every session. A Pi session's project comes from its repo's git remotes (attached to projects in `projects.json`;
+  `origin` wins when remotes disagree), is fixed when the session starts (a `cd` into another repo doesn't switch it),
+  and shows in the status line, with why when there is none. No `projects.json` means nothing is scoped.
 - Agents propose with `grimoire_propose` (only ever into `proposals/`) and look things up with `grimoire_search`.
-- You review with `/grimoire`, one at a time: Accept, Reject, Skip, "Accept this and all the rest", or Stop.
+- You review with `/grimoire`, one at a time, with each proposal's scope shown: Accept, "Accept as global", "Accept for
+  <this project>", Reject, Skip, "Accept this and all the rest", or Stop. Proposals default to the session's project.
 - `/grimoire-ui` opens Grimoire in your default browser (on a local `127.0.0.1` server with a random token) so you can
   see the exact prompt text agents get, check which hooks and extensions are active, edit the root or any rule by hand,
   add/move/delete/restore entries, and inspect the day's log of pauses, corrections and repeats.
@@ -201,7 +207,8 @@ every tool.
   `sitra grimoire uninstall` takes it out again.
 - **Coming from `/kb`:** `sitra grimoire import` copies a repo's old `.pi/knowledge` into `proposals/`, skipping what
   Grimoire already has. `/kb` still works and opens `/grimoire`.
-- The status line shows `grimoire 34 · 3 to review (/grimoire)`. `sitra grimoire status` shows the sizes.
+- The status line shows `grimoire 18 global + 16 App · 3 to review (/grimoire)`, or `grimoire 18 global · no project
+  (remote not attached: github.com/example/app)`. `sitra grimoire status` shows the sizes.
 
 Details, sizes and the reasons behind them: [docs/GRIMOIRE.md](docs/GRIMOIRE.md).
 
