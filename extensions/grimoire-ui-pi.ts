@@ -7,6 +7,7 @@ import { grimoireDir } from "./grimoire.ts";
 import { type GrimoireServer, startGrimoireServer } from "./grimoire-ui.ts";
 
 export interface Ctx {
+	cwd?: string;
 	hasUI?: boolean;
 	ui?: { notify(message: string, type?: "info" | "warning" | "error"): void };
 }

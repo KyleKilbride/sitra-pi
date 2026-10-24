@@ -25,6 +25,7 @@ import {
 	KINDS,
 	type Kind,
 	LIMITS,
+	type LinkProblem,
 	listEntries,
 	listProposals,
 	listRejected,
@@ -35,7 +36,7 @@ import {
 	unreadableProposals,
 } from "./grimoire.ts";
 import { type Call, type Moment, pauseOutcomes, repeats, tally } from "./learn.ts";
-import { refreshClaudeRoot } from "./project.ts";
+import { type Project, type Remote, refreshClaudeRoot, type SessionProject } from "./project.ts";
 import { actionFromHook, actionFromPi, parseTrigger, triggerMatches } from "./triggers.ts";
 
 export interface BrokenLink {
@@ -456,7 +457,34 @@ function installedExtensions(): string[] {
 	}
 }
 
-export function snapshot(dir: string, env: Record<string, string | undefined> = process.env) {
+export interface RootPart {
+	files: string[];
+	chars: number;
+	cut: number;
+	limit: number;
+	truncated: boolean;
+}
+
+export interface CatalogueView {
+	total: number;
+	shown: number;
+	titlesOnly: boolean;
+	overflow?: { count: number; file: string };
+	limit?: number;
+	note: string;
+}
+
+export type ProjectView = SessionProject & { text: string };
+
+const STUB_PART: RootPart = { files: [], chars: 0, cut: 0, limit: 0, truncated: false };
+const STUB_CATALOGUE: CatalogueView = { total: 0, shown: 0, titlesOnly: false, note: "" };
+
+export function snapshot(
+	dir: string,
+	env: Record<string, string | undefined> = process.env,
+	_project?: SessionProject,
+	_session: { cwd?: string; project?: SessionProject } = {},
+) {
 	const home = env.HOME?.trim() || homedir();
 	const sitra = sitraHome(env, home);
 	const config = readConfig(sitra);
@@ -501,10 +529,25 @@ export function snapshot(dir: string, env: Record<string, string | undefined> = 
 		dir,
 		who,
 		limits: LIMITS,
+		projects: { file: "", inUse: false, list: [] as Project[], error: undefined as string | undefined },
+		session: {
+			cwd: undefined as string | undefined,
+			project: undefined as ProjectView | undefined,
+			remotes: [] as Remote[],
+			remotesWhy: undefined as string | undefined,
+		},
+		preview: { state: "off", text: "" } as ProjectView,
+		links: [] as LinkProblem[],
 		whatAgentsGet: {
 			everyPrompt: {
 				text: leadPrompt,
 				chars: leadPrompt.length,
+			},
+			pi: {
+				globalRoot: STUB_PART,
+				projectRoot: undefined as RootPart | undefined,
+				catalogue: STUB_CATALOGUE,
+				rootLimit: LIMITS.rootChars,
 			},
 			root: {
 				text: root.text,
@@ -525,12 +568,21 @@ export function snapshot(dir: string, env: Record<string, string | undefined> = 
 				hookText: claudeHookContext,
 				hookChars: claudeHookContext.length,
 				hookLimit: CLAUDE_CONTEXT_MAX,
+				importText: "",
+				importChars: 0,
+				importLimit: 0,
+				importCatalogue: undefined as CatalogueView | undefined,
+				projectRoot: undefined as RootPart | undefined,
+				catalogue: undefined as CatalogueView | undefined,
 			},
 			codex: {
 				rootText: root.text,
 				hookText: codexHookContext,
 				hookChars: codexHookContext.length,
 				hookLimit: CODEX_CONTEXT_CHARS,
+				globalRoot: STUB_PART,
+				projectRoot: undefined as RootPart | undefined,
+				catalogue: STUB_CATALOGUE,
 			},
 			hooks: {
 				claudeCode: {
@@ -1608,6 +1660,8 @@ export async function startGrimoireServer(options: {
 	env?: Record<string, string | undefined>;
 	token?: string;
 	idleMs?: number;
+	cwd?: string;
+	project?: SessionProject;
 }): Promise<GrimoireServer> {
 	const dir = options.dir;
 	const env = options.env ?? process.env;
