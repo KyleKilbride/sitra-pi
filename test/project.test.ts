@@ -24,7 +24,20 @@ function tempDir(prefix: string): string {
 function makeRepo(remotes: Record<string, string> = {}, dir = tempDir("sitra-project-")): string {
 	mkdirSync(dir, { recursive: true });
 	git(dir, "init", "-q");
-	git(dir, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init");
+	git(
+		dir,
+		"-c",
+		"user.email=t@t",
+		"-c",
+		"user.name=t",
+		"-c",
+		"commit.gpgsign=false",
+		"commit",
+		"-q",
+		"--allow-empty",
+		"-m",
+		"init",
+	);
 	for (const [name, url] of Object.entries(remotes)) git(dir, "remote", "add", name, url);
 	return dir;
 }
