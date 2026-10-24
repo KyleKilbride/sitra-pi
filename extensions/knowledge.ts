@@ -9,6 +9,8 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { Type } from "typebox";
 import {
 	decide,
+	type Entry,
+	entriesFor,
 	grimoireDir,
 	grimoireSection,
 	type grimoireStoreStatus,
@@ -19,8 +21,9 @@ import {
 	listEntriesWithStatus,
 	listProposals,
 	loadRootWithStatus,
+	type SectionScope,
 	searchEntries,
-	unreadableProposals,
+	unreadableEntries,
 	writeClaudeRoot,
 	writeProposal,
 } from "./grimoire.ts";
@@ -37,7 +40,7 @@ import {
 import type { AdvisorRole, LoopState } from "./loop.ts";
 import { advisorTask, roleForAgent } from "./loop.ts";
 import { loopStatePath, readLoopStateFile } from "./loop-state.ts";
-import type { projectFor } from "./project.ts";
+import { type ProjectRegistry, projectFor, type SessionProject, sessionProject } from "./project.ts";
 import { mainCheckout, readLastLines } from "./sessions.ts";
 import { childAgent, objectRecord, subagentChildren } from "./subagent-tools.ts";
 import { actionFromPi, entriesForAction, parseTrigger, pauseMessage } from "./triggers.ts";
@@ -183,9 +186,36 @@ export interface KnowledgeDeps {
 	projectFor?: typeof projectFor;
 }
 
-export default function sitraKnowledge(pi: Pi, _deps: KnowledgeDeps = {}): void {
+export default function sitraKnowledge(pi: Pi, deps: KnowledgeDeps = {}): void {
 	const dir = () => grimoireDir(process.env);
 	const who = () => process.env.SITRA_USER_NAME?.trim() || "the person you work with";
+
+	/**
+	 * The session's project, found once from the folder it started in: a later `cd` or a call into another repo doesn't
+	 * change it. A registry or remote that can't be read is shown to the person, and the session uses global entries.
+	 */
+	let session: { project: SessionProject; registry: ProjectRegistry } | undefined;
+	const startProject = (ctx: Ctx) => {
+		session = sessionProject(ctx?.cwd ?? process.cwd(), dir(), deps.projectFor ?? projectFor);
+		const p = session.project;
+		if (p.state === "global" && p.error)
+			ctx?.ui?.notify(
+				`Grimoire can't tell this session's project: ${p.why}. This session loads global entries only.`,
+				"warning",
+			);
+		return session;
+	};
+	const current = (ctx: Ctx) => session ?? startProject(ctx);
+	const projectId = (ctx: Ctx) => {
+		const p = current(ctx).project;
+		return p.state === "matched" ? p.project.id : undefined;
+	};
+	const sectionScope = (p: SessionProject): SectionScope | undefined =>
+		p.state === "matched"
+			? { project: { id: p.project.id, label: p.project.label } }
+			: p.state === "global"
+				? { why: p.why }
+				: undefined;
 
 	/** A repo whose old `/kb` folder hasn't been moved into Grimoire yet. */
 	const oldKnowledgeBase = (cwd: string): string | undefined => {
@@ -210,7 +240,8 @@ export default function sitraKnowledge(pi: Pi, _deps: KnowledgeDeps = {}): void 
 
 	const status = (ctx: Ctx) => {
 		const g = dir();
-		const root = loadRootWithStatus(g);
+		const p = current(ctx).project;
+		const root = loadRootWithStatus(g, projectId(ctx));
 		if (root.status.state === "unreadable") {
 			ctx.ui.setStatus("sitra-grimoire", `grimoire unreadable: ${root.status.reason}`);
 			warnUnreadable(ctx, root.status);
@@ -222,11 +253,33 @@ export default function sitraKnowledge(pi: Pi, _deps: KnowledgeDeps = {}): void 
 			warnUnreadable(ctx, loaded.status);
 			return;
 		}
-		const approved = loaded.entries.length;
+		const visible = entriesFor(loaded.entries, projectId(ctx));
+		const global = visible.filter((e) => !e.scope).length;
+		const parts: string[] = [];
+		if (p.state === "off") {
+			parts.push(`grimoire ${visible.length}`);
+			const hidden = loaded.entries.length - visible.length;
+			if (hidden) parts.push(`${hidden} scoped entries hidden: no projects in projects.json`);
+		} else if (p.state === "matched") {
+			parts.push(`grimoire ${global} global + ${visible.length - global} ${p.project.label}`);
+			for (const w of p.warnings) parts.push(`warning: ${w}`);
+		} else {
+			parts.push(`grimoire ${global} global`, `no project (${p.why})`);
+		}
 		const waiting = listProposals(g).length;
-		const parts = [`grimoire ${approved}`];
 		if (waiting) parts.push(`${waiting} to review (/grimoire)`);
-		if (root.root.truncated) parts.push("root over its limit");
+		if (p.state === "off" || p.state === "global") {
+			if (root.root.truncated) parts.push("root over its limit");
+		} else {
+			if (root.root.global.truncated) parts.push("global root over its limit");
+			if (root.root.project.truncated) parts.push(`${p.project.label} root over its limit`);
+		}
+		const broken =
+			unreadableEntries(
+				g,
+				KINDS.map((k) => `kinds/${k}s`),
+			).length + root.root.problems.length;
+		if (broken) parts.push(`${broken} can't be read (/grimoire)`);
 		if (oldKnowledgeBase(ctx.cwd)) parts.push("old /kb here: sitra grimoire import");
 		const t = tally(g);
 		if (t.caught || t.learned || t.repeats) {
@@ -274,7 +327,7 @@ export default function sitraKnowledge(pi: Pi, _deps: KnowledgeDeps = {}): void 
 			) {
 				looked = true;
 			}
-			const entries = loaded.entries;
+			const entries = entriesFor(loaded.entries, projectId(ctx));
 			const firstChange = ["edit", "write", "subagent"].includes(event.toolName);
 			const identity = callKey(call);
 			const alreadyPaused = pausedActions.has(identity);
@@ -347,6 +400,7 @@ export default function sitraKnowledge(pi: Pi, _deps: KnowledgeDeps = {}): void 
 		lookAsked = false;
 		shown = new Set();
 		pausedActions = new Set();
+		startProject(ctx);
 		// Claude Code imports the root from this file once `sitra grimoire install` has run; keep it current.
 		const g = dir();
 		if (existsSync(join(g, ".sitra", "root.md"))) {
@@ -399,7 +453,8 @@ export default function sitraKnowledge(pi: Pi, _deps: KnowledgeDeps = {}): void 
 		}
 		try {
 			const g = dir();
-			const root = loadRootWithStatus(g);
+			const id = projectId(ctx);
+			const root = loadRootWithStatus(g, id);
 			if (root.status.state === "unreadable") {
 				warnUnreadable(ctx, root.status);
 				event.systemPromptOptions.sections.grimoire = unavailableSection(root.status);
@@ -411,7 +466,10 @@ export default function sitraKnowledge(pi: Pi, _deps: KnowledgeDeps = {}): void 
 				event.systemPromptOptions.sections.grimoire = unavailableSection(loaded.status);
 				return;
 			}
-			event.systemPromptOptions.sections.grimoire = grimoireSection(g, root.root, loaded.entries, { who: who() });
+			event.systemPromptOptions.sections.grimoire = grimoireSection(g, root.root, entriesFor(loaded.entries, id), {
+				who: who(),
+				scope: sectionScope(current(ctx).project),
+			});
 		} catch (error) {
 			const s = { state: "unreadable" as const, dir: dir(), reason: String(error) };
 			warnUnreadable(ctx, s);
@@ -446,9 +504,15 @@ export default function sitraKnowledge(pi: Pi, _deps: KnowledgeDeps = {}): void 
 						'Actions that should bring this rule up, if the mistake happens at one: "command:<leading words of a shell command>", "path:<glob of files touched>" or "tool:<tool name>"; join conditions with " + ".',
 				}),
 			),
+			scope: Type.Optional(
+				Type.Union([Type.Literal("project"), Type.Literal("global")], {
+					description:
+						'"project" (the default): only for this session\'s project. "global": it applies in every project.',
+				}),
+			),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const p = params as {
+			const { scope: wanted, ...p } = params as {
 				kind: Kind;
 				title: string;
 				summary: string;
@@ -457,23 +521,35 @@ export default function sitraKnowledge(pi: Pi, _deps: KnowledgeDeps = {}): void 
 				tags?: string[];
 				links?: string[];
 				when?: string[];
+				scope?: "project" | "global";
 			};
 			const when = p.when?.filter((w) => parseTrigger(w));
+			const here = current(ctx).project;
+			const scope = wanted !== "global" && here.state === "matched" ? [here.project.id] : undefined;
 			const file = writeProposal(dir(), {
 				...p,
 				...(when?.length ? { when } : { when: undefined }),
+				...(scope ? { scope } : {}),
 				proposedBy: "agent",
 				date: new Date().toISOString(),
 			});
 			status(ctx);
+			const where =
+				here.state === "matched"
+					? scope
+						? ` for ${here.project.label} only`
+						: " as global"
+					: here.state === "global"
+						? `. No project here (${here.why}), so it was proposed as global`
+						: "";
 			return {
 				content: [
 					{
 						type: "text",
-						text: `Proposed (${file}). ${who()} will review it with /grimoire; don't treat it as knowledge until then.`,
+						text: `Proposed (${file})${where}. ${who()} will review it with /grimoire; don't treat it as knowledge until then.`,
 					},
 				],
-				details: { file },
+				details: { file, ...(scope ? { scope } : {}) },
 			};
 		},
 	});
@@ -482,18 +558,24 @@ export default function sitraKnowledge(pi: Pi, _deps: KnowledgeDeps = {}): void 
 		name: "grimoire_search",
 		label: "Search Grimoire",
 		description:
-			"Search Grimoire's approved entries by words. Returns one line per match (kind, title, summary, path); read the path for the full entry. Set proposals to true to also search unapproved proposals, which are leads, not rules.",
+			"Search Grimoire's approved entries by words: global ones and this session's project's. Returns one line per match (kind, title, summary, path); read the path for the full entry. Set proposals to true to also search unapproved proposals, which are leads, not rules. Set allProjects to true to search every project's entries, each labelled with its scope.",
 		promptSnippet: "grimoire_search: find approved Grimoire entries about a topic",
 		parameters: Type.Object({
 			query: Type.String({ description: "Words for what you need, e.g. 'feature flags evals production'." }),
 			proposals: Type.Optional(Type.Boolean({ description: "Also search unapproved proposals." })),
+			allProjects: Type.Optional(
+				Type.Boolean({ description: "Search every project's entries, not only global ones and this project's." }),
+			),
 		}),
-		async execute(_id, params) {
-			const p = params as { query: string; proposals?: boolean };
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const p = params as { query: string; proposals?: boolean; allProjects?: boolean };
 			const g = dir();
-			const approved = searchEntries(listEntries(g), p.query);
+			const id = projectId(ctx);
+			const pick = (entries: Entry[]) => (p.allProjects ? entries : entriesFor(entries, id));
+			const label = p.allProjects ? (e: Entry) => (e.scope ? `scope: ${e.scope.join(", ")}` : "global") : undefined;
+			const approved = searchEntries(pick(listEntries(g)), p.query, 8, label);
 			const text = p.proposals
-				? `${approved}\n\nUnapproved proposals (leads, not rules):\n${searchEntries(listProposals(g), p.query)}`
+				? `${approved}\n\nUnapproved proposals (leads, not rules):\n${searchEntries(pick(listProposals(g)), p.query, 8, label)}`
 				: approved;
 			return { content: [{ type: "text", text: `Paths are in ${g}.\n${text}` }], details: { query: p.query } };
 		},
@@ -502,10 +584,17 @@ export default function sitraKnowledge(pi: Pi, _deps: KnowledgeDeps = {}): void 
 	const review = async (ctx: Ctx) => {
 		const g = dir();
 		const proposals = listProposals(g);
-		const unreadable = unreadableProposals(g);
+		const { project: here, registry } = current(ctx);
+		const unreadable = [...unreadableEntries(g), ...loadRootWithStatus(g, projectId(ctx)).root.problems];
 		if (unreadable.length > 0) {
-			ctx.ui.notify(`${unreadable.length} proposal(s) can't be read as entries: ${unreadable.join(", ")}`, "warning");
+			ctx.ui.notify(
+				`${unreadable.length} file(s) can't be read as Grimoire entries or root files: ${unreadable.map((u) => `${u.file} (${u.problem})`).join(", ")}`,
+				"warning",
+			);
 		}
+		const labelOf = (id: string) => registry.projects.find((p) => p.id === id)?.label ?? `${id} (not in projects.json)`;
+		const forHere = here.state === "matched" ? here.project : undefined;
+		const acceptHere = forHere ? `Accept for ${forHere.label}` : undefined;
 		const waitingRepeats = repeats(g);
 		if (proposals.length === 0 && waitingRepeats.length === 0) {
 			ctx.ui.notify(`No proposals. ${listEntries(g).length} approved entries in ${g}.`, "info");
@@ -515,6 +604,9 @@ export default function sitraKnowledge(pi: Pi, _deps: KnowledgeDeps = {}): void 
 		for (const [i, p] of proposals.entries()) {
 			const lines = [
 				`(${i + 1}/${proposals.length}) [${p.kind}] ${p.title}`,
+				...(here.state !== "off" || p.scope
+					? ["", `Scope: ${p.scope ? p.scope.map(labelOf).join(", ") : "Global"}`]
+					: []),
 				...(p.summary ? ["", p.summary] : []),
 				"",
 				p.body,
@@ -522,8 +614,11 @@ export default function sitraKnowledge(pi: Pi, _deps: KnowledgeDeps = {}): void 
 				...(p.when ? ["", `Pauses the agent when: ${p.when.join("; ")}`] : []),
 				...(p.evidence ? ["", `Evidence: ${p.evidence}`] : []),
 			];
+			const onlyHere = forHere && p.scope?.length === 1 && p.scope[0] === forHere.id;
 			const choice = await ctx.ui.select(lines.join("\n"), [
 				"Accept",
+				...(p.scope ? ["Accept as global"] : []),
+				...(acceptHere && !onlyHere ? [acceptHere] : []),
 				"Reject",
 				"Skip",
 				"Accept this and all the rest",
@@ -534,6 +629,8 @@ export default function sitraKnowledge(pi: Pi, _deps: KnowledgeDeps = {}): void 
 				break;
 			}
 			if (choice === "Accept") decide(g, p.file, "accept");
+			else if (choice === "Accept as global") decide(g, p.file, "accept", { scope: null });
+			else if (forHere && choice === acceptHere) decide(g, p.file, "accept", { scope: [forHere.id] });
 			else if (choice === "Reject") decide(g, p.file, "reject");
 			else if (choice !== "Skip") {
 				stopped = true;

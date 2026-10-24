@@ -6,6 +6,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
+import { isProjectId } from "./grimoire.ts";
 import { gitCheckout } from "./sessions.ts";
 
 export interface Project {
@@ -32,7 +33,6 @@ export type ProjectMatch =
 export const PROJECTS_FILE = "projects.json";
 
 const HOSTED_SCHEMES = new Set(["https", "http", "ssh", "git"]);
-const SLUG = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 /**
  * The key a remote URL is matched by: `host/owner/repo` (lowercase, without userinfo, port or a trailing `.git`) for
@@ -148,8 +148,10 @@ export function validateProjects(registry: unknown): string[] {
 			continue;
 		}
 		const { id, label, remotes, paths } = entry as Record<string, unknown>;
-		if (typeof id !== "string" || !SLUG.test(id)) {
-			problems.push(`${where}: id ${JSON.stringify(id)} isn't a lowercase slug (a-z, 0-9 and single dashes)`);
+		if (!isProjectId(id)) {
+			problems.push(
+				`${where}: id ${JSON.stringify(id)} isn't a lowercase slug (a-z, 0-9 and single dashes) other than "global"`,
+			);
 			continue;
 		}
 		ids.set(id, (ids.get(id) ?? 0) + 1);
@@ -206,19 +208,54 @@ export function writeProjects(dir: string, registry: ProjectRegistry): void {
 
 /**
  * The project a session works in, decided once when it starts. `off`: no projects are registered, so nothing is
- * scoped. `global`: projects exist but none applies here (or the registry or a remote can't be read), with why.
+ * scoped and everything works as before projects. `global`: projects exist but none applies here, or the registry or
+ * a remote can't be read (`error`), with why, so the person can see it.
  */
 export type SessionProject =
 	| { state: "off" }
 	| { state: "matched"; project: Project; via: string; warnings: string[] }
 	| { state: "global"; why: string; error?: boolean };
 
+/** Reads the registry and finds the folder's project, turning every failure into a `global` answer that says why. */
 export function sessionProject(
-	_cwd: string,
-	_dir: string,
-	_resolve: typeof projectFor = projectFor,
+	cwd: string,
+	dir: string,
+	resolve: typeof projectFor = projectFor,
 ): { project: SessionProject; registry: ProjectRegistry } {
-	return { project: { state: "off" }, registry: { projects: [] } };
+	let registry: ProjectRegistry;
+	try {
+		registry = readProjects(dir);
+	} catch (error) {
+		return { project: { state: "global", why: message(error), error: true }, registry: { projects: [] } };
+	}
+	if (registry.projects.length === 0) return { project: { state: "off" }, registry };
+	let match: ProjectMatch;
+	try {
+		match = resolve(cwd, registry);
+	} catch (error) {
+		return { project: { state: "global", why: message(error), error: true }, registry };
+	}
+	if (match.state === "matched")
+		return {
+			project: { state: "matched", project: match.project, via: match.via, warnings: match.warnings },
+			registry,
+		};
+	if (match.state === "ambiguous") {
+		const which = match.candidates.map((c) => `${c.remote.name} → ${c.project.label}`).join(", ");
+		return { project: { state: "global", why: `remotes point at different projects: ${which}` }, registry };
+	}
+	const keys = match.remotes.map((r) => r.key);
+	const why =
+		match.reason === "no-git"
+			? "not in a git repository"
+			: match.reason === "no-remote"
+				? "the git repository has no remote"
+				: `${keys.length === 1 ? "remote" : "remotes"} not attached: ${keys.join(", ")}`;
+	return { project: { state: "global", why }, registry };
+}
+
+function message(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 
 /**
