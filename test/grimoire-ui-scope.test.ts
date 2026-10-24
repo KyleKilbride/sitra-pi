@@ -231,7 +231,7 @@ describe("/grimoire-ui with projects: previews for a chosen project", () => {
 		for (let i = 0; i < 60; i++) {
 			put(dir, `kinds/lessons/app-${String(i).padStart(2, "0")}.md`, {
 				kind: "lesson",
-				title: `App lesson number ${i} about the example deploy pipeline and its checks`,
+				title: `App lesson number ${i} about the example deploy pipeline, its staging checks, its rollback plan and who signs off on it`,
 				summary: "A long summary sentence that takes room in the hook text and pushes the catalogue over budget.",
 				body: "b",
 				date: "2026-10-10",

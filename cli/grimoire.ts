@@ -24,6 +24,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
+	type CatalogueFit,
 	catalogueOverflowFile,
 	type Entry,
 	grimoireDir,
@@ -34,10 +35,13 @@ import {
 	listEntries,
 	listProposals,
 	loadRoot,
+	type ProjectCatalogue,
 	projectCatalogue,
+	type Root,
 	type RootText,
 	scopeLabel,
 	searchEntries,
+	sectionCatalogue,
 	setScope,
 } from "../extensions/grimoire.ts";
 import {
@@ -57,6 +61,7 @@ import {
 	PROJECTS_FILE,
 	type Project,
 	type ProjectRegistry,
+	pathWarning,
 	projectFor,
 	projectIdOf,
 	projectsOn,
@@ -70,7 +75,7 @@ import {
 	writeProjects,
 } from "../extensions/project.ts";
 import { shellQuote } from "../extensions/runs.ts";
-import { gitCheckout, mainCheckout, readLastLines } from "../extensions/sessions.ts";
+import { mainCheckout, readLastLines } from "../extensions/sessions.ts";
 import {
 	actionFromHook,
 	entriesForAction,
@@ -237,47 +242,64 @@ export function hookOutput(
 	who?: string,
 	project: SessionProject = { state: "off" },
 ): string {
+	const { text } = hookContext(tool, dir, who, project);
+	return JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: text } });
+}
+
+/**
+ * `hookOutput`'s text, with the root it put in (none for Claude Code without projects: the import carries it) and
+ * the catalogue it listed (a `projectCatalogue` for Claude Code's project part), so `/grimoire-ui` can show both.
+ */
+export function hookContext(
+	tool: "claude" | "codex",
+	dir: string,
+	who?: string,
+	project: SessionProject = { state: "off" },
+): { text: string; root?: Root; catalogue?: CatalogueFit | ProjectCatalogue } {
 	const all = existsSync(dir) ? listEntries(dir) : [];
 	const id = projectIdOf(project);
 	const entries = visibleEntries(all, id, project.state !== "off");
-	let text: string;
 	const base = { shell: true, ...(who ? { who } : {}), scope: sectionScopeOf(project) };
 	if (tool === "codex") {
 		const frame = grimoireSection(dir, undefined, entries, base).length + 300;
-		text = grimoireSection(
-			dir,
-			loadRoot(dir, id, Math.min(LIMITS.rootChars, CODEX_CONTEXT_CHARS - frame)),
-			entries,
-			base,
-		);
-	} else if (project.state === "off") {
-		const frame = grimoireSection(dir, undefined, [], base).length + 200;
-		text = grimoireSection(dir, undefined, entries, {
-			...base,
-			catalogueChars: Math.max(500, CLAUDE_CONTEXT_MAX - frame),
-		});
-	} else {
-		const own = entries.filter((e) => e.scope);
-		const loaded = id === undefined ? undefined : loadRoot(dir, id);
-		const empty = { text: "", files: [], chars: 0, truncated: false };
-		const root = loaded && { ...loaded, global: empty, text: loaded.project.text };
-		const options = { ...base, globalIn: join(dir, ".sitra", "root.md") };
-		const frame = grimoireSection(dir, root, own, { ...options, catalogueText: "" }).length + 100;
-		const listed =
-			project.state === "matched" && own.length > 0
-				? projectCatalogue(
-						own,
-						Math.max(500, CLAUDE_CONTEXT_MAX - frame),
-						catalogueOverflowFile(dir, project.project.id),
-						{
-							label: project.project.label,
-							search: shellSearch(dir, ` --project ${project.project.id}`),
-						},
-					)
-				: undefined;
-		text = grimoireSection(dir, root, own, { ...options, catalogueText: listed?.text ?? "" });
+		const root = loadRoot(dir, id, Math.min(LIMITS.rootChars, CODEX_CONTEXT_CHARS - frame));
+		return {
+			text: grimoireSection(dir, root, entries, base),
+			root,
+			catalogue: sectionCatalogue(dir, entries, base),
+		};
 	}
-	return JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: text } });
+	if (project.state === "off") {
+		const frame = grimoireSection(dir, undefined, [], base).length + 200;
+		const options = { ...base, catalogueChars: Math.max(500, CLAUDE_CONTEXT_MAX - frame) };
+		return {
+			text: grimoireSection(dir, undefined, entries, options),
+			catalogue: sectionCatalogue(dir, entries, options),
+		};
+	}
+	const own = entries.filter((e) => e.scope);
+	const loaded = id === undefined ? undefined : loadRoot(dir, id);
+	const empty = { text: "", files: [], chars: 0, cut: 0, truncated: false };
+	const root = loaded && { ...loaded, global: empty, text: loaded.project.text };
+	const options = { ...base, globalIn: join(dir, ".sitra", "root.md") };
+	const frame = grimoireSection(dir, root, own, { ...options, catalogueText: "" }).length + 100;
+	const listed =
+		project.state === "matched" && own.length > 0
+			? projectCatalogue(
+					own,
+					Math.max(500, CLAUDE_CONTEXT_MAX - frame),
+					catalogueOverflowFile(dir, project.project.id),
+					{
+						label: project.project.label,
+						search: shellSearch(dir, ` --project ${project.project.id}`),
+					},
+				)
+			: undefined;
+	return {
+		text: grimoireSection(dir, root, own, { ...options, catalogueText: listed?.text ?? "" }),
+		...(root ? { root } : {}),
+		...(listed ? { catalogue: listed } : {}),
+	};
 }
 
 interface HookHandler {
@@ -1070,11 +1092,8 @@ function projectsCommand(dir: string, args: readonly string[], deps: CliDeps): n
 		`Saved project ${id} (${project.label}) in ${join(dir, PROJECTS_FILE)}: remotes ${project.remotes.join(", ") || "none"}; paths ${project.paths.join(", ") || "none"}.`,
 	);
 	for (const folder of folders) {
-		const checkout = gitCheckout(folder);
-		if (checkout !== undefined && realpathSync(checkout) !== folder)
-			deps.log(
-				`Warning: ${folder} is inside the git checkout ${checkout}; a path matches only a checkout's main folder, so sessions there won't match it. Attach the checkout's remote, or add ${checkout}.`,
-			);
+		const warning = pathWarning(folder);
+		if (warning) deps.log(`Warning: ${warning}`);
 	}
 	deps.log("Sessions started from now on use it; sessions already running keep the project they started with.");
 	if (registry.projects.length === 0)

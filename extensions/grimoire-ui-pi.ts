@@ -5,6 +5,7 @@
 import { spawn } from "node:child_process";
 import { grimoireDir } from "./grimoire.ts";
 import { type GrimoireServer, startGrimoireServer } from "./grimoire-ui.ts";
+import { type SessionProject, sessionProject } from "./project.ts";
 
 export interface Ctx {
 	cwd?: string;
@@ -49,6 +50,18 @@ export default function sitraGrimoireUi(pi: Pi, options: { open?: (url: string) 
 		}
 	};
 
+	/** The session's folder and project, found once when it starts, like knowledge.ts does; a later `cd` doesn't move it. */
+	let started: { cwd: string; project: SessionProject } | undefined;
+	const start = (ctx: Ctx) => {
+		if (!ctx?.cwd) return undefined;
+		started = { cwd: ctx.cwd, project: sessionProject(ctx.cwd, grimoireDir(process.env)).project };
+		return started;
+	};
+
+	pi.on("session_start", (_event, ctx) => {
+		start(ctx);
+	});
+
 	pi.on("session_shutdown", async () => {
 		await stop();
 	});
@@ -58,7 +71,8 @@ export default function sitraGrimoireUi(pi: Pi, options: { open?: (url: string) 
 		handler: async (_args, ctx) => {
 			await stop();
 			const dir = grimoireDir(process.env);
-			active = await startGrimoireServer({ dir, env: process.env, idleMs: options.idleMs });
+			const session = started ?? start(ctx);
+			active = await startGrimoireServer({ dir, env: process.env, idleMs: options.idleMs, ...session });
 			open(active.url);
 			ctx.ui?.notify(`Grimoire UI: ${active.url}`, "info");
 		},

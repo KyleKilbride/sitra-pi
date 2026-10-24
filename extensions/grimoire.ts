@@ -42,6 +42,8 @@ export interface RootText {
 	files: string[];
 	/** Size of the whole root before any cap. */
 	chars: number;
+	/** Characters of it left out by the cap (0 when it fits). */
+	cut: number;
 	truncated: boolean;
 }
 
@@ -482,17 +484,19 @@ function rootFiles(dir: string): { file: string; raw: string; body: string; scop
 function capRoot(files: { file: string; body: string }[], maxChars: number, label: string, rootDir: string): RootText {
 	const full = files.map((f) => f.body).join("\n\n");
 	const rel = files.map((f) => f.file);
-	if (full.length <= Math.max(0, maxChars)) return { text: full, files: rel, chars: full.length, truncated: false };
+	if (full.length <= Math.max(0, maxChars))
+		return { text: full, files: rel, chars: full.length, cut: 0, truncated: false };
 	const notice = (shown: number) =>
 		`\n\n[The ${label} is cut off here, at ${shown} of ${full.length} characters. Read the rest in ${rootDir}.]`;
-	if (maxChars <= 0) return { text: "", files: rel, chars: full.length, truncated: true };
+	if (maxChars <= 0) return { text: "", files: rel, chars: full.length, cut: full.length, truncated: true };
 	const budget = Math.max(0, maxChars - notice(full.length).length);
-	const cut = full.lastIndexOf("\n", budget);
-	const kept = full.slice(0, cut > budget / 2 ? cut : budget).trimEnd();
+	const at = full.lastIndexOf("\n", budget);
+	const kept = full.slice(0, at > budget / 2 ? at : budget).trimEnd();
 	return {
 		text: `${kept}${notice(kept.length)}`.slice(-maxChars),
 		files: rel,
 		chars: full.length,
+		cut: full.length - kept.length,
 		truncated: true,
 	};
 }
@@ -524,6 +528,7 @@ export function loadRoot(dir: string, projectId?: string, maxChars = LIMITS.root
 		text: [global.text, project.text].filter(Boolean).join("\n\n"),
 		files: [...global.files, ...project.files],
 		chars: global.chars + project.chars,
+		cut: global.cut + project.cut,
 		truncated: global.truncated || project.truncated,
 		global,
 		project,
@@ -537,7 +542,7 @@ export function loadRootWithStatus(
 	maxChars = LIMITS.rootChars,
 ): { status: GrimoireStoreStatus; root: Root } {
 	const status = grimoireStoreStatus(dir);
-	const part = { text: "", files: [], chars: 0, truncated: false };
+	const part = { text: "", files: [], chars: 0, cut: 0, truncated: false };
 	const empty = { ...part, global: part, project: part, problems: [] };
 	if (status.state === "missing") return { status, root: empty };
 	if (status.state === "unreadable") return { status, root: empty };
@@ -557,27 +562,36 @@ export function loadRootWithStatus(
  */
 export function writeClaudeRoot(dir: string, maxChars = LIMITS.rootChars, projects = false): string {
 	const file = join(dir, ".sitra", "root.md");
-	const root = loadRoot(dir, undefined, projects ? Math.min(LIMITS.globalRootChars, maxChars) : maxChars);
-	let text = root.text ? `${root.text}\n` : "(The Grimoire root is empty.)\n";
-	if (projects) {
-		const global = entriesFor(listEntries(dir), undefined);
-		const search = `\`sitra grimoire search --dir ${shellQuote(dir)} "<words>"\` in the shell`;
-		text = [
-			root.text || "(The Grimoire global root is empty.)",
-			"",
-			"---",
-			"",
-			`## Global Grimoire entries (${global.length}, in ${dir})`,
-			"Entries for the project you work in come from sitra's session hook.",
-			...(global.length > 0 ? ["", catalogue(global, LIMITS.catalogueChars, search)] : []),
-			"",
-		].join("\n");
-	}
+	const { text } = claudeImport(dir, maxChars, projects);
 	if (!existsSync(file) || readFileSync(file, "utf8") !== text) {
 		mkdirSync(dirname(file), { recursive: true });
 		writeFileSync(file, text);
 	}
 	return file;
+}
+
+/** The text `writeClaudeRoot` writes, with the root it holds and, with projects in use, its global catalogue. */
+export function claudeImport(
+	dir: string,
+	maxChars = LIMITS.rootChars,
+	projects = false,
+): { text: string; root: Root; catalogue?: CatalogueFit } {
+	const root = loadRoot(dir, undefined, projects ? Math.min(LIMITS.globalRootChars, maxChars) : maxChars);
+	if (!projects) return { text: root.text ? `${root.text}\n` : "(The Grimoire root is empty.)\n", root };
+	const global = entriesFor(listEntries(dir), undefined);
+	const search = `\`sitra grimoire search --dir ${shellQuote(dir)} "<words>"\` in the shell`;
+	const listed = catalogueFit(global, LIMITS.catalogueChars, search);
+	const text = [
+		root.text || "(The Grimoire global root is empty.)",
+		"",
+		"---",
+		"",
+		`## Global Grimoire entries (${global.length}, in ${dir})`,
+		"Entries for the project you work in come from sitra's session hook.",
+		...(global.length > 0 ? ["", listed.text] : []),
+		"",
+	].join("\n");
+	return { text, root, catalogue: listed };
 }
 
 export interface SectionOptions {
@@ -596,6 +610,21 @@ export interface SectionOptions {
 	globalIn?: string;
 }
 
+/** How a section tells the agent to search: sitra's tool, or the shell command for this project. */
+function sectionSearch(dir: string, options: SectionOptions): string {
+	const scope = options.scope;
+	const flag = !scope ? "" : scope.project ? ` --project ${scope.project.id}` : " --global-only";
+	return options.shell
+		? `\`sitra grimoire search --dir ${shellQuote(dir)}${flag} "<words>"\` in the shell`
+		: "grimoire_search";
+}
+
+/** The catalogue `grimoireSection` lists for these entries and options (unless given `catalogueText`), with its counts. */
+export function sectionCatalogue(dir: string, entries: readonly Entry[], options: SectionOptions = {}): CatalogueFit {
+	if (entries.length === 0) return { text: "", shown: 0, total: 0 };
+	return catalogueFit(entries, options.catalogueChars, sectionSearch(dir, options));
+}
+
 /**
  * What every agent starts with: the root, the catalogue of approved entries, and how to find and propose more.
  * Stable across turns (it only changes when Grimoire does), so it stays in the cached part of the prompt. Pass no root
@@ -610,10 +639,7 @@ export function grimoireSection(
 ): string {
 	const who = options.who ?? "the person you work with";
 	const scope = options.scope;
-	const flag = !scope ? "" : scope.project ? ` --project ${scope.project.id}` : " --global-only";
-	const search = options.shell
-		? `\`sitra grimoire search --dir ${shellQuote(dir)}${flag} "<words>"\` in the shell`
-		: "grimoire_search";
+	const search = sectionSearch(dir, options);
 	const scopeField = scope?.project
 		? `; scope, ["${scope.project.id}"] for ${scope.project.label} only, or leave it out when it applies everywhere`
 		: "";
@@ -651,8 +677,7 @@ export function grimoireSection(
 			: []),
 		`Before each step, check whether an entry below touches what you are about to do; if one might, read it in full before acting. Don't guess what ${who} would want: look it up (${search}) or ask.`,
 	);
-	const listed =
-		options.catalogueText ?? (entries.length > 0 ? catalogue(entries, options.catalogueChars, search) : "");
+	const listed = options.catalogueText ?? sectionCatalogue(dir, entries, options).text;
 	if (listed) out.push("", listed);
 	out.push(
 		"",
@@ -775,9 +800,24 @@ export function catalogue(
 	maxChars = LIMITS.catalogueChars,
 	search = "grimoire_search",
 ): string {
+	return catalogueFit(entries, maxChars, search).text;
+}
+
+/** A catalogue and how many of its entries it lists; the rest are counted in its last line. */
+export interface CatalogueFit {
+	text: string;
+	shown: number;
+	total: number;
+}
+
+export function catalogueFit(
+	entries: readonly Entry[],
+	maxChars = LIMITS.catalogueChars,
+	search = "grimoire_search",
+): CatalogueFit {
 	const sorted = catalogueOrder(entries);
 	const all = sorted.map(catalogueLine);
-	if (all.join("\n").length <= maxChars) return all.join("\n");
+	if (all.join("\n").length <= maxChars) return { text: all.join("\n"), shown: sorted.length, total: sorted.length };
 	const more = (n: number) => `- …and ${n} more. Find them with ${search}.`;
 	const budget = maxChars - more(sorted.length).length - 1;
 	const lines: string[] = [];
@@ -787,8 +827,9 @@ export function catalogue(
 		lines.push(line);
 		used += line.length + 1;
 	}
-	lines.push(more(sorted.length - lines.length));
-	return lines.join("\n").slice(0, maxChars);
+	const shown = lines.length;
+	lines.push(more(sorted.length - shown));
+	return { text: lines.join("\n").slice(0, maxChars), shown, total: sorted.length };
 }
 
 export interface ProjectCatalogue {
